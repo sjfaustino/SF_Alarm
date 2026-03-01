@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 static uint32_t lastInputScan   = 0;
 static uint32_t lastSmsPoll     = 0;
+static uint32_t lastReportMs    = 0;
 
 // ---------------------------------------------------------------------------
 // Alarm Event Handler — sends SMS alerts
@@ -180,7 +181,34 @@ void loop()
         pollSmsInbox();
     }
 
-    // --- 5. Serial CLI ---
+    // --- 5. Periodic Status Report (GA09) ---
+    uint16_t reportInt = smsCmdGetReportInterval();
+    if (reportInt > 0) {
+        if (lastReportMs == 0) lastReportMs = now; // Initialize on first enable
+
+        if (now - lastReportMs >= (uint32_t)reportInt * 60 * 1000) {
+            lastReportMs = now;
+            
+            char buf[160];
+            uint16_t triggered = zonesGetTriggeredMask();
+            int trigCount = 0;
+            for (int i = 0; i < 16; i++) {
+                if (triggered & (1 << i)) trigCount++;
+            }
+
+            snprintf(buf, sizeof(buf),
+                     "SF_Alarm PERIODIC: [%s] Zones:%d triggered | Clear:%s",
+                     alarmGetStateStr(),
+                     trigCount,
+                     zonesAllClear() ? "YES" : "NO");
+
+            smsCmdSendAlert(buf);
+        }
+    } else {
+        lastReportMs = 0; // Reset if disabled
+    }
+
+    // --- 6. Serial CLI ---
     cliUpdate();
 
     // --- 6. Watchdog ---

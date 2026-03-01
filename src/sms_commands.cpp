@@ -15,6 +15,9 @@ static int  phoneCount = 0;
 // Custom alarm text per zone (GA09: #X#text)
 static char alarmTexts[MAX_ZONES][80];
 
+// Periodic report interval in minutes (GA09: %#Txx)
+static uint16_t reportIntervalMin = DEFAULT_REPORT_INTERVAL_MIN;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -423,10 +426,73 @@ static bool parseHelp(const char* body, const char* sender)
                   "SF_Alarm Cmds: "
                   "#01#phone# | #N#text | *NCxyz | "
                   "ARM/DISARM [pin] | STATUS | @#STATUS? | "
-                  "MUTE | BYPASS/UNBYPASS n | HELP");
+                  "MUTE | BYPASS/UNBYPASS n | %#Txx | @#ARM... | HELP");
         return true;
     }
     return false;
+}
+
+/// Parse: %#Txx  — set report timer in minutes
+static bool parseReportTimer(const char* body, const char* sender)
+{
+    // Format: %#T120
+    if (body[0] != '%' || body[1] != '#' || toupper(body[2]) != 'T') return false;
+
+    int minutes = atoi(body + 3);
+    if (minutes < 0) minutes = 0;
+    if (minutes > MAX_REPORT_INTERVAL_MIN) minutes = MAX_REPORT_INTERVAL_MIN;
+
+    smsCmdSetReportInterval(minutes);
+
+    char reply[80];
+    if (minutes == 0) {
+        snprintf(reply, sizeof(reply), "SF_Alarm: Periodic status report DISABLED");
+    } else {
+        snprintf(reply, sizeof(reply), "SF_Alarm: Periodic status report set to %d minutes", minutes);
+    }
+    sendReply(sender, reply);
+    return true;
+}
+
+/// Parse: @#ARMXXXXXXXX  — enable/disable zones via binary string
+static bool parseArmInputs(const char* body, const char* sender)
+{
+    // Format: @#ARM11110000 (8 bits for GA09 parity, or 16 bits for SF)
+    char upper[64];
+    strncpy(upper, body, sizeof(upper) - 1);
+    upper[sizeof(upper) - 1] = '\0';
+    for (int i = 0; upper[i]; i++) upper[i] = toupper(upper[i]);
+
+    if (strncmp(upper, "@#ARM", 5) != 0) return false;
+
+    const char* bits = upper + 5;
+    int len = strlen(bits);
+    if (len == 0) return false;
+
+    // GA09 parity: right to left for 8 zones
+    // We support up to 16.
+    for (int i = 0; i < len && i < MAX_ZONES; i++) {
+        // Bits are read right to left in some manuals, but usually index 0 is S1
+        // Waferstar: "read from right to left, 1st is S1" -> bits[len-1] is S1
+        int bitIdx = len - 1 - i;
+        bool enabled = (bits[bitIdx] == '1');
+        
+        ZoneConfig* cfg = zonesGetConfig(i);
+        if (cfg) cfg->enabled = enabled;
+    }
+
+    sendReply(sender, "SF_Alarm: Zone enable/disable configuration updated");
+    return true;
+}
+
+/// Parse: &...  — voice call numbers (unsupported)
+static bool parseCallNumbers(const char* body, const char* sender)
+{
+    // Format: &...
+    if (body[0] != '&') return false;
+
+    sendReply(sender, "SF_Alarm: Voice call alerts not supported by hardware. Use SMS alerts (#01#).");
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +550,9 @@ void smsCmdProcess(const char* sender, const char* body)
     if (parseArmDisarm(trimmed, sender)) return;       // ARM/DISARM
     if (parseMute(trimmed, sender)) return;            // MUTE
     if (parseBypass(trimmed, sender)) return;          // BYPASS/UNBYPASS
+    if (parseReportTimer(trimmed, sender)) return;     // %#Txx
+    if (parseArmInputs(trimmed, sender)) return;      // @#ARMxxx
+    if (parseCallNumbers(trimmed, sender)) return;     // &xxx
     if (parseHelp(trimmed, sender)) return;            // HELP
 
     Serial.printf("[CMD] Unknown command: \"%s\"\n", trimmed);
@@ -580,4 +649,15 @@ void smsCmdSetAlarmText(int zoneIndex, const char* text)
     strncpy(alarmTexts[zoneIndex], text, sizeof(alarmTexts[zoneIndex]) - 1);
     alarmTexts[zoneIndex][sizeof(alarmTexts[zoneIndex]) - 1] = '\0';
     Serial.printf("[CMD] Zone %d alarm text: \"%s\"\n", zoneIndex + 1, text);
+}
+
+uint16_t smsCmdGetReportInterval()
+{
+    return reportIntervalMin;
+}
+
+void smsCmdSetReportInterval(uint16_t minutes)
+{
+    reportIntervalMin = minutes;
+    Serial.printf("[CMD] Report interval set to %d minutes\n", minutes);
 }

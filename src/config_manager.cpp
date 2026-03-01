@@ -23,6 +23,7 @@ static const char* KEY_ROUTER_USER   = "routerUser";
 static const char* KEY_ROUTER_PASS   = "routerPass";
 static const char* KEY_WIFI_SSID     = "wifiSsid";
 static const char* KEY_WIFI_PASS     = "wifiPass";
+static const char* KEY_REPORT_DUR    = "reportDur";
 static const char* KEY_CONFIGURED    = "configured";
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,9 @@ void configLoad()
     alarmSetEntryDelay(prefs.getUShort(KEY_ENTRY_DELAY, DEFAULT_ENTRY_DELAY_S));
     alarmSetSirenDuration(prefs.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
     alarmSetSirenOutput(prefs.getUChar(KEY_SIREN_CH, 0));
+
+    // --- Periodic Report ---
+    smsCmdSetReportInterval(prefs.getUShort(KEY_REPORT_DUR, DEFAULT_REPORT_INTERVAL_MIN));
 
     // --- Phone numbers ---
     smsCmdClearPhones();
@@ -137,6 +141,9 @@ void configSave()
         prefs.putBool(key, info->config.enabled);
     }
 
+    // --- Periodic Report ---
+    prefs.putUShort(KEY_REPORT_DUR, smsCmdGetReportInterval());
+
     Serial.println("[CFG] Configuration saved");
 }
 
@@ -158,6 +165,7 @@ void configPrint()
     Serial.printf("  Entry delay: %d sec\n", prefs.getUShort(KEY_ENTRY_DELAY, DEFAULT_ENTRY_DELAY_S));
     Serial.printf("  Siren dur:   %d sec\n", prefs.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
     Serial.printf("  Siren ch:    %d\n", prefs.getUChar(KEY_SIREN_CH, 0));
+    Serial.printf("  Report int:  %d min\n", smsCmdGetReportInterval());
 
     int phoneCnt = smsCmdGetPhoneCount();
     Serial.printf("  Phones (%d):\n", phoneCnt);

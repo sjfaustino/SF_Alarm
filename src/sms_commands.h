@@ -38,6 +38,16 @@
 // Zone bypass:
 //   BYPASS <n>         Bypass zone n
 //   UNBYPASS <n>       Restore zone n
+//
+// Periodic Report:
+//   %#Txx              Set report interval in minutes (0=off, max 9999)
+//
+// Zone Arming (Binary):
+//   @#ARMXXXXXXXX      Enable/disable zones 1-8 via binary (GA09 parity)
+//   @#ARMXXXXXXXXXXXXXXXX Enable/disable zones 1-16 via binary (SF extension)
+//
+// Voice Call (Unsupported Placeholder):
+//   &#num1#num2#...    Set call update phone numbers (replies with unsupported msg)
 // ---------------------------------------------------------------------------
 
 /// Initialize the SMS command processor.
@@ -72,5 +82,11 @@ const char* smsCmdGetAlarmText(int zoneIndex);
 
 /// Set the custom alarm text for a zone (0-based).
 void smsCmdSetAlarmText(int zoneIndex, const char* text);
+
+/// Get the periodic status report interval in minutes (0 = disabled).
+uint16_t smsCmdGetReportInterval();
+
+/// Set the periodic status report interval in minutes.
+void smsCmdSetReportInterval(uint16_t minutes);
 
 #endif // SF_ALARM_SMS_COMMANDS_H

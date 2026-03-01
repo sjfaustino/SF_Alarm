@@ -60,6 +60,10 @@
 // SMS polling interval
 #define SMS_POLL_INTERVAL_MS     5000   // 5 seconds
 
+// Periodic status report (GA09: %#Txx)
+#define DEFAULT_REPORT_INTERVAL_MIN  0       // 0 = disabled
+#define MAX_REPORT_INTERVAL_MIN      9999
+
 // Input scan interval
 #define INPUT_SCAN_INTERVAL_MS   20     // 50 Hz scan rate
 

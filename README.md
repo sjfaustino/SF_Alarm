@@ -709,6 +709,9 @@ module**, extended to support all **16 channels** of the KC868-A16.
 | `MUTE`        | Silence active siren             | `SF_Alarm: Siren MUTED.`                       |
 | `BYPASS 3`    | Bypass zone 3                    | `SF_Alarm: Zone 3 BYPASSED`                    |
 | `UNBYPASS 3`  | Restore zone 3                   | `SF_Alarm: Zone 3 restored`                    |
+| `%#T120`      | Set report interval (minutes)    | `SF_Alarm: Periodic status report set to 120 minutes` |
+| `@#ARM11110000`| Binary zone enable (S1-S8)      | `SF_Alarm: Zone enable/disable configuration updated` |
+| `&...`        | Call numbers (voice)             | `SF_Alarm: Voice call alerts not supported...` |
 | `HELP`        | List available commands          | (command list summary)                          |
 
 ### SMS Alert Messages
