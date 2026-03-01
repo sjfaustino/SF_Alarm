@@ -33,6 +33,7 @@ extended to support all 16 zones.
 - [First-Time Setup](#first-time-setup)
 - [SMS Command Reference (GA09 Compatible)](#sms-command-reference-ga09-compatible)
 - [Serial CLI Reference](#serial-cli-reference)
+- [Web Dashboard](#web-dashboard)
 - [Configuration & Persistence](#configuration--persistence)
 - [Alarm System Operation](#alarm-system-operation)
 - [SMS Gateway (Cudy LT500D)](#sms-gateway-cudy-lt500d)
@@ -66,6 +67,7 @@ extended to support all 16 zones.
   |  [x] Zone bypass/unbypass                                        |
   |  [x] Input debouncing (50ms default, configurable)               |
   |  [x] Full serial CLI for local configuration & diagnostics       |
+  |  [x] Web Dashboard for real-time monitoring & control           |
   |  [x] NVS-based persistent configuration (survives power cycles)  |
   |  [x] Wi-Fi connectivity with auto-reconnect                     |
   |  [x] Event-driven SMS notifications                              |
@@ -170,6 +172,14 @@ extended to support all 16 zones.
   │                                     └──────────┬───────────┘    │
   │                                                │ Wi-Fi/ETH      │
   │                                     ┌──────────▼───────────┐    │
+  │                                     │  Local Network (LAN) │    │
+  │                                     │  ┌────────────────┐  │    │
+  │                                     │  │ Web Browser    │  │    │
+  │                                     │  │ (Dashboard)    │  │    │
+  │                                     │  └───────┬────────┘  │    │
+  │                                     └──────────┼───────────┘    │
+  │                                                │                │
+  │                                     ┌──────────▼───────────┐    │
   │                                     │  Cudy LT500D Router  │    │
   │                                     │  ┌────────────────┐  │    │
   │                                     │  │  LuCI Web UI   │  │    │
@@ -235,14 +245,22 @@ extended to support all 16 zones.
   │   └────────────────────────────────────────────────────┘   │
   │                                                             │
   │   ┌────────────────────┐    ┌────────────────────────┐     │
-  │   │    serial_cli       │    │    config_manager      │     │
+  │   │    serial_cli       │    │      web_server        │     │
   │   │  ┌──────────────┐  │    │  ┌──────────────────┐  │     │
-  │   │  │ 30+ commands │  │    │  │ ESP32 NVS        │  │     │
-  │   │  │ line editor  │  │    │  │ save/load all    │  │     │
-  │   │  │ backspace    │  │    │  │ factory reset    │  │     │
-  │   │  │ live monitor │  │    │  └──────────────────┘  │     │
-  │   │  └──────────────┘  │    └────────────────────────┘     │
-  │   └────────────────────┘                                    │
+  │   │  │ 30+ commands │  │    │  │ PsychicHttp      │  │     │
+  │   │  │ line editor  │  │    │  │ REST API         │  │     │
+  │   │  │ backspace    │  │    │  │ Embedded Dashboard│  │     │
+  │   │  └──────────────┘  │    │  └──────────────────┘  │     │
+  │   └────────────────────┘    └────────────┬───────────┘     │
+  │                                          │                  │
+  │   ┌────────────────────┐    ┌────────────▼───────────┐     │
+  │   │   config_manager   │    │    web_dashboard       │     │
+  │   │  ┌──────────────┐  │    │  ┌──────────────────┐  │     │
+  │   │  │ ESP32 NVS        │  │    │  │ Real-time status │  │     │
+  │   │  │ save/load all    │  │    │  │ Control panel    │  │     │
+  │   │  │ factory reset    │  │    │  │ Configuration    │  │     │
+  │   │  └──────────────┘  │    │  └──────────────────┘  │     │
+  │   └────────────────────┘    └────────────────────────┘     │
   └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -793,6 +811,70 @@ Live input monitor (press any key to stop)...
   Inputs: 0x0000 | 1:0 2:0 3:0 4:0 5:0 6:0 7:0 8:0 9:0 10:0 11:0 12:0 13:0 14:0 15:0 16:0
 Monitor stopped
 ```
+
+---
+
+## Web Dashboard
+
+SF_Alarm includes a built-in, mobile-friendly web dashboard for real-time monitoring and control of your alarm system. It is served directly from the ESP32 using the high-performance **PsychicHttp** library.
+
+### Accessing the Dashboard
+
+1.  Ensure your ESP32 is connected to Wi-Fi.
+2.  Find the ESP32's IP address via the serial CLI (`status` or `network` command).
+3.  Open a web browser and navigate to `http://<ESP32-IP>/`.
+
+### Dashboard Interface (Mockup)
+
+```text
+  +------------------------------------------------------------------+
+  |  SF_Alarm Dashboard                                      [ 📶 ]  |
+  +------------------------------------------------------------------+
+  |                                                                  |
+  |  +---------------------------+    +---------------------------+  |
+  |  |      ALARM STATUS         |    |      SYSTEM INFO          |  |
+  |  |  +---------------------+  |    |  IP: 192.168.10.105       |  |
+  |  |  |       DISARMED      |  |    |  RSSI: -45 dBm            |  |
+  |  |  +---------------------+  |    |  Uptime: 01:24:12         |  |
+  |  |                           |    |  Free Heap: 182 KB        |  |
+  |  |  [ ARM ] [ HOME ] [ MUTE ]|    |                           |  |
+  |  +---------------------------+    +---------------------------+  |
+  |                                                                  |
+  |  ZONE STATUS                                                     |
+  |  +----------+  +----------+  +----------+  +----------+          |
+  |  |  Zone 1  |  |  Zone 2  |  |  Zone 3  |  |  Zone 4  |          |
+  |  | [NORMAL] |  | [ALERT!] |  | [BYPASS] |  | [NORMAL] |          |
+  |  +----------+  +----------+  +----------+  +----------+          |
+  |                                                                  |
+  |  OUTPUT CONTROL                                                  |
+  |  [x] Out 1   [ ] Out 2   [ ] Out 3   [ ] Out 4                   |
+  |  [ ] Out 5   [ ] Out 6   [ ] Out 7   [ ] Out 8                   |
+  |                                                                  |
+  +------------------------------------------------------------------+
+```
+
+### Key Features
+
+- **Real-time Updates**: The dashboard automatically refreshes every 2 seconds to show the latest sensor states and alarm status.
+- **Arm/Disarm Control**: Securely arm or disarm the system from your phone or PC. A PIN code modal will appear for verification.
+- **Zone Management**: View the status of all 16 zones at a glance. Easily bypass problematic zones directly from the UI.
+- **Output Toggles**: Manually control any of the 16 MOSFET outputs (relays, strobes, etc.) with simple checkboxes.
+- **Responsive Design**: Dark-themed, modern interface that works perfectly on both desktop monitors and mobile devices.
+
+### REST API Reference (Simple)
+
+For integration with Home Assistant or other automation platforms, the following endpoints are available:
+
+| Method | Endpoint        | Description                          |
+|--------|-----------------|--------------------------------------|
+| `GET`  | `/api/status`   | Get full system status as JSON       |
+| `POST` | `/api/arm`      | Arm system (`{"pin":"...", "mode":"away|home"}`) |
+| `POST` | `/api/disarm`   | Disarm system (`{"pin":"..."}`)      |
+| `POST` | `/api/mute`     | Silence the siren                    |
+| `POST` | `/api/bypass`   | Bypass zone (`{"zone":0..15, "bypass":true|false}`) |
+| `POST` | `/api/output`   | Toggle output (`{"channel":0..15, "state":true|false}`) |
+
+---
 
 ---
 

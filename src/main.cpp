@@ -8,6 +8,7 @@
 #include "config_manager.h"
 #include "network.h"
 #include "serial_cli.h"
+#include "web_server.h"
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -139,6 +140,10 @@ void setup()
 
     // --- Load saved config (overrides defaults) ---
     configLoad();
+
+    // --- Web Dashboard ---
+    Serial.println("[INIT] Web Dashboard...");
+    webServerInit();
 
     // --- Watchdog ---
     // esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);

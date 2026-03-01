@@ -15,6 +15,7 @@ Detailed technical documentation for every module in the SF_Alarm firmware.
 - [src/config_manager — NVS Persistence](#srcconfig_manager--nvs-persistence)
 - [src/network — Wi-Fi Connectivity](#srcnetwork--wifi-connectivity)
 - [src/serial_cli — Serial Command-Line Interface](#srcserial_cli--serial-command-line-interface)
+- [src/web_server & web_ui — Web Dashboard & REST API](#srcweb_server--web_ui--web-dashboard--rest-api)
 - [src/main.cpp — Application Entry Point](#srcmaincpp--application-entry-point)
 - [Data Flow & Timing](#data-flow--timing)
 - [Memory Map](#memory-map)
@@ -689,6 +690,110 @@ baud. Supports line editing with backspace, command parsing, and over
              reboot → ESP.restart()
              help   → printHelp()
 ```
+
+---
+
+---
+
+## src/web_server & web_ui — Web Dashboard & REST API
+
+This module provides a local web-based interface for monitoring and controlling the alarm system. It is built using the **PsychicHttp** library, which leverages the ESP-IDF HTTP server for robust, asynchronous performance.
+
+> [!NOTE]
+> For a more detailed guide on the frontend architecture, polling logic, and customization, see the dedicated [Web Dashboard Guide](WEB_DASHBOARD.md).
+
+### Architecture
+
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │                        web_server                           │
+  │                                                             │
+  │   webServerInit():                                          │
+  │     1. Set max_uri_handlers = 20                            │
+  │     2. Register endpoints (GET / , GET/POST /api/...)       │
+  │     3. server.begin()                                       │
+  │                                                             │
+  │   ┌────────────────────┐    ┌────────────────────────┐     │
+  │   │      Endpoints     │    │      PsychicHttp       │     │
+  │   │  ┌──────────────┐  │    │  ┌──────────────────┐  │     │
+  │   │  │ handleRoot   │──┼────┼──► WEB_UI_HTML      │  │     │
+  │   │  │ handleStatus │──┼────┼──► JSON Generator   │  │     │
+  │   │  │ handleAction │──┼────┼──► Command Dispatch │  │     │
+  │   │  └──────────────┘  │    │  └──────────────────┘  │     │
+  │   └────────────────────┘    └────────────────────────┘     │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+### Dashboard Content (web_ui.h)
+
+The dashboard is a **Single Page Application (SPA)** stored as a constant string literal (`WEB_UI_HTML`) in the ESP32's flash memory. It includes:
+- **HTML5 Semantic Structure**: Header, status card, zone grid, output list, and modals.
+- **CSS3 Styling**: A modern "Dark Mode" theme with glassmorphism effects and responsive flexbox/grid layouts.
+- **Vanilla JavaScript**: 
+  - **Polling**: Fetches `/api/status` every 2000ms.
+  - **Dynamic Rendering**: Rebuilds the zone grid and output list without page reloads.
+  - **Modals**: Handles PIN entry for sensitive actions.
+  - **State Management**: Updates UI elements (colors, badges, text) based on the latest JSON data.
+
+### REST API Specification
+
+The server listens on **port 80** and provides the following endpoints:
+
+#### 1. System Status
+- **URL**: `/api/status`
+- **Method**: `GET`
+- **Response**: Full system state in JSON.
+  ```json
+  {
+    "alarm": {
+      "state": "DISARMED",
+      "stateCode": 0,
+      "delayRemaining": 0
+    },
+    "zones": [
+      {
+        "index": 0,
+        "name": "Front Door",
+        "state": "NORMAL",
+        "stateCode": 0,
+        "enabled": true
+      }
+    ],
+    "outputs": 0,
+    "network": { "ip": "192.168.10.105", "rssi": -45 },
+    "system": { "uptime": 3600, "freeHeap": 182000, "version": "0.1.0" }
+  }
+  ```
+
+#### 2. Arm System
+- **URL**: `/api/arm`
+- **Method**: `POST`
+- **Body**: `{"pin": "1234", "mode": "away"|"home"}`
+- **Behavior**: Calls `alarmArmAway()` or `alarmArmHome()`.
+
+#### 3. Disarm System
+- **URL**: `/api/disarm`
+- **Method**: `POST`
+- **Body**: `{"pin": "1234"}`
+- **Behavior**: Calls `alarmDisarm()`.
+
+#### 4. Zone Bypass
+- **URL**: `/api/bypass`
+- **Method**: `POST`
+- **Body**: `{"zone": 0..15, "bypass": true|false}`
+- **Behavior**: Calls `zonesSetBypassed()`.
+
+#### 5. Output Control
+- **URL**: `/api/output`
+- **Method**: `POST`
+- **Body**: `{"channel": 0..15, "state": true|false}`
+- **Behavior**: Calls `ioExpanderSetOutput()`.
+
+### API Reference
+
+| Function          | Return | Description                                  |
+|-------------------|--------|----------------------------------------------|
+| `webServerInit()` | `void` | Initialize server, register routes, and start |
 
 ---
 
