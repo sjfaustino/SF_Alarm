@@ -16,6 +16,7 @@
 static uint32_t lastInputScan   = 0;
 static uint32_t lastSmsPoll     = 0;
 static uint32_t lastReportMs    = 0;
+static bool     lastAllClear    = true;
 
 // ---------------------------------------------------------------------------
 // Alarm Event Handler — sends SMS alerts
@@ -29,7 +30,16 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
         case EVT_ALARM_TRIGGERED:
             // Use custom alarm text for the triggered zone if available
             snprintf(msg, sizeof(msg), "SF_Alarm ALERT: %s", details);
-            smsCmdSendAlert(msg);
+            
+            // Check working mode (M1=SMS, M2=Call, M3=Both)
+            if (smsCmdGetWorkingMode() != MODE_CALL) {
+                smsCmdSendAlert(msg);
+            } else {
+                // Call mode simulation (we can't call, so we send a voice-prefixed SMS)
+                char voiceMsg[180];
+                snprintf(voiceMsg, sizeof(voiceMsg), "[VOICE CALL] %s", msg);
+                smsCmdSendAlert(voiceMsg);
+            }
             break;
 
         case EVT_ARMED_AWAY:
@@ -167,6 +177,14 @@ void loop()
 
         uint16_t inputs = ioExpanderReadInputs();
         zonesUpdate(inputs);
+
+        // --- Recovery alert (GA09: #0#) ---
+        bool currentAllClear = zonesAllClear();
+        if (currentAllClear && !lastAllClear) {
+            // All zones just returned to normal
+            smsCmdSendAlert(smsCmdGetRecoveryText());
+        }
+        lastAllClear = currentAllClear;
     }
 
     // --- 2. Alarm State Machine ---

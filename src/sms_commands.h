@@ -42,8 +42,14 @@
 // Periodic Report:
 //   %#Txx              Set report interval in minutes (0=off, max 9999)
 //
+// Working Mode (GA09):
+//   %#M1 (SMS), %#M2 (Call), %#M3 (Both)
+//
+// Recovery Text (GA09):
+//   #0#text            Set SMS text sent when all zones return to normal
+//
 // Zone Arming (Binary):
-//   @#ARMXXXXXXXX      Enable/disable zones 1-8 via binary (GA09 parity)
+//   @@#ARMXXXXXXXX     Enable/disable zones 1-8 via binary (GA09 parity)
 //   @#ARMXXXXXXXXXXXXXXXX Enable/disable zones 1-16 via binary (SF extension)
 //
 // Voice Call (Unsupported Placeholder):
@@ -88,5 +94,24 @@ uint16_t smsCmdGetReportInterval();
 
 /// Set the periodic status report interval in minutes.
 void smsCmdSetReportInterval(uint16_t minutes);
+
+/// Get the custom recovery text (sent when all zones are clear).
+const char* smsCmdGetRecoveryText();
+
+/// Set the custom recovery text.
+void smsCmdSetRecoveryText(const char* text);
+
+/// Working modes for GA09 compatibility
+enum WorkingMode {
+    MODE_SMS = 1,
+    MODE_CALL = 2,
+    MODE_BOTH = 3
+};
+
+/// Get the current operational working mode.
+WorkingMode smsCmdGetWorkingMode();
+
+/// Set the current operational working mode.
+void smsCmdSetWorkingMode(WorkingMode mode);
 
 #endif // SF_ALARM_SMS_COMMANDS_H

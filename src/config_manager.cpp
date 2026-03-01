@@ -23,6 +23,8 @@ static const char* KEY_ROUTER_USER   = "routerUser";
 static const char* KEY_ROUTER_PASS   = "routerPass";
 static const char* KEY_WIFI_SSID     = "wifiSsid";
 static const char* KEY_WIFI_PASS     = "wifiPass";
+static const char* KEY_RECOVERY_TXT  = "recStr";
+static const char* KEY_ALARM_MODE    = "alarmMode";
 static const char* KEY_REPORT_DUR    = "reportDur";
 static const char* KEY_CONFIGURED    = "configured";
 
@@ -57,6 +59,10 @@ void configLoad()
 
     // --- Periodic Report ---
     smsCmdSetReportInterval(prefs.getUShort(KEY_REPORT_DUR, DEFAULT_REPORT_INTERVAL_MIN));
+
+    // --- Recovery & Mode ---
+    smsCmdSetRecoveryText(prefs.getString(KEY_RECOVERY_TXT, "SF_Alarm: All zones restored to normal.").c_str());
+    smsCmdSetWorkingMode((WorkingMode)prefs.getUChar(KEY_ALARM_MODE, (uint8_t)MODE_SMS));
 
     // --- Phone numbers ---
     smsCmdClearPhones();
@@ -141,8 +147,10 @@ void configSave()
         prefs.putBool(key, info->config.enabled);
     }
 
-    // --- Periodic Report ---
+    // --- Periodic Report & Recovery ---
     prefs.putUShort(KEY_REPORT_DUR, smsCmdGetReportInterval());
+    prefs.putString(KEY_RECOVERY_TXT, smsCmdGetRecoveryText());
+    prefs.putUChar(KEY_ALARM_MODE, (uint8_t)smsCmdGetWorkingMode());
 
     Serial.println("[CFG] Configuration saved");
 }
@@ -166,6 +174,8 @@ void configPrint()
     Serial.printf("  Siren dur:   %d sec\n", prefs.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
     Serial.printf("  Siren ch:    %d\n", prefs.getUChar(KEY_SIREN_CH, 0));
     Serial.printf("  Report int:  %d min\n", smsCmdGetReportInterval());
+    Serial.printf("  Alarm mode:  %d (1:SMS, 2:Call, 3:Both)\n", (int)smsCmdGetWorkingMode());
+    Serial.printf("  Recovery:    %s\n", smsCmdGetRecoveryText());
 
     int phoneCnt = smsCmdGetPhoneCount();
     Serial.printf("  Phones (%d):\n", phoneCnt);

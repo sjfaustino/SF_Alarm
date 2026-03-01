@@ -18,6 +18,12 @@ static char alarmTexts[MAX_ZONES][80];
 // Periodic report interval in minutes (GA09: %#Txx)
 static uint16_t reportIntervalMin = DEFAULT_REPORT_INTERVAL_MIN;
 
+// Custom recovery text (GA09: #0#text)
+static char recoveryText[80] = "SF_Alarm: All zones restored to normal.";
+
+// Working mode (GA09: %#M1=SMS, 2=Call, 3=Both)
+static WorkingMode currentMode = MODE_SMS;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -71,16 +77,19 @@ static void trimStr(char* str)
 /// Parse: #NN#phone_number#  — set phone slot NN (01–05)
 static bool parseSetPhone(const char* body, const char* sender)
 {
-    // Format: #01#1234567890#
-    if (body[0] != '#') return false;
-    if (!isdigit(body[1]) || !isdigit(body[2])) return false;
-    if (body[3] != '#') return false;
+    // Format: #01#1234567890# or @@#01#1234567890#
+    const char* ptr = body;
+    if (ptr[0] == '@' && ptr[1] == '@') ptr += 2; // Support @@# variant
 
-    int slot = (body[1] - '0') * 10 + (body[2] - '0');
+    if (ptr[0] != '#') return false;
+    if (!isdigit(ptr[1]) || !isdigit(ptr[2])) return false;
+    if (ptr[3] != '#') return false;
+
+    int slot = (ptr[1] - '0') * 10 + (ptr[2] - '0');
     if (slot < 1 || slot > MAX_PHONE_NUMBERS) return false;
 
     // Extract phone number (everything between #NN# and trailing #)
-    const char* numStart = body + 4;
+    const char* numStart = ptr + 4;
     const char* numEnd = strchr(numStart, '#');
 
     char phone[MAX_PHONE_LEN];
@@ -109,12 +118,16 @@ static bool parseSetPhone(const char* body, const char* sender)
 /// Parse: @#num1#num2#...  — set multiple phone numbers at once
 static bool parseSetMultiplePhones(const char* body, const char* sender)
 {
-    // Format: @#1234567890#0987654321#...
-    if (body[0] != '@' || body[1] != '#') return false;
+    // Format: @#1234567890#0987654321#... or @@#1234567890#0987654321#...
+    const char* ptr = body;
+    if (ptr[0] == '@' && ptr[1] == '@') ptr += 2;
+    else if (ptr[0] == '@') ptr += 1;
+    else return false;
+
+    if (ptr[0] != '#') return false;
+    ptr++; // skip #
 
     smsCmdClearPhones();
-
-    const char* ptr = body + 2;  // Skip @#
     int slot = 0;
     char phone[MAX_PHONE_LEN];
 
@@ -159,10 +172,10 @@ static bool parseSetMultiplePhones(const char* body, const char* sender)
 /// Parse: #N#Alarm text  — set alarm text for zone N (1–16)
 static bool parseSetAlarmText(const char* body, const char* sender)
 {
-    // Format: #1#Front door opened  or  #12#Garage sensor
+    // Format: #1#Front door opened  or  #12#Garage sensor or #0#All clear
     if (body[0] != '#') return false;
 
-    int zone = 0;
+    int zone = -1;
     int idx = 1;
 
     // Parse zone number (1 or 2 digits)
@@ -179,6 +192,13 @@ static bool parseSetAlarmText(const char* body, const char* sender)
 
     if (body[idx] != '#') return false;
     idx++;
+
+    // Recovery text support (GA09: #0#)
+    if (zone == 0) {
+        smsCmdSetRecoveryText(body + idx);
+        sendReply(sender, "SF_Alarm: Recovery text updated");
+        return true;
+    }
 
     // Check zone is valid (1–16) and this isn't a phone number command
     if (zone < 1 || zone > MAX_ZONES) return false;
@@ -211,12 +231,15 @@ static bool parseSetAlarmText(const char* body, const char* sender)
 static bool parseSetNC(const char* body, const char* sender)
 {
     // Formats:
-    //   *NC0      — all zones NO
-    //   *NCALL    — all zones NC
-    //   *NC246    — set zones 2,4,6 as NC, rest as NO
-    //   *NC1234   — zones 1-4 as NC (single digits only for zones 1-9)
-    //   NOTE: For zones 10-16 we extend: *NCa=10, b=11... or just *NC10,12,16
-    if (body[0] != '*') return false;
+    //   *NC0 / **NC0     — all zones NO
+    //   *NCALL / **NCALL — all zones NC
+    //   *NC246 / **NC246 — set zones 2,4,6 as NC
+    const char* start = body;
+    if (start[0] == '*' && start[1] == '*') start += 2;
+    else if (start[0] == '*') start += 1;
+    else return false;
+
+    if (toupper(start[0]) != 'N' || toupper(start[1]) != 'C') return false;
 
     char upper[64];
     strncpy(upper, body, sizeof(upper) - 1);
@@ -290,7 +313,7 @@ static bool parseStatus(const char* body, const char* sender)
     upper[sizeof(upper) - 1] = '\0';
     for (int i = 0; upper[i]; i++) upper[i] = toupper(upper[i]);
 
-    if (strcmp(upper, "@#STATUS?") != 0 && strcmp(upper, "STATUS") != 0) {
+    if (strcmp(upper, "@#STATUS?") != 0 && strcmp(upper, "@@#STATUS?") != 0 && strcmp(upper, "STATUS") != 0) {
         return false;
     }
 
@@ -457,15 +480,17 @@ static bool parseReportTimer(const char* body, const char* sender)
 /// Parse: @#ARMXXXXXXXX  — enable/disable zones via binary string
 static bool parseArmInputs(const char* body, const char* sender)
 {
-    // Format: @#ARM11110000 (8 bits for GA09 parity, or 16 bits for SF)
+    // Format: @@#ARM11110000 or @#ARM11111111 (8 bits for GA09, or 16 for SF)
     char upper[64];
     strncpy(upper, body, sizeof(upper) - 1);
     upper[sizeof(upper) - 1] = '\0';
     for (int i = 0; upper[i]; i++) upper[i] = toupper(upper[i]);
 
-    if (strncmp(upper, "@#ARM", 5) != 0) return false;
-
-    const char* bits = upper + 5;
+    const char* bits = NULL;
+    if (strncmp(upper, "@@#ARM", 6) == 0) bits = upper + 6;
+    else if (strncmp(upper, "@#ARM", 5) == 0) bits = upper + 5;
+    
+    if (bits == NULL) return false;
     int len = strlen(bits);
     if (len == 0) return false;
 
@@ -492,6 +517,24 @@ static bool parseCallNumbers(const char* body, const char* sender)
     if (body[0] != '&') return false;
 
     sendReply(sender, "SF_Alarm: Voice call alerts not supported by hardware. Use SMS alerts (#01#).");
+    return true;
+}
+
+/// Parse: %#Mx  — set working mode (1:SMS, 2:Call, 3:Both)
+static bool parseWorkingMode(const char* body, const char* sender)
+{
+    // Format: %#M1
+    if (body[0] != '%' || body[1] != '#' || toupper(body[2]) != 'M') return false;
+
+    int m = body[3] - '0';
+    if (m < 1 || m > 3) return false;
+
+    smsCmdSetWorkingMode((WorkingMode)m);
+
+    char reply[80];
+    const char* modeStrs[] = {"", "SMS ONLY", "CALL ONLY", "SMS & CALL"};
+    snprintf(reply, sizeof(reply), "SF_Alarm: Working mode set to %s", modeStrs[m]);
+    sendReply(sender, reply);
     return true;
 }
 
@@ -551,6 +594,7 @@ void smsCmdProcess(const char* sender, const char* body)
     if (parseMute(trimmed, sender)) return;            // MUTE
     if (parseBypass(trimmed, sender)) return;          // BYPASS/UNBYPASS
     if (parseReportTimer(trimmed, sender)) return;     // %#Txx
+    if (parseWorkingMode(trimmed, sender)) return;     // %#Mx
     if (parseArmInputs(trimmed, sender)) return;      // @#ARMxxx
     if (parseCallNumbers(trimmed, sender)) return;     // &xxx
     if (parseHelp(trimmed, sender)) return;            // HELP
@@ -660,4 +704,27 @@ void smsCmdSetReportInterval(uint16_t minutes)
 {
     reportIntervalMin = minutes;
     Serial.printf("[CMD] Report interval set to %d minutes\n", minutes);
+}
+
+const char* smsCmdGetRecoveryText()
+{
+    return recoveryText;
+}
+
+void smsCmdSetRecoveryText(const char* text)
+{
+    strncpy(recoveryText, text, sizeof(recoveryText) - 1);
+    recoveryText[sizeof(recoveryText) - 1] = '\0';
+    Serial.printf("[CMD] Recovery text: \"%s\"\n", recoveryText);
+}
+
+WorkingMode smsCmdGetWorkingMode()
+{
+    return currentMode;
+}
+
+void smsCmdSetWorkingMode(WorkingMode mode)
+{
+    currentMode = mode;
+    Serial.printf("[CMD] Working mode: %d\n", (int)mode);
 }

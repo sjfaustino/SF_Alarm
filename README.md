@@ -704,13 +704,16 @@ module**, extended to support all **16 channels** of the KC868-A16.
 
 | SMS Command    | Description                      | Reply                                          |
 |---------------|----------------------------------|-------------------------------------------------|
-| `@#STATUS?`   | Query full system status         | `SF_Alarm [ARMED_AWAY] Zones:0 triggered ...`  |
-| `STATUS`      | Query system status (alias)      | (same as above)                                 |
+| `@@#STATUS?`  | Query system status (PDF sync)   | `SF_Alarm [DISARMED] Zones:0 triggered...`    |
+| `STATUS`      | Query system status (alias)      | `SF_Alarm [DISARMED] Zones:0 triggered...`    |
 | `MUTE`        | Silence active siren             | `SF_Alarm: Siren MUTED.`                       |
 | `BYPASS 3`    | Bypass zone 3                    | `SF_Alarm: Zone 3 BYPASSED`                    |
 | `UNBYPASS 3`  | Restore zone 3                   | `SF_Alarm: Zone 3 restored`                    |
 | `%#T120`      | Set report interval (minutes)    | `SF_Alarm: Periodic status report set to 120 minutes` |
-| `@#ARM11110000`| Binary zone enable (S1-S8)      | `SF_Alarm: Zone enable/disable configuration updated` |
+| `%#M3`        | Working Mode (1:SMS, 2:Call, 3:Both) | `SF_Alarm: Working mode set to SMS & CALL` |
+| `#0#System OK`| Set Recovery SMS Text            | `SF_Alarm: Recovery text updated`              |
+| `**NC24`      | Set zones 2,4 as NC (PDF sync)   | `SF_Alarm: NC zones updated`                   |
+| `@@#ARM11110000`| Binary zone enable (S1-S8)    | `SF_Alarm: Zone enable/disable configuration updated` |
 | `&...`        | Call numbers (voice)             | `SF_Alarm: Voice call alerts not supported...` |
 | `HELP`        | List available commands          | (command list summary)                          |
 
