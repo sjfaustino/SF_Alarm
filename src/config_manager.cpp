@@ -4,6 +4,9 @@
 #include "alarm_zones.h"
 #include "sms_gateway.h"
 #include "sms_commands.h"
+#include "whatsapp_client.h"
+#include "mqtt_client.h"
+#include "network.h"
 #include <Preferences.h>
 
 // ---------------------------------------------------------------------------
@@ -26,6 +29,14 @@ static const char* KEY_WIFI_PASS     = "wifiPass";
 static const char* KEY_RECOVERY_TXT  = "recStr";
 static const char* KEY_ALARM_MODE    = "alarmMode";
 static const char* KEY_REPORT_DUR    = "reportDur";
+static const char* KEY_WA_PHONE      = "waPhone";
+static const char* KEY_WA_APIKEY     = "waApiKey";
+static const char* KEY_WA_MODE       = "waMode";
+static const char* KEY_MQTT_SERVER   = "mqServer";
+static const char* KEY_MQTT_PORT     = "mqPort";
+static const char* KEY_MQTT_USER     = "mqUser";
+static const char* KEY_MQTT_PASS     = "mqPass";
+static const char* KEY_MQTT_CLIENTID = "mqClientId";
 static const char* KEY_CONFIGURED    = "configured";
 
 // ---------------------------------------------------------------------------
@@ -63,6 +74,20 @@ void configLoad()
     // --- Recovery & Mode ---
     smsCmdSetRecoveryText(prefs.getString(KEY_RECOVERY_TXT, "SF_Alarm: All zones restored to normal.").c_str());
     smsCmdSetWorkingMode((WorkingMode)prefs.getUChar(KEY_ALARM_MODE, (uint8_t)MODE_SMS));
+
+    // --- WhatsApp ---
+    String waPh = prefs.getString(KEY_WA_PHONE, "");
+    String waKey = prefs.getString(KEY_WA_APIKEY, "");
+    WhatsAppMode waM = (WhatsAppMode)prefs.getUChar(KEY_WA_MODE, (uint8_t)WA_MODE_SMS);
+    whatsappSetConfig(waPh.c_str(), waKey.c_str(), waM);
+
+    // --- MQTT ---
+    String mqServer = prefs.getString(KEY_MQTT_SERVER, "");
+    uint16_t mqPort = prefs.getUShort(KEY_MQTT_PORT, 1883);
+    String mqUser = prefs.getString(KEY_MQTT_USER, "");
+    String mqPass = prefs.getString(KEY_MQTT_PASS, "");
+    String mqClientId = prefs.getString(KEY_MQTT_CLIENTID, "SF_Alarm");
+    mqttSetConfig(mqServer.c_str(), mqPort, mqUser.c_str(), mqPass.c_str(), mqClientId.c_str());
 
     // --- Phone numbers ---
     smsCmdClearPhones();
@@ -152,6 +177,18 @@ void configSave()
     prefs.putString(KEY_RECOVERY_TXT, smsCmdGetRecoveryText());
     prefs.putUChar(KEY_ALARM_MODE, (uint8_t)smsCmdGetWorkingMode());
 
+    // --- WhatsApp ---
+    prefs.putString(KEY_WA_PHONE, whatsappGetPhone());
+    prefs.putString(KEY_WA_APIKEY, whatsappGetApiKey());
+    prefs.putUChar(KEY_WA_MODE, (uint8_t)whatsappGetMode());
+
+    // --- MQTT ---
+    prefs.putString(KEY_MQTT_SERVER, mqttGetServer());
+    prefs.putUShort(KEY_MQTT_PORT, mqttGetPort());
+    prefs.putString(KEY_MQTT_USER, mqttGetUser());
+    prefs.putString(KEY_MQTT_PASS, mqttGetPass());
+    prefs.putString(KEY_MQTT_CLIENTID, mqttGetClientId());
+
     Serial.println("[CFG] Configuration saved");
 }
 
@@ -176,6 +213,10 @@ void configPrint()
     Serial.printf("  Report int:  %d min\n", smsCmdGetReportInterval());
     Serial.printf("  Alarm mode:  %d (1:SMS, 2:Call, 3:Both)\n", (int)smsCmdGetWorkingMode());
     Serial.printf("  Recovery:    %s\n", smsCmdGetRecoveryText());
+    Serial.printf("  WA Phone:    %s\n", whatsappGetPhone());
+    Serial.printf("  WA Mode:     %d (1:SMS, 2:WA, 3:Both)\n", (int)whatsappGetMode());
+    Serial.printf("  MQTT Server: %s:%d\n", mqttGetServer(), mqttGetPort());
+    Serial.printf("  MQTT User:   %s\n", mqttGetUser());
 
     int phoneCnt = smsCmdGetPhoneCount();
     Serial.printf("  Phones (%d):\n", phoneCnt);

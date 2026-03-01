@@ -14,6 +14,8 @@ Detailed technical documentation for every module in the SF_Alarm firmware.
 - [src/sms_commands — GA09 SMS Command Parser](#srcsms_commands--ga09-sms-command-parser)
 - [src/config_manager — NVS Persistence](#srcconfig_manager--nvs-persistence)
 - [src/network — Wi-Fi Connectivity](#srcnetwork--wifi-connectivity)
+- [src/whatsapp_client — WhatsApp Notifications](#srcwhatsapp_client--whatsapp-notifications)
+- [src/mqtt_client — IoT Integration](#srcmqtt_client--iot-integration)
 - [src/serial_cli — Serial Command-Line Interface](#srcserial_cli--serial-command-line-interface)
 - [src/web_server & web_ui — Web Dashboard & REST API](#srcweb_server--web_ui--web-dashboard--rest-api)
 - [src/main.cpp — Application Entry Point](#srcmaincpp--application-entry-point)

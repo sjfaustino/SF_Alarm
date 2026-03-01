@@ -54,7 +54,11 @@ A 4x4 or responsive grid showing all 16 zones.
 
 #### D. The Output List
 A scrollable list or grid of the 16 MOSFET outputs.
-- **Function**: Direct manual control for testing sirens, strobes, or secondary relays.
+- **Outputs Control**: 16 toggle switches to manually trigger connected relays or devices.
+- **Alert Settings**: Configure how you receive notifications:
+  - **Alert Channel**: Choose between SMS Only, WhatsApp Only, or Both.
+  - **WhatsApp Credentials**: Set your phone number and CallMeBot API key directly from the dashboard.
+- **System Metrics**: Real-time view of Uptime, Free Heap, RSSI, and IP address.
 - **Sync**: Checkboxes are automatically synced with the hardware state every 2 seconds.
 
 ---

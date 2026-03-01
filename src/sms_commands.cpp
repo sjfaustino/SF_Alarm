@@ -1,5 +1,8 @@
 #include "sms_commands.h"
 #include "sms_gateway.h"
+#include "whatsapp_client.h"
+#include "mqtt_client.h"
+#include <ArduinoJson.h>
 #include "alarm_controller.h"
 #include "alarm_zones.h"
 #include "config.h"
@@ -21,7 +24,19 @@ static uint16_t reportIntervalMin = DEFAULT_REPORT_INTERVAL_MIN;
 // Custom recovery text (GA09: #0#text)
 static char recoveryText[80] = "SF_Alarm: All zones restored to normal.";
 
-// Working mode (GA09: %#M1=SMS, 2=Call, 3=Both)
+// Working Mode (GA09):
+//   %#M1 (SMS), %#M2 (Call), %#M3 (Both)
+//
+// Alert Channel (WhatsApp extension):
+//   %#W1 (SMS Only), %#W2 (WhatsApp Only), %#W3 (Both)
+//
+// WhatsApp Config:
+//   #WA#phone#apikey#  Set WhatsApp credentials
+//
+// MQTT Config:
+//   #MQTT#server#port#user#pass#  Set MQTT credentials
+//
+// Recovery Text (GA09):
 static WorkingMode currentMode = MODE_SMS;
 
 // ---------------------------------------------------------------------------
@@ -445,11 +460,28 @@ static bool parseHelp(const char* body, const char* sender)
     trimStr(upper);
 
     if (strcmp(upper, "HELP") == 0) {
+        // Part 1: Basic Control
+        sendReply(sender, 
+                  "SF_Alarm Control:\n"
+                  "ARM [pin] | ARM HOME [alias] | DISARM [pin]\n"
+                  "STATUS | @#STATUS? | MUTE\n"
+                  "BYPASS n | UNBYPASS n");
+        
+        // Part 2: Advanced Config
         sendReply(sender,
-                  "SF_Alarm Cmds: "
-                  "#01#phone# | #N#text | *NCxyz | "
-                  "ARM/DISARM [pin] | STATUS | @#STATUS? | "
-                  "MUTE | BYPASS/UNBYPASS n | %#Txx | @#ARM... | HELP");
+                  "SF_Alarm Config:\n"
+                  "#01#phone# (Add phone)\n"
+                  "#N#text (Alarm text)\n"
+                  "#0#text (Recovery text)\n"
+                  "*NCxyz (NC zones)\n"
+                  "%#Mx (Mode: 1.SMS 2.Call 3.Both)");
+
+        // Part 3: Integrations
+        sendReply(sender,
+                  "SF_Alarm Integrations:\n"
+                  "%#Wx (Alert: 1.SMS 2.WA 3.Both)\n"
+                  "#WA#ph#key# (WhatsApp setup)\n"
+                  "#MQTT#srv#port#usr#pass# (Broker)");
         return true;
     }
     return false;
@@ -517,6 +549,91 @@ static bool parseCallNumbers(const char* body, const char* sender)
     if (body[0] != '&') return false;
 
     sendReply(sender, "SF_Alarm: Voice call alerts not supported by hardware. Use SMS alerts (#01#).");
+    return true;
+}
+
+/// Parse: %#Wx  — set alert channel (1:SMS, 2:WA, 3:Both)
+static bool parseAlertChannel(const char* body, const char* sender)
+{
+    // Format: %#W2
+    if (body[0] != '%' || body[1] != '#' || toupper(body[2]) != 'W') return false;
+
+    int m = body[3] - '0';
+    if (m < 1 || m > 3) return false;
+
+    whatsappSetConfig(whatsappGetPhone(), whatsappGetApiKey(), (WhatsAppMode)m);
+
+    char reply[80];
+    const char* modeStrs[] = {"", "SMS ONLY", "WHATSAPP ONLY", "SMS & WHATSAPP"};
+    snprintf(reply, sizeof(reply), "SF_Alarm: Alert channel set to %s", modeStrs[m]);
+    sendReply(sender, reply);
+    return true;
+}
+
+/// Parse: #WA#phone#apikey#  — set WhatsApp credentials
+static bool parseSetWhatsApp(const char* body, const char* sender)
+{
+    // Format: #WA#+34600123456#MYAPIKEY#
+    if (body[0] != '#' || toupper(body[1]) != 'W' || toupper(body[2]) != 'A' || body[3] != '#') return false;
+
+    const char* phoneStart = body + 4;
+    const char* phoneEnd = strchr(phoneStart, '#');
+    if (!phoneEnd) return false;
+
+    char phone[32];
+    int phoneLen = phoneEnd - phoneStart;
+    if (phoneLen >= (int)sizeof(phone)) phoneLen = sizeof(phone) - 1;
+    strncpy(phone, phoneStart, phoneLen);
+    phone[phoneLen] = '\0';
+
+    const char* keyStart = phoneEnd + 1;
+    const char* keyEnd = strchr(keyStart, '#');
+    // Key might not have trailing # if it's the end of the string
+    char key[32];
+    if (keyEnd) {
+        int keyLen = keyEnd - keyStart;
+        if (keyLen >= (int)sizeof(key)) keyLen = sizeof(key) - 1;
+        strncpy(key, keyStart, keyLen);
+        key[keyLen] = '\0';
+    } else {
+        strncpy(key, keyStart, sizeof(key) - 1);
+        key[sizeof(key) - 1] = '\0';
+    }
+
+    whatsappSetConfig(phone, key, whatsappGetMode());
+    sendReply(sender, "SF_Alarm: WhatsApp configuration updated");
+    return true;
+}
+
+/// Parse: #MQTT#server#port#user#pass# — set MQTT credentials
+static bool parseSetMQTT(const char* body, const char* sender)
+{
+    // Format: #MQTT#192.168.1.50#1883#user#pass#
+    if (body[0] != '#' || toupper(body[1]) != 'M' || toupper(body[2]) != 'Q' || toupper(body[3]) != 'T' || body[4] != '#') return false;
+
+    // Use a simpler approach: split by #
+    char temp[160];
+    strncpy(temp, body, sizeof(temp)-1);
+    temp[sizeof(temp)-1] = '\0';
+
+    char* parts[7]; // #, MQTT, server, port, user, pass, #
+    int count = 0;
+    char* token = strtok(temp, "#");
+    while (token && count < 7) {
+        parts[count++] = token;
+        token = strtok(NULL, "#");
+    }
+
+    if (count < 2) return false; // Minimum #MQTT#server
+
+    const char* server = parts[1];
+    uint16_t port = (count > 2) ? atoi(parts[2]) : 1883;
+    const char* user = (count > 3) ? parts[3] : "";
+    const char* pass = (count > 4) ? parts[4] : "";
+    const char* clientId = (count > 5) ? parts[5] : "SF_Alarm";
+
+    mqttSetConfig(server, port, user, pass, clientId);
+    sendReply(sender, "SF_Alarm: MQTT configuration updated");
     return true;
 }
 
@@ -595,6 +712,9 @@ void smsCmdProcess(const char* sender, const char* body)
     if (parseBypass(trimmed, sender)) return;          // BYPASS/UNBYPASS
     if (parseReportTimer(trimmed, sender)) return;     // %#Txx
     if (parseWorkingMode(trimmed, sender)) return;     // %#Mx
+    if (parseAlertChannel(trimmed, sender)) return;    // %#Wx
+    if (parseSetWhatsApp(trimmed, sender)) return;     // #WA#...
+    if (parseSetMQTT(trimmed, sender)) return;        // #MQTT#...
     if (parseArmInputs(trimmed, sender)) return;      // @#ARMxxx
     if (parseCallNumbers(trimmed, sender)) return;     // &xxx
     if (parseHelp(trimmed, sender)) return;            // HELP

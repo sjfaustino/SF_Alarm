@@ -711,11 +711,12 @@ module**, extended to support all **16 channels** of the KC868-A16.
 | `UNBYPASS 3`  | Restore zone 3                   | `SF_Alarm: Zone 3 restored`                    |
 | `%#T120`      | Set report interval (minutes)    | `SF_Alarm: Periodic status report set to 120 minutes` |
 | `%#M3`        | Working Mode (1:SMS, 2:Call, 3:Both) | `SF_Alarm: Working mode set to SMS & CALL` |
+| `%#W3`        | Alert Channel (1:SMS, 2:WA, 3:Both) | `SF_Alarm: Alert channel set to SMS & WHATSAPP` |
+| `#WA#ph#key#` | Set WhatsApp credentials         | `SF_Alarm: WhatsApp configuration updated`     |
+| `#MQTT#...`  | Set MQTT Broker & Credentials    | `SF_Alarm: MQTT configuration updated`         |
 | `#0#System OK`| Set Recovery SMS Text            | `SF_Alarm: Recovery text updated`              |
 | `**NC24`      | Set zones 2,4 as NC (PDF sync)   | `SF_Alarm: NC zones updated`                   |
 | `@@#ARM11110000`| Binary zone enable (S1-S8)    | `SF_Alarm: Zone enable/disable configuration updated` |
-| `&...`        | Call numbers (voice)             | `SF_Alarm: Voice call alerts not supported...` |
-| `HELP`        | List available commands          | (command list summary)                          |
 
 ### SMS Alert Messages
 
@@ -861,10 +862,43 @@ SF_Alarm includes a built-in, mobile-friendly web dashboard for real-time monito
 
 ### Key Features
 
-- **Real-time Updates**: The dashboard automatically refreshes every 2 seconds to show the latest sensor states and alarm status.
+- **Deep Dark Mode**: Premium, futuristic UI with glassmorphism effects.
+- **No Internet Required**: Works directly via your local Wi-Fi network.
+
+![SF_Alarm Dashboard (MQTT/WhatsApp Enabled)](/C:/Users/sjfau/.gemini/antigravity/brain/39233fba-40b4-847d-cc5679d79e31/sf_alarm_dashboard_mqtt_mockup_1772406328362.png)
 - **Arm/Disarm Control**: Securely arm or disarm the system from your phone or PC. A PIN code modal will appear for verification.
 - **Zone Management**: View the status of all 16 zones at a glance. Easily bypass problematic zones directly from the UI.
 - **Output Toggles**: Manually control any of the 16 MOSFET outputs (relays, strobes, etc.) with simple checkboxes.
+
+## Home Automation (MQTT)
+
+SF_Alarm is designed for seamless integration with Home Assistant and other MQTT-based platforms.
+
+### Topic Structure
+
+| Topic | Payload | Description |
+|---|---|---|
+| `SF_Alarm/state` | `disarmed`, `armed_away`, etc. | Core alarm state |
+| `SF_Alarm/cmd` | `ARM_AWAY`, `DISARM`, etc. | Control topic (supports optional `:PIN` suffix) |
+| `SF_Alarm/zone/N` | `ON`, `OFF` | Real-time zone status (N=1-16) |
+| `SF_Alarm/output/N`| `ON`, `OFF` | Relay output status (N=1-16) |
+| `SF_Alarm/events` | `EVENT: X | Details` | Human-readable system log |
+| `SF_Alarm/availability`| `online`, `offline` | MQTT Last Will and Testament |
+
+### Home Assistant Example
+```yaml
+alarm_control_panel:
+  - platform: mqtt
+    name: "SF_Alarm"
+    state_topic: "SF_Alarm/state"
+    command_topic: "SF_Alarm/cmd"
+    payload_disarm: "DISARM"
+    payload_arm_away: "ARM_AWAY"
+    payload_arm_home: "ARM_HOME"
+    code_arm_required: false
+```
+
+## Security Overview
 - **Responsive Design**: Dark-themed, modern interface that works perfectly on both desktop monitors and mobile devices.
 
 ### REST API Reference (Simple)

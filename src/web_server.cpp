@@ -5,6 +5,8 @@
 #include "alarm_zones.h"
 #include "alarm_controller.h"
 #include "sms_commands.h"
+#include "whatsapp_client.h"
+#include "mqtt_client.h"
 #include "config_manager.h"
 #include "network.h"
 
@@ -96,9 +98,74 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
     sys["freeHeap"] = ESP.getFreeHeap();
     sys["version"]  = FW_VERSION_STR;
 
+    // --- Alerts/WhatsApp ---
+    JsonObject alerts = doc["alerts"].to<JsonObject>();
+    alerts["mode"] = (int)whatsappGetMode();
+    alerts["waPhone"] = whatsappGetPhone();
+    alerts["waApiKey"] = whatsappGetApiKey();
+
+    // --- MQTT ---
+    JsonObject mqtt = doc["mqtt"].to<JsonObject>();
+    mqtt["server"] = mqttGetServer();
+    mqtt["port"] = mqttGetPort();
+    mqtt["user"] = mqttGetUser();
+    mqtt["pass"] = mqttGetPass();
+    mqtt["clientId"] = mqttGetClientId();
+    mqtt["connected"] = mqttIsConnected();
+
     String json;
     serializeJson(doc, json);
     return response->send(200, "application/json", json.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/settings/alerts — set WhatsApp credentials and mode
+// Body: { "mode": 1..3, "phone": "+34...", "apikey": "..." }
+// ---------------------------------------------------------------------------
+static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* response)
+{
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, request->body());
+    if (err) {
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+    }
+
+    if (doc["mode"].isNull() || doc["phone"].isNull() || doc["apikey"].isNull()) {
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Missing fields\"}");
+    }
+
+    WhatsAppMode mode = (WhatsAppMode)doc["mode"].as<int>();
+    const char* phone = doc["phone"];
+    const char* apikey = doc["apikey"];
+
+    whatsappSetConfig(phone, apikey, mode);
+    configSave();
+
+    return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Alert settings saved\"}");
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/settings/mqtt — set MQTT credentials
+// Body: { "server": "...", "port": 1883, "user": "...", "pass": "...", "clientId": "..." }
+// ---------------------------------------------------------------------------
+static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* response)
+{
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, request->body());
+    if (err) {
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+    }
+
+    const char* server = doc["server"] | "";
+    uint16_t port = doc["port"] | 1883;
+    const char* user = doc["user"] | "";
+    const char* pass = doc["pass"] | "";
+    const char* clientId = doc["clientId"] | "SF_Alarm";
+
+    mqttSetConfig(server, port, user, pass, clientId);
+    configSave();
+
+    return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"MQTT settings saved\"}");
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +308,8 @@ void webServerInit()
     // REST API — POST
     server.on("/api/arm", HTTP_POST, handleApiArm);
     server.on("/api/disarm", HTTP_POST, handleApiDisarm);
+    server.on("/api/settings/alerts", HTTP_POST, handlePostAlerts);
+    server.on("/api/settings/mqtt", HTTP_POST, handlePostMqtt);
     server.on("/api/mute", HTTP_POST, handleApiMute);
     server.on("/api/bypass", HTTP_POST, handleApiBypass);
     server.on("/api/output", HTTP_POST, handleApiOutput);

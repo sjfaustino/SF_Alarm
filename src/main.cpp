@@ -5,10 +5,12 @@
 #include "alarm_controller.h"
 #include "sms_gateway.h"
 #include "sms_commands.h"
+#include "whatsapp_client.h" // Added by user instruction
 #include "config_manager.h"
 #include "network.h"
 #include "serial_cli.h"
 #include "web_server.h"
+#include "mqtt_client.h"
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -33,12 +35,12 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
             
             // Check working mode (M1=SMS, M2=Call, M3=Both)
             if (smsCmdGetWorkingMode() != MODE_CALL) {
-                smsCmdSendAlert(msg);
+                alarmBroadcast(msg);
             } else {
                 // Call mode simulation (we can't call, so we send a voice-prefixed SMS)
                 char voiceMsg[180];
                 snprintf(voiceMsg, sizeof(voiceMsg), "[VOICE CALL] %s", msg);
-                smsCmdSendAlert(voiceMsg);
+                alarmBroadcast(voiceMsg);
             }
             break;
 
@@ -81,6 +83,14 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
             Serial.printf("[MAIN] Siren: %s\n", details);
             break;
     }
+
+    // Sync state to MQTT for any alarm event
+    mqttSyncState();
+    
+    // Publish specific event to a human-readable topic
+    char eventMsg[128];
+    snprintf(eventMsg, sizeof(eventMsg), "EVENT: %d | %s", (int)event, details ? details : "");
+    mqttPublish("SF_Alarm/events", eventMsg);
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +173,10 @@ void setup()
     // --- CLI ---
     cliInit();
 
+    // --- MQTT ---
+    Serial.println("[INIT] MQTT...");
+    mqttInit();
+
     Serial.println("[INIT] Startup complete!");
     Serial.println();
 }
@@ -178,11 +192,14 @@ void loop()
         uint16_t inputs = ioExpanderReadInputs();
         zonesUpdate(inputs);
 
+        // Sync to MQTT if any zone raw input changed (simplified: sync every scan)
+        mqttSyncState();
+
         // --- Recovery alert (GA09: #0#) ---
         bool currentAllClear = zonesAllClear();
         if (currentAllClear && !lastAllClear) {
             // All zones just returned to normal
-            smsCmdSendAlert(smsCmdGetRecoveryText());
+            alarmBroadcast(smsCmdGetRecoveryText());
         }
         lastAllClear = currentAllClear;
     }
@@ -220,7 +237,7 @@ void loop()
                      trigCount,
                      zonesAllClear() ? "YES" : "NO");
 
-            smsCmdSendAlert(buf);
+            alarmBroadcast(buf);
         }
     } else {
         lastReportMs = 0; // Reset if disabled
@@ -229,7 +246,10 @@ void loop()
     // --- 6. Serial CLI ---
     cliUpdate();
 
-    // --- 6. Watchdog ---
+    // --- 7. MQTT Loop ---
+    mqttUpdate();
+
+    // --- 8. Watchdog ---
     // esp_task_wdt_reset();
 
     // Small yield for WiFi/system tasks

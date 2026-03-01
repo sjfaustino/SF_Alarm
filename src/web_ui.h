@@ -460,6 +460,70 @@ body {
         <div class="sys-item"><div class="sys-val" id="sysRssi">--</div><div class="sys-label">RSSI (dBm)</div></div>
         <div class="sys-item"><div class="sys-val" id="sysUptime">--</div><div class="sys-label">Uptime</div></div>
         <div class="sys-item"><div class="sys-val" id="sysHeap">--</div><div class="sys-label">Free Heap</div></div>
+        <div class="sys-item"><div class="sys-val" id="fwVer">--</div><div class="sys-label">Version</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Alert Settings -->
+  <div class="card">
+    <div class="card-header"><h2>Alert Settings</h2></div>
+    <div class="card-body">
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Alert Channel</label>
+          <select id="waMode" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+            <option value="1">SMS Only</option>
+            <option value="2">WhatsApp Only</option>
+            <option value="3">SMS & WhatsApp</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">WhatsApp Phone</label>
+          <input type="text" id="waPhone" placeholder="+34..." style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">WhatsApp API Key</label>
+          <input type="password" id="waApiKey" placeholder="CallMeBot Key" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+      </div>
+      <div style="margin-top:16px; display:flex; justify-content:flex-end">
+        <button class="btn arm" onclick="saveAlertSettings()">💾 Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MQTT Settings -->
+  <div class="card">
+    <div class="card-header">
+      <h2>MQTT Settings</h2>
+      <span id="mqttStatus" class="conn-dot"></span>
+    </div>
+    <div class="card-body">
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;">
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Broker Server</label>
+          <input type="text" id="mqServer" placeholder="e.g. 192.168.1.50" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Port</label>
+          <input type="number" id="mqPort" value="1883" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Username</label>
+          <input type="text" id="mqUser" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Password</label>
+          <input type="password" id="mqPass" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Client ID</label>
+          <input type="text" id="mqClientId" value="SF_Alarm" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+      </div>
+      <div style="margin-top:16px; display:flex; justify-content:flex-end">
+        <button class="btn arm" onclick="saveMqttSettings()">💾 Save MQTT</button>
       </div>
     </div>
   </div>
@@ -616,6 +680,24 @@ function renderOutputs(mask) {
   g.innerHTML = html;
 }
 
+async function saveAlertSettings() {
+  const mode = parseInt(document.getElementById('waMode').value);
+  const phone = document.getElementById('waPhone').value;
+  const apikey = document.getElementById('waApiKey').value;
+  
+  apiPost('/api/settings/alerts', { mode, phone, apikey });
+}
+
+async function saveMqttSettings() {
+  const server = document.getElementById('mqServer').value;
+  const port = parseInt(document.getElementById('mqPort').value);
+  const user = document.getElementById('mqUser').value;
+  const pass = document.getElementById('mqPass').value;
+  const clientId = document.getElementById('mqClientId').value;
+  
+  apiPost('/api/settings/mqtt', { server, port, user, pass, clientId });
+}
+
 function escHtml(s) {
   const d = document.createElement('div');
   d.textContent = s;
@@ -659,6 +741,26 @@ async function refresh() {
     document.getElementById('sysUptime').textContent = fmtUptime(d.system.uptime);
     document.getElementById('sysHeap').textContent = (d.system.freeHeap/1024).toFixed(1)+'KB';
     document.getElementById('fwVer').textContent = 'v'+d.system.version;
+
+    // Alert settings (fill once)
+    if (!window.settingsLoaded) {
+      document.getElementById('waMode').value = d.alerts.mode;
+      document.getElementById('waPhone').value = d.alerts.waPhone;
+      document.getElementById('waApiKey').value = d.alerts.waApiKey;
+      
+      document.getElementById('mqServer').value = d.mqtt.server;
+      document.getElementById('mqPort').value = d.mqtt.port;
+      document.getElementById('mqUser').value = d.mqtt.user;
+      document.getElementById('mqPass').value = d.mqtt.pass;
+      document.getElementById('mqClientId').value = d.mqtt.clientId;
+      
+      window.settingsLoaded = true;
+    }
+
+    // MQTT connection status
+    const mqDot = document.getElementById('mqttStatus');
+    if (d.mqtt.connected) mqDot.classList.add('ok');
+    else mqDot.classList.remove('ok');
 
   } catch (e) {
     if (connected) { connected = false; toast('Connection lost','error'); }

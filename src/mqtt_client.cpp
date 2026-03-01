@@ -1,0 +1,164 @@
+#include "mqtt_client.h"
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include "alarm_controller.h"
+#include "alarm_zones.h"
+#include "io_expander.h"
+
+static WiFiClient espClient;
+static PubSubClient client(espClient);
+
+static char mqttServer[64] = "";
+static uint16_t mqttPort = 1883;
+static char mqttUser[32] = "";
+static char mqttPass[32] = "";
+static char mqttClientId[32] = "SF_Alarm";
+
+static unsigned long lastReconnectAttempt = 0;
+
+// Topic structure
+// SF_Alarm/state -> disarmed, armed_home, armed_away, triggered, pending
+// SF_Alarm/cmd   -> DISARM, ARM_HOME, ARM_AWAY, MUTE
+// SF_Alarm/zone/N -> ON/OFF
+// SF_Alarm/output/N -> ON/OFF
+
+void mqttCallback(char* topic, byte* payload, unsigned long length) {
+    char message[32];
+    if (length >= sizeof(message)) length = sizeof(message) - 1;
+    memcpy(message, payload, length);
+    message[length] = '\0';
+
+    Serial.printf("[MQTT] Message arrived [%s]: %s\n", topic, message);
+
+    if (strstr(topic, "/cmd")) {
+        if (strcmp(message, "DISARM") == 0) {
+            // we don't have PIN here, so we allow it for now if PIN is empty or 
+            // maybe we should require PIN in the payload?
+            // For now, let's assume we need a bypass or a dedicated MQTT pin.
+            // Matching CLI/SMS: we should technically require a PIN.
+            // Payload could be "DISARM:1234"
+            char* sep = strchr(message, ':');
+            if (sep) {
+                *sep = '\0';
+                const char* pin = sep + 1;
+                alarmDisarm(pin);
+            } else {
+                alarmDisarm(""); // Try empty pin
+            }
+        } 
+        else if (strcmp(message, "ARM_HOME") == 0) {
+            alarmArmHome("");
+        }
+        else if (strcmp(message, "ARM_AWAY") == 0) {
+            alarmArmAway("");
+        }
+        else if (strcmp(message, "MUTE") == 0) {
+            alarmMuteSiren();
+        }
+    }
+}
+
+void mqttInit() {
+    client.setCallback(mqttCallback);
+    Serial.println("[MQTT] MQTT client initialized");
+}
+
+void mqttSetConfig(const char* server, uint16_t port, const char* user, const char* pass, const char* clientId) {
+    strncpy(mqttServer, server, sizeof(mqttServer)-1);
+    mqttPort = port;
+    strncpy(mqttUser, user, sizeof(mqttUser)-1);
+    strncpy(mqttPass, pass, sizeof(mqttPass)-1);
+    strncpy(mqttClientId, clientId, sizeof(mqttClientId)-1);
+    
+    client.setServer(mqttServer, mqttPort);
+}
+
+bool mqttReconnect() {
+    if (strlen(mqttServer) == 0) return false;
+
+    Serial.print("[MQTT] Attempting connection...");
+    bool connected = false;
+    if (strlen(mqttUser) > 0) {
+        connected = client.connect(mqttClientId, mqttUser, mqttPass, "SF_Alarm/availability", 0, true, "offline");
+    } else {
+        connected = client.connect(mqttClientId, NULL, NULL, "SF_Alarm/availability", 0, true, "offline");
+    }
+
+    if (connected) {
+        Serial.println("connected");
+        client.publish("SF_Alarm/availability", "online", true);
+        client.subscribe("SF_Alarm/cmd");
+        mqttSyncState();
+    } else {
+        Serial.print("failed, rc=");
+        Serial.println(client.state());
+    }
+    return connected;
+}
+
+void mqttUpdate() {
+    if (strlen(mqttServer) == 0) return;
+
+    if (!client.connected()) {
+        unsigned long now = millis();
+        if (now - lastReconnectAttempt > 5000) {
+            lastReconnectAttempt = now;
+            if (mqttReconnect()) {
+                lastReconnectAttempt = 0;
+            }
+        }
+    } else {
+        client.loop();
+    }
+}
+
+void mqttPublish(const char* topic, const char* payload, bool retained) {
+    if (client.connected()) {
+        client.publish(topic, payload, retained);
+    }
+}
+
+static const char* haStateMap[] = {
+    "disarmed",   // MODE_DISARMED
+    "pending",    // MODE_EXIT_DELAY
+    "armed_away", // MODE_ARMED_AWAY
+    "armed_home", // MODE_ARMED_HOME
+    "pending",    // MODE_ENTRY_DELAY
+    "triggered"   // MODE_TRIGGERED
+};
+
+void mqttSyncState() {
+    if (!client.connected()) return;
+
+    // 1. Alarm State
+    AlarmState st = alarmGetState();
+    if ((int)st < 6) {
+        client.publish("SF_Alarm/state", haStateMap[(int)st], true);
+    }
+
+    // 2. Zones
+    for (int i = 0; i < 16; i++) {
+        const ZoneInfo* zi = zonesGetInfo(i);
+        if (zi) {
+            char topic[32];
+            snprintf(topic, sizeof(topic), "SF_Alarm/zone/%d", i + 1);
+            client.publish(topic, zi->rawInput ? "ON" : "OFF", true);
+        }
+    }
+
+    // 3. Outputs
+    uint16_t outs = ioExpanderGetOutputs();
+    for (int i = 0; i < 16; i++) {
+        char topic[32];
+        snprintf(topic, sizeof(topic), "SF_Alarm/output/%d", i + 1);
+        client.publish(topic, (outs & (1 << i)) ? "ON" : "OFF", true);
+    }
+}
+
+const char* mqttGetServer() { return mqttServer; }
+uint16_t mqttGetPort() { return mqttPort; }
+const char* mqttGetUser() { return mqttUser; }
+const char* mqttGetPass() { return mqttPass; }
+const char* mqttGetClientId() { return mqttClientId; }
+
+bool mqttIsConnected() { return client.connected(); }
