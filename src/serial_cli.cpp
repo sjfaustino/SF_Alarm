@@ -7,6 +7,7 @@
 #include "sms_commands.h"
 #include "config_manager.h"
 #include "network.h"
+#include "whatsapp_client.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -55,14 +56,18 @@ static void printHelp()
     Serial.println("  network                — Show network status");
     Serial.println();
     Serial.println("  pin <newpin>           — Set alarm PIN");
+    Serial.println("  mode <1-3>             — Set alert mode (1:SMS, 2:Call, 3:Both)");
+    Serial.println("  wa <phone> <apikey>    — Set WhatsApp credentials");
+    Serial.println("  wa mode <1-3>          — Set WA mode (1:SMS, 2:WA, 3:Both)");
     Serial.println("  delay exit <sec>       — Set exit delay");
     Serial.println("  delay entry <sec>      — Set entry delay");
     Serial.println("  siren dur <sec>        — Set siren duration");
     Serial.println("  siren ch <0-15>        — Set siren output channel");
     Serial.println();
     Serial.println("  test sms <number> <msg> — Send test SMS");
-    Serial.println("  test output <0-15>     — Toggle an output");
-    Serial.println("  test input             — Live input monitor");
+    Serial.println("  test wa <msg>            — Send test WhatsApp");
+    Serial.println("  test output <0-15>       — Toggle an output");
+    Serial.println("  test input               — Live input monitor");
     Serial.println();
     Serial.println("  save                   — Save config to NVS");
     Serial.println("  load                   — Load config from NVS");
@@ -263,6 +268,39 @@ static void processLine(const char* line)
     else if (strcmp(start, "pin") == 0 && arg1) {
         alarmSetPin(arg1);
     }
+    else if (strcmp(start, "mode") == 0 && arg1) {
+        int m = atoi(arg1);
+        if (m >= 1 && m <= 3) {
+            smsCmdSetWorkingMode((WorkingMode)m);
+            const char* modeStrs[] = {"", "SMS only", "Call only", "SMS & Call"};
+            Serial.printf("Alert mode set to %d (%s)\n", m, modeStrs[m]);
+        } else {
+            Serial.println("Usage: mode <1-3> (1:SMS, 2:Call, 3:Both)");
+        }
+    }
+    else if (strcmp(start, "wa") == 0 && arg1) {
+        if (strncmp(arg1, "mode ", 5) == 0) {
+            int m = atoi(arg1 + 5);
+            if (m >= 1 && m <= 3) {
+                whatsappSetConfig(whatsappGetPhone(), whatsappGetApiKey(), (WhatsAppMode)m);
+                const char* modeStrs[] = {"", "SMS only", "WhatsApp only", "SMS & WhatsApp"};
+                Serial.printf("WA mode set to %d (%s)\n", m, modeStrs[m]);
+            } else {
+                Serial.println("Usage: wa mode <1-3> (1:SMS, 2:WA, 3:Both)");
+            }
+        } else {
+            // wa <phone> <apikey>
+            char* apikey = strchr(arg1, ' ');
+            if (apikey) {
+                *apikey = '\0';
+                apikey++;
+                whatsappSetConfig(arg1, apikey, whatsappGetMode());
+                Serial.printf("WhatsApp set: Phone=%s ApiKey=%s\n", arg1, apikey);
+            } else {
+                Serial.println("Usage: wa <phone> <apikey>  or  wa mode <1-3>");
+            }
+        }
+    }
     else if (strcmp(start, "delay") == 0 && arg1) {
         if (strncmp(arg1, "exit ", 5) == 0) {
             alarmSetExitDelay(atoi(arg1 + 5));
@@ -322,8 +360,16 @@ static void processLine(const char* line)
             }
             while (Serial.available()) Serial.read();  // Flush
             Serial.println("Monitor stopped");
+        } else if (strncmp(arg1, "wa ", 3) == 0 || strcmp(arg1, "wa") == 0) {
+            const char* msg = (strlen(arg1) > 3) ? arg1 + 3 : "SF_Alarm test message";
+            Serial.printf("Sending WhatsApp to %s...\n", whatsappGetPhone());
+            if (whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), msg)) {
+                Serial.println("WhatsApp sent OK");
+            } else {
+                Serial.println("WhatsApp failed");
+            }
         } else {
-            Serial.println("test sms|output|input");
+            Serial.println("test sms|wa|output|input");
         }
     }
     else if (strcmp(start, "save") == 0) {
