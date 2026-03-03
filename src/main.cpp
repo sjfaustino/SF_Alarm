@@ -11,6 +11,7 @@
 #include "serial_cli.h"
 #include "web_server.h"
 #include "mqtt_client.h"
+#include "onvif_client.h"
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -177,6 +178,10 @@ void setup()
     Serial.println("[INIT] MQTT...");
     mqttInit();
 
+    // --- ONVIF ---
+    Serial.println("[INIT] ONVIF...");
+    onvifInit();
+
     Serial.println("[INIT] Startup complete!");
     Serial.println();
 }
@@ -249,7 +254,10 @@ void loop()
     // --- 7. MQTT Loop ---
     mqttUpdate();
 
-    // --- 8. Watchdog ---
+    // --- 8. ONVIF ---
+    onvifUpdate();
+    
+    // --- 9. Watchdog ---
     // esp_task_wdt_reset();
 
     // Small yield for WiFi/system tasks

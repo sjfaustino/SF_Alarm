@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
+#include <mbedtls/sha256.h>
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -11,8 +12,9 @@ static char routerIp[64]   = "";
 static char routerUser[32] = "";
 static char routerPass[64] = "";
 
-static String sessionToken = "";   // LuCI sysauth cookie/token
-static bool   loggedIn     = false;
+static String sysauthCookie = "";   // LuCI sysauth cookie
+static String csrfToken     = "";   // LuCI CSRF token (from HTML pages)
+static bool   loggedIn      = false;
 
 static char lastError[128] = "";
 
@@ -38,13 +40,60 @@ static String buildUrl(const char* path)
     return String("http://") + routerIp + path;
 }
 
+/// Extract a substring between two markers from an HTML body.
+static String extractBetween(const String& body, const String& before, const String& after, int startPos = 0)
+{
+    int s = body.indexOf(before, startPos);
+    if (s < 0) return "";
+    s += before.length();
+    int e = body.indexOf(after, s);
+    if (e < 0) return "";
+    return body.substring(s, e);
+}
+
+/// Extract the CSRF token from a LuCI HTML page.
+/// Searches for <input name="token" ... value="..."> with any attribute order.
+static String extractCsrfToken(const String& body)
+{
+    String searchName = "name=\"token\"";
+    int pos = body.indexOf(searchName);
+    if (pos < 0) return "";
+    int inputStart = body.lastIndexOf("<input", pos);
+    int inputEnd = body.indexOf(">", pos);
+    if (inputStart < 0 || inputEnd < 0) return "";
+    String inputTag = body.substring(inputStart, inputEnd + 1);
+    return extractBetween(inputTag, "value=\"", "\"");
+}
+
+/// Compute SHA-256 hash and return as lowercase hex string.
+static String sha256Hex(const String& input)
+{
+    unsigned char hash[32];
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0); // 0 = SHA-256
+    mbedtls_sha256_update(&ctx, (const unsigned char*)input.c_str(), input.length());
+    mbedtls_sha256_finish(&ctx, hash);
+    mbedtls_sha256_free(&ctx);
+
+    char hex[65];
+    for (int i = 0; i < 32; i++) {
+        sprintf(hex + i * 2, "%02x", hash[i]);
+    }
+    hex[64] = '\0';
+    return String(hex);
+}
+
 // ---------------------------------------------------------------------------
-// LuCI Authentication
+// LuCI Authentication — Cudy LT500D Secure Login
 // ---------------------------------------------------------------------------
-// The Cudy LT500D runs OpenWrt/LuCI. Authentication flow:
-// 1. POST to /cgi-bin/luci with username & password
-// 2. LuCI returns a sysauth cookie on success
-// 3. Use this cookie for all subsequent requests
+// The Cudy LT500D uses a multi-step login:
+// 1. GET /cgi-bin/luci/ → extract _csrf, token, salt from hidden fields
+// 2. hash1 = SHA256(password + salt)
+// 3. finalHash = SHA256(hash1 + token)
+// 4. POST with _csrf, luci_username=admin, luci_password=finalHash
+// 5. Extract sysauth cookie from response
+// 6. GET SMS page to extract page-level CSRF token
 
 bool smsGatewayLogin()
 {
@@ -53,167 +102,302 @@ bool smsGatewayLogin()
         return false;
     }
 
+    // --- Step 1: GET the login page to extract _csrf, token, salt ---
+    // Note: Cudy LT500D returns the login page with HTTP 403 status.
+    // We accept both 200 and 403 as valid responses.
     HTTPClient http;
-    String loginUrl = buildUrl("/cgi-bin/luci");
+    String loginPageUrl = String("http://") + routerIp + "/cgi-bin/luci/";
+    Serial.printf("[SMS] GET login page: %s\n", loginPageUrl.c_str());
 
-    http.begin(loginUrl);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-    http.setConnectTimeout(5000);
+    http.begin(loginPageUrl);
     http.setTimeout(10000);
+    http.setUserAgent("Mozilla/5.0");
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-    String postData = String("luci_username=") + routerUser +
-                      "&luci_password=" + routerPass;
+    int code = http.GET();
+    Serial.printf("[SMS] Login page response: %d\n", code);
 
-    int httpCode = http.POST(postData);
-
-    if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY ||
-        httpCode == HTTP_CODE_FOUND || httpCode == 302 || httpCode == 301) {
-
-        // Extract sysauth cookie from response headers
-        String cookies = http.header("Set-Cookie");
-        if (cookies.length() > 0) {
-            // Parse sysauth= from cookie string
-            int start = cookies.indexOf("sysauth=");
-            if (start >= 0) {
-                start += 8;  // skip "sysauth="
-                int end = cookies.indexOf(';', start);
-                if (end < 0) end = cookies.length();
-                sessionToken = cookies.substring(start, end);
-                loggedIn = true;
-                Serial.printf("[SMS] Logged in to LuCI (token: %s...)\n",
-                              sessionToken.substring(0, 8).c_str());
-                http.end();
-                return true;
-            }
-        }
-
-        // Some LuCI versions embed the token in the redirect URL
-        String location = http.header("Location");
-        if (location.length() > 0) {
-            int tokenStart = location.indexOf("/stok=");
-            if (tokenStart >= 0) {
-                tokenStart += 6;
-                int tokenEnd = location.indexOf('/', tokenStart);
-                if (tokenEnd < 0) tokenEnd = location.length();
-                sessionToken = location.substring(tokenStart, tokenEnd);
-                loggedIn = true;
-                Serial.printf("[SMS] Logged in via stok (token: %s...)\n",
-                              sessionToken.substring(0, 8).c_str());
-                http.end();
-                return true;
-            }
-        }
-
-        // Fallback: try to grab the token from response body
-        String body = http.getString();
-        if (body.indexOf("stok=") >= 0) {
-            int s = body.indexOf("stok=") + 5;
-            int e = body.indexOf('\"', s);
-            if (e < 0) e = body.indexOf('\'', s);
-            if (e < 0) e = body.indexOf('/', s);
-            if (e > s) {
-                sessionToken = body.substring(s, e);
-                loggedIn = true;
-                Serial.printf("[SMS] Logged in via body token\n");
-                http.end();
-                return true;
-            }
-        }
-
-        setError("Login OK but no session token found");
-    } else {
-        setError("Login HTTP error: %d", httpCode);
+    // Accept 200 OK or 403 Forbidden (Cudy sends login form as 403)
+    if (code != HTTP_CODE_OK && code != 403) {
+        setError("Login page GET error: %d", code);
+        http.end();
+        return false;
     }
 
+    String loginPage = http.getString();
     http.end();
-    loggedIn = false;
-    return false;
+
+    // Extract hidden fields — handle any attribute order
+
+    // Generic helper: find <input with name="X" and extract its value="Y"
+    auto extractHiddenField = [&](const String& page, const String& fieldName) -> String {
+        String searchName = String("name=\"") + fieldName + "\"";
+        int pos = page.indexOf(searchName);
+        if (pos < 0) return "";
+        // Search backward for '<input' and forward for '>'
+        int inputStart = page.lastIndexOf("<input", pos);
+        int inputEnd = page.indexOf(">", pos);
+        if (inputStart < 0 || inputEnd < 0) return "";
+        String inputTag = page.substring(inputStart, inputEnd + 1);
+        // Now extract value="..." from this tag
+        return extractBetween(inputTag, "value=\"", "\"");
+    };
+
+    String csrf = extractHiddenField(loginPage, "_csrf");
+    String token = extractHiddenField(loginPage, "token");
+    String salt = extractHiddenField(loginPage, "salt");
+
+    if (csrf.length() == 0 || token.length() == 0 || salt.length() == 0) {
+        setError("Could not extract login fields (csrf=%d, token=%d, salt=%d)",
+                 csrf.length(), token.length(), salt.length());
+        return false;
+    }
+
+    Serial.printf("[SMS] Login fields: csrf=%s... token=%s... salt=%s...\n",
+                  csrf.substring(0, 8).c_str(),
+                  token.substring(0, 8).c_str(),
+                  salt.substring(0, 8).c_str());
+
+    // Store login _csrf as fallback for send operations
+    csrfToken = csrf;
+
+    // --- Step 2: Double SHA-256 hash ---
+    // hash1 = SHA256(password + salt)
+    String hash1 = sha256Hex(String(routerPass) + salt);
+    // finalHash = SHA256(hash1 + token)
+    String finalHash = sha256Hex(hash1 + token);
+
+    Serial.printf("[SMS] Password hashed OK\n");
+
+    // --- Step 3: POST login ---
+    HTTPClient http2;
+    http2.begin(buildUrl("/cgi-bin/luci/"));
+    http2.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    http2.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    http2.setTimeout(10000);
+
+    const char* headerKeys[] = {"Set-Cookie", "Location"};
+    http2.collectHeaders(headerKeys, 2);
+
+    String postData = String("_csrf=") + csrf +
+                      "&token=" + token +
+                      "&salt=" + salt +
+                      "&luci_username=" + routerUser +
+                      "&luci_password=" + finalHash +
+                      "&luci_language=auto" +
+                      "&zonename=UTC" +
+                      "&timeclock=" + String(millis() / 1000) +
+                      "&cbi.submit=1";
+
+    int httpCode = http2.POST(postData);
+
+    Serial.printf("[SMS] Login POST response: %d\n", httpCode);
+
+    // LuCI responds with 302 redirect on successful login
+    if (httpCode == 302 || httpCode == 301 || httpCode == 200) {
+        // Extract sysauth cookie
+        String cookies = http2.header("Set-Cookie");
+        if (cookies.length() > 0) {
+            int start = cookies.indexOf("sysauth=");
+            if (start >= 0) {
+                start += 8;
+                int end = cookies.indexOf(';', start);
+                if (end < 0) end = cookies.length();
+                sysauthCookie = cookies.substring(start, end);
+                Serial.printf("[SMS] Logged in! sysauth=%s...\n",
+                              sysauthCookie.substring(0, 8).c_str());
+            }
+        }
+
+        // Also check the Location header for stok-style tokens
+        if (sysauthCookie.length() == 0) {
+            String location = http2.header("Location");
+            if (location.indexOf("sysauth=") >= 0) {
+                int s = location.indexOf("sysauth=") + 8;
+                int e = location.indexOf('&', s);
+                if (e < 0) e = location.length();
+                sysauthCookie = location.substring(s, e);
+            }
+        }
+    }
+
+    http2.end();
+
+    if (sysauthCookie.length() == 0) {
+        setError("Login failed — no session cookie (HTTP %d)", httpCode);
+        return false;
+    }
+
+    // --- Step 4: Fetch SMS page to get the page-level CSRF token ---
+    HTTPClient http3;
+    String smsUrl = buildUrl("/cgi-bin/luci/admin/network/gcom/sms?iface=4g");
+    http3.begin(smsUrl);
+    http3.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+    http3.setTimeout(10000);
+
+    int code3 = http3.GET();
+    Serial.printf("[SMS] SMS page response: %d\n", code3);
+
+    // Accept 200 or 403 (Cudy quirk)
+    if (code3 == HTTP_CODE_OK || code3 == 403) {
+        String body = http3.getString();
+        Serial.printf("[SMS] SMS page size: %d bytes\n", body.length());
+
+        // Try extracting "token" field first, then "_csrf"
+        csrfToken = extractCsrfToken(body);
+        if (csrfToken.length() == 0) {
+            // Try _csrf field instead
+            String searchName = "name=\"_csrf\"";
+            int pos = body.indexOf(searchName);
+            if (pos >= 0) {
+                int inputStart = body.lastIndexOf("<input", pos);
+                int inputEnd = body.indexOf(">", pos);
+                if (inputStart >= 0 && inputEnd >= 0) {
+                    String inputTag = body.substring(inputStart, inputEnd + 1);
+                    csrfToken = extractBetween(inputTag, "value=\"", "\"");
+                }
+            }
+        }
+
+        if (csrfToken.length() > 0) {
+            Serial.printf("[SMS] CSRF token: %s...\n", csrfToken.substring(0, 8).c_str());
+        } else {
+            Serial.println("[SMS] Warning: no CSRF token on SMS page");
+        }
+    } else {
+        Serial.printf("[SMS] Warning: SMS page returned %d\n", code3);
+    }
+    http3.end();
+
+    loggedIn = true;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
 // Send SMS
 // ---------------------------------------------------------------------------
+// POST /cgi-bin/luci/admin/network/gcom/sms/smsnew?nomodal=&iface=4g
+// Fields: token, cbid.smsnew.1.phone, cbid.smsnew.1.content, cbi.submit=1
 
 bool smsGatewaySend(const char* phoneNumber, const char* message)
 {
     if (!loggedIn) {
-        if (!smsGatewayLogin()) {
-            return false;
-        }
+        if (!smsGatewayLogin()) return false;
     }
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        HTTPClient http;
+        // Step 1: GET the smsnew page to extract its CSRF token
+        HTTPClient httpGet;
+        String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms/smsnew?nomodal=&iface=4g");
 
-        // LuCI SMS send endpoint (typical for Cudy/OpenWrt with gcom)
-        // Try the gcom SMS endpoint first
-        String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms?iface=4g");
+        httpGet.begin(url);
+        httpGet.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+        httpGet.setTimeout(10000);
 
-        http.begin(url);
-        http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-        http.addHeader("Cookie", String("sysauth=") + sessionToken);
-        http.setConnectTimeout(5000);
-        http.setTimeout(15000);
-
-        // Build form data for sending SMS
-        String postData = String("action=send") +
-                          "&phone=" + phoneNumber +
-                          "&message=" + message +
-                          "&token=" + sessionToken;
-
-        int httpCode = http.POST(postData);
-
-        if (httpCode == HTTP_CODE_OK || httpCode == 200) {
-            String response = http.getString();
-            http.end();
-
-            // Check for success indicators in the response
-            if (response.indexOf("error") < 0 || response.indexOf("success") >= 0) {
-                Serial.printf("[SMS] Sent to %s: \"%s\"\n", phoneNumber, message);
-                return true;
-            } else {
-                setError("Send response indicates error");
+        int getCode = httpGet.GET();
+        // Accept 200 or 403
+        if (getCode != 200 && getCode != 403) {
+            setError("Send GET error: %d (attempt %d)", getCode, attempt + 1);
+            httpGet.end();
+            if (getCode == 401) {
+                loggedIn = false;
+                if (smsGatewayLogin()) continue;
+                return false;
             }
+            if (attempt < MAX_RETRIES - 1) delay(RETRY_DELAY_MS);
+            continue;
+        }
+
+        String page = httpGet.getString();
+        httpGet.end();
+
+        // Extract token from the smsnew page
+        // The smsnew form uses name="token" (not _csrf)
+        String sendToken = extractCsrfToken(page);
+        if (sendToken.length() == 0) {
+            // Fallback: try _csrf
+            String searchName = "name=\"_csrf\"";
+            int pos = page.indexOf(searchName);
+            if (pos >= 0) {
+                int inputStart = page.lastIndexOf("<input", pos);
+                int inputEnd = page.indexOf(">", pos);
+                if (inputStart >= 0 && inputEnd >= 0) {
+                    String tag = page.substring(inputStart, inputEnd + 1);
+                    sendToken = extractBetween(tag, "value=\"", "\"");
+                }
+            }
+        }
+
+        if (sendToken.length() == 0) {
+            setError("No token on smsnew page (attempt %d)", attempt + 1);
+            if (attempt < MAX_RETRIES - 1) delay(RETRY_DELAY_MS);
+            continue;
+        }
+
+        Serial.printf("[SMS] Send token: %s...\n", sendToken.substring(0, 8).c_str());
+
+        // Step 2: POST the SMS
+        HTTPClient httpPost;
+        httpPost.begin(url);
+        httpPost.addHeader("Content-Type", "application/x-www-form-urlencoded");
+        httpPost.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+        httpPost.setTimeout(15000);
+
+        // URL-encode message
+        String encodedMsg = message;
+        encodedMsg.replace("%", "%25");
+        encodedMsg.replace(" ", "+");
+        encodedMsg.replace("&", "%26");
+        encodedMsg.replace("=", "%3D");
+        encodedMsg.replace("#", "%23");
+
+        String postData = String("token=") + sendToken +
+                          "&cbid.smsnew.1.phone=" + phoneNumber +
+                          "&cbid.smsnew.1.content=" + encodedMsg +
+                          "&cbi.submit=1" +
+                          "&cbid.smsnew.1.send=Send";
+
+        int httpCode = httpPost.POST(postData);
+        Serial.printf("[SMS] Send POST response: %d\n", httpCode);
+
+        if (httpCode == HTTP_CODE_OK || httpCode == 200 || httpCode == 302) {
+            httpPost.end();
+            Serial.printf("[SMS] Sent to %s: \"%s\"\n", phoneNumber, message);
+            return true;
         } else if (httpCode == 403 || httpCode == 401) {
-            // Session expired — re-login
-            http.end();
+            httpPost.end();
             loggedIn = false;
-            if (smsGatewayLogin()) {
-                continue;  // Retry with new token
-            }
+            if (smsGatewayLogin()) continue;
             return false;
         } else {
             setError("Send HTTP error: %d (attempt %d)", httpCode, attempt + 1);
-            http.end();
+            httpPost.end();
         }
 
         if (attempt < MAX_RETRIES - 1) {
-            delay(RETRY_DELAY_MS * (attempt + 1));  // Simple backoff
+            delay(RETRY_DELAY_MS * (attempt + 1));
         }
     }
-
     return false;
 }
 
 // ---------------------------------------------------------------------------
 // Poll Inbox
 // ---------------------------------------------------------------------------
+// GET /cgi-bin/luci/admin/network/gcom/sms/smslist?smsbox=rec&iface=4g
+// Returns HTML table with <tr class="cbi-section-table-row ...">
 
 int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
 {
     if (!loggedIn) {
-        if (!smsGatewayLogin()) {
-            return 0;
-        }
+        if (!smsGatewayLogin()) return 0;
     }
 
     HTTPClient http;
-
-    String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms?iface=4g&action=read");
+    String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms/smslist?smsbox=rec&iface=4g");
 
     http.begin(url);
-    http.addHeader("Cookie", String("sysauth=") + sessionToken);
+    http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
     http.setConnectTimeout(5000);
     http.setTimeout(10000);
 
@@ -223,9 +407,8 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
         http.end();
         loggedIn = false;
         if (smsGatewayLogin()) {
-            // Retry once
             http.begin(url);
-            http.addHeader("Cookie", String("sysauth=") + sessionToken);
+            http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
             httpCode = http.GET();
         }
     }
@@ -239,149 +422,109 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
     String body = http.getString();
     http.end();
 
-    // Parse the response.
-    // LuCI/gcom may return HTML or JSON depending on firmware.
-    // We'll try JSON first, then fall back to HTML scraping.
-
+    // --- Parse HTML table rows ---
     int count = 0;
+    int searchPos = 0;
 
-    // Try JSON parsing
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, body);
+    while (count < maxMessages) {
+        int rowStart = body.indexOf("<tr class=\"cbi-section-table-row", searchPos);
+        if (rowStart < 0) break;
 
-    if (!err && doc.is<JsonArray>()) {
-        JsonArray arr = doc.as<JsonArray>();
-        for (JsonObject obj : arr) {
-            if (count >= maxMessages) break;
+        int rowEnd = body.indexOf("</tr>", rowStart);
+        if (rowEnd < 0) break;
 
-            msgs[count].id = obj["id"] | count;
+        String row = body.substring(rowStart, rowEnd);
 
-            const char* sender = obj["sender"] | (const char*)nullptr;
-            if (!sender) sender = obj["from"] | "unknown";
-            strncpy(msgs[count].sender, sender, sizeof(msgs[count].sender) - 1);
+        // Extract <td> contents
+        int tdPos = 0;
+        int tdIdx = 0;
+        String phone = "";
+        String content = "";
+        String timestamp = "";
+        String cfgId = "";
+
+        while (tdIdx < 6) {
+            int tdStart = row.indexOf("<td", tdPos);
+            if (tdStart < 0) break;
+            int tdContentStart = row.indexOf(">", tdStart) + 1;
+            int tdEnd = row.indexOf("</td>", tdContentStart);
+            if (tdEnd < 0) break;
+
+            String cellContent = row.substring(tdContentStart, tdEnd);
+            cellContent.trim();
+
+            switch (tdIdx) {
+                case 1: phone = cellContent; break;
+                case 2: content = cellContent; break;
+                case 3: timestamp = cellContent; break;
+                case 4: {
+                    int cfgStart = cellContent.indexOf("cfg=");
+                    if (cfgStart >= 0) {
+                        cfgStart += 4;
+                        int cfgEnd = cellContent.indexOf("&", cfgStart);
+                        if (cfgEnd < 0) cfgEnd = cellContent.indexOf("\"", cfgStart);
+                        if (cfgEnd < 0) cfgEnd = cellContent.indexOf("'", cfgStart);
+                        if (cfgEnd > cfgStart) cfgId = cellContent.substring(cfgStart, cfgEnd);
+                    }
+                    break;
+                }
+            }
+
+            tdPos = tdEnd + 5;
+            tdIdx++;
+        }
+
+        if (phone.length() > 0) {
+            msgs[count].id = count;
+            strncpy(msgs[count].sender, phone.c_str(), sizeof(msgs[count].sender) - 1);
             msgs[count].sender[sizeof(msgs[count].sender) - 1] = '\0';
-
-            const char* msgBody = obj["body"] | (const char*)nullptr;
-            if (!msgBody) msgBody = obj["text"] | (const char*)nullptr;
-            if (!msgBody) msgBody = obj["content"] | "";
-            strncpy(msgs[count].body, msgBody, sizeof(msgs[count].body) - 1);
+            strncpy(msgs[count].body, content.c_str(), sizeof(msgs[count].body) - 1);
             msgs[count].body[sizeof(msgs[count].body) - 1] = '\0';
-
-            const char* ts = obj["timestamp"] | (const char*)nullptr;
-            if (!ts) ts = obj["date"] | "";
-            strncpy(msgs[count].timestamp, ts, sizeof(msgs[count].timestamp) - 1);
+            strncpy(msgs[count].timestamp, timestamp.c_str(), sizeof(msgs[count].timestamp) - 1);
             msgs[count].timestamp[sizeof(msgs[count].timestamp) - 1] = '\0';
 
+            if (cfgId.length() > 0) {
+                msgs[count].id = (int)strtol(cfgId.c_str() + 3, nullptr, 16);
+            }
             count++;
         }
-    } else if (!err && doc.is<JsonObject>()) {
-        // Some routers wrap messages in an object
-        JsonArray arr = doc["messages"].as<JsonArray>();
-        if (arr.isNull()) {
-            arr = doc["sms"].as<JsonArray>();
-        }
-        if (!arr.isNull()) {
-            for (JsonObject obj : arr) {
-                if (count >= maxMessages) break;
 
-                msgs[count].id = obj["id"] | count;
-
-                const char* sender = obj["sender"] | (const char*)nullptr;
-                if (!sender) sender = obj["from"] | "unknown";
-                strncpy(msgs[count].sender, sender, sizeof(msgs[count].sender) - 1);
-                msgs[count].sender[sizeof(msgs[count].sender) - 1] = '\0';
-
-                const char* msgBody = obj["body"] | (const char*)nullptr;
-                if (!msgBody) msgBody = obj["text"] | (const char*)nullptr;
-                if (!msgBody) msgBody = obj["content"] | "";
-                strncpy(msgs[count].body, msgBody, sizeof(msgs[count].body) - 1);
-                msgs[count].body[sizeof(msgs[count].body) - 1] = '\0';
-
-                const char* ts = obj["timestamp"] | (const char*)nullptr;
-                if (!ts) ts = obj["date"] | "";
-                strncpy(msgs[count].timestamp, ts, sizeof(msgs[count].timestamp) - 1);
-                msgs[count].timestamp[sizeof(msgs[count].timestamp) - 1] = '\0';
-
-                count++;
-            }
-        }
-    } else {
-        // HTML scraping fallback — look for SMS content in HTML
-        // This is router-specific and may need adjustment
-        Serial.println("[SMS] Response is not JSON, attempting HTML parse");
-
-        // Simple extraction: look for patterns like phone numbers and message text
-        // between known HTML tags. This is fragile but a starting point.
-        int searchPos = 0;
-        while (count < maxMessages) {
-            // Look for SMS entries in the HTML
-            int msgStart = body.indexOf("sms-message", searchPos);
-            if (msgStart < 0) {
-                msgStart = body.indexOf("message-item", searchPos);
-            }
-            if (msgStart < 0) break;
-
-            // Try to extract sender (phone number pattern)
-            int numStart = body.indexOf('+', msgStart);
-            if (numStart < 0) numStart = body.indexOf("tel:", msgStart);
-            if (numStart >= 0) {
-                int numEnd = numStart;
-                while (numEnd < (int)body.length() &&
-                       (isdigit(body[numEnd]) || body[numEnd] == '+')) {
-                    numEnd++;
-                }
-                String sender = body.substring(numStart, numEnd);
-                strncpy(msgs[count].sender, sender.c_str(),
-                        sizeof(msgs[count].sender) - 1);
-            } else {
-                strncpy(msgs[count].sender, "unknown",
-                        sizeof(msgs[count].sender) - 1);
-            }
-
-            msgs[count].id = count;
-            msgs[count].body[0] = '\0';
-            msgs[count].timestamp[0] = '\0';
-            count++;
-            searchPos = msgStart + 10;
-        }
+        searchPos = rowEnd + 5;
     }
 
     if (count > 0) {
         Serial.printf("[SMS] Polled %d message(s)\n", count);
     }
-
     return count;
 }
 
 // ---------------------------------------------------------------------------
 // Delete Message
 // ---------------------------------------------------------------------------
+// GET /cgi-bin/luci/admin/network/gcom/sms/delsms?iface=4g&cfg=<id>
 
 bool smsGatewayDeleteMessage(int messageId)
 {
     if (!loggedIn) {
-        if (!smsGatewayLogin()) {
-            return false;
-        }
+        if (!smsGatewayLogin()) return false;
     }
 
-    HTTPClient http;
+    char cfgBuf[16];
+    snprintf(cfgBuf, sizeof(cfgBuf), "cfg%06x", (unsigned int)messageId);
 
-    String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms?iface=4g");
+    HTTPClient http;
+    String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms/delsms?iface=4g&cfg=");
+    url += cfgBuf;
 
     http.begin(url);
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-    http.addHeader("Cookie", String("sysauth=") + sessionToken);
+    http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+    http.setTimeout(10000);
 
-    String postData = String("action=delete") +
-                      "&id=" + String(messageId) +
-                      "&token=" + sessionToken;
-
-    int httpCode = http.POST(postData);
+    int httpCode = http.GET();
     http.end();
 
-    if (httpCode == HTTP_CODE_OK || httpCode == 200) {
-        Serial.printf("[SMS] Deleted message %d\n", messageId);
+    if (httpCode == HTTP_CODE_OK || httpCode == 200 || httpCode == 302) {
+        Serial.printf("[SMS] Deleted message %s\n", cfgBuf);
         return true;
     }
 
@@ -399,7 +542,8 @@ void smsGatewayInit(const char* ip, const char* user, const char* pass)
     strncpy(routerUser, user, sizeof(routerUser) - 1);
     strncpy(routerPass, pass, sizeof(routerPass) - 1);
     loggedIn = false;
-    sessionToken = "";
+    sysauthCookie = "";
+    csrfToken = "";
     Serial.printf("[SMS] Gateway init — router: %s\n", routerIp);
 }
 
@@ -409,7 +553,8 @@ void smsGatewaySetCredentials(const char* ip, const char* user, const char* pass
     strncpy(routerUser, user, sizeof(routerUser) - 1);
     strncpy(routerPass, pass, sizeof(routerPass) - 1);
     loggedIn = false;
-    sessionToken = "";
+    sysauthCookie = "";
+    csrfToken = "";
     Serial.printf("[SMS] Credentials updated — router: %s\n", routerIp);
 }
 

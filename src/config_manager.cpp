@@ -6,6 +6,7 @@
 #include "sms_commands.h"
 #include "whatsapp_client.h"
 #include "mqtt_client.h"
+#include "onvif_client.h"
 #include "network.h"
 #include <Preferences.h>
 
@@ -37,6 +38,11 @@ static const char* KEY_MQTT_PORT     = "mqPort";
 static const char* KEY_MQTT_USER     = "mqUser";
 static const char* KEY_MQTT_PASS     = "mqPass";
 static const char* KEY_MQTT_CLIENTID = "mqClientId";
+static const char* KEY_ONVIF_HOST     = "ovHost";
+static const char* KEY_ONVIF_PORT     = "ovPort";
+static const char* KEY_ONVIF_USER     = "ovUser";
+static const char* KEY_ONVIF_PASS     = "ovPass";
+static const char* KEY_ONVIF_ZONE     = "ovZone";
 static const char* KEY_CONFIGURED    = "configured";
 
 // ---------------------------------------------------------------------------
@@ -88,6 +94,14 @@ void configLoad()
     String mqPass = prefs.getString(KEY_MQTT_PASS, "");
     String mqClientId = prefs.getString(KEY_MQTT_CLIENTID, "SF_Alarm");
     mqttSetConfig(mqServer.c_str(), mqPort, mqUser.c_str(), mqPass.c_str(), mqClientId.c_str());
+
+    // --- ONVIF ---
+    String ovHost = prefs.getString(KEY_ONVIF_HOST, "");
+    uint16_t ovPort = prefs.getUShort(KEY_ONVIF_PORT, 80);
+    String ovUser = prefs.getString(KEY_ONVIF_USER, "");
+    String ovPass = prefs.getString(KEY_ONVIF_PASS, "");
+    uint8_t ovZone = prefs.getUChar(KEY_ONVIF_ZONE, 1);
+    onvifSetServer(ovHost.c_str(), ovPort, ovUser.c_str(), ovPass.c_str(), ovZone);
 
     // --- Phone numbers ---
     smsCmdClearPhones();
@@ -189,6 +203,13 @@ void configSave()
     prefs.putString(KEY_MQTT_PASS, mqttGetPass());
     prefs.putString(KEY_MQTT_CLIENTID, mqttGetClientId());
 
+    // --- ONVIF ---
+    prefs.putString(KEY_ONVIF_HOST, onvifGetHost());
+    prefs.putUShort(KEY_ONVIF_PORT, onvifGetPort());
+    prefs.putString(KEY_ONVIF_USER, onvifGetUser());
+    prefs.putString(KEY_ONVIF_PASS, onvifGetPass());
+    prefs.putUChar(KEY_ONVIF_ZONE, onvifGetTargetZone());
+
     Serial.println("[CFG] Configuration saved");
 }
 
@@ -217,6 +238,7 @@ void configPrint()
     Serial.printf("  WA Mode:     %d (1:SMS, 2:WA, 3:Both)\n", (int)whatsappGetMode());
     Serial.printf("  MQTT Server: %s:%d\n", mqttGetServer(), mqttGetPort());
     Serial.printf("  MQTT User:   %s\n", mqttGetUser());
+    Serial.printf("  ONVIF Cam:   %s:%d (Zone %d)\n", onvifGetHost(), onvifGetPort(), (int)onvifGetTargetZone());
 
     int phoneCnt = smsCmdGetPhoneCount();
     Serial.printf("  Phones (%d):\n", phoneCnt);

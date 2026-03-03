@@ -7,6 +7,7 @@
 #include "sms_commands.h"
 #include "whatsapp_client.h"
 #include "mqtt_client.h"
+#include "onvif_client.h"
 #include "config_manager.h"
 #include "network.h"
 
@@ -113,6 +114,15 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
     mqtt["clientId"] = mqttGetClientId();
     mqtt["connected"] = mqttIsConnected();
 
+    // --- ONVIF ---
+    JsonObject onvif = doc["onvif"].to<JsonObject>();
+    onvif["host"]       = onvifGetHost();
+    onvif["port"]       = onvifGetPort();
+    onvif["user"]       = onvifGetUser();
+    onvif["pass"]       = onvifGetPass();
+    onvif["targetZone"] = onvifGetTargetZone();
+    onvif["connected"]  = onvifIsConnected();
+
     String json;
     serializeJson(doc, json);
     return response->send(200, "application/json", json.c_str());
@@ -166,6 +176,30 @@ static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* respon
     configSave();
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"MQTT settings saved\"}");
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/settings/onvif — set ONVIF camera credentials
+// Body: { "host": "...", "port": 80, "user": "...", "pass": "...", "targetZone": 1 }
+// ---------------------------------------------------------------------------
+static esp_err_t handlePostOnvif(PsychicRequest* request, PsychicResponse* response)
+{
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, request->body());
+    if (err) {
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+    }
+
+    const char* host = doc["host"] | "";
+    uint16_t port    = doc["port"] | 80;
+    const char* user = doc["user"] | "";
+    const char* pass = doc["pass"] | "";
+    uint8_t zone     = doc["targetZone"] | 1;
+
+    onvifSetServer(host, port, user, pass, zone);
+    configSave();
+
+    return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Camera settings saved\"}");
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +340,8 @@ void webServerInit()
     server.on("/api/outputs", HTTP_GET, handleApiOutputs);
 
     // REST API — POST
+    server.on("/api/settings/onvif", HTTP_POST, handlePostOnvif);
+    
     server.on("/api/arm", HTTP_POST, handleApiArm);
     server.on("/api/disarm", HTTP_POST, handleApiDisarm);
     server.on("/api/settings/alerts", HTTP_POST, handlePostAlerts);

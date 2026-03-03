@@ -83,6 +83,10 @@ ZoneConfig* zonesGetConfig(uint8_t zoneIndex);
 /// Bypass/unbypass a zone.
 void zonesSetBypassed(uint8_t zoneIndex, bool bypassed);
 
+/// Set virtual input state for a zone (e.g. from ONVIF camera).
+/// This state is ORed with the physical hardware input.
+void zonesSetVirtualInput(uint8_t zoneIndex, bool state);
+
 /// Check if all enabled zones are in NORMAL state.
 bool zonesAllClear();
 

@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 static ZoneInfo zones[MAX_ZONES];
 static ZoneEventCallback eventCallback = nullptr;
+static uint16_t virtualInputBitmask = 0;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -74,7 +75,7 @@ void zonesUpdate(uint16_t inputBitmask)
         if (!zones[i].config.enabled) continue;
         if (zones[i].state == ZONE_BYPASSED) continue;
 
-        bool triggered = isInputTriggered(i, inputBitmask);
+        bool triggered = isInputTriggered(i, inputBitmask) || ((virtualInputBitmask >> i) & 1);
 
         // --- Debounce logic ---
         if (triggered != zones[i].rawInput) {
@@ -131,6 +132,17 @@ void zonesSetBypassed(uint8_t zoneIndex, bool bypassed)
         zones[zoneIndex].debouncing = false;
         Serial.printf("[ZONE] Zone %d (%s) UN-BYPASSED\n",
                       zoneIndex + 1, zones[zoneIndex].config.name);
+    }
+}
+
+void zonesSetVirtualInput(uint8_t zoneIndex, bool state)
+{
+    if (zoneIndex >= MAX_ZONES) return;
+
+    if (state) {
+        virtualInputBitmask |= (1 << zoneIndex);
+    } else {
+        virtualInputBitmask &= ~(1 << zoneIndex);
     }
 }
 

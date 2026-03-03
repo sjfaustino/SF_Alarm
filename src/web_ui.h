@@ -528,7 +528,45 @@ body {
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-header">
+      <div style="display:flex; align-items:center; gap:8px">
+        <svg style="width:20px; height:20px" viewBox="0 0 24 24" fill="currentColor"><path d="M12,9L17,14H14V18H10V14H7L12,9M18,3C19.1,3 20,3.9 20,5V19C20,20.1 19.1,21 18,21H6C4.89,21 4,20.1 4,19V5C4,3.89 4.89,3 6,3H18M18,5H6V19H18V5Z"/></svg>
+        <span>Camera Settings (ONVIF)</span>
+      </div>
+      <span id="onvifStatus" class="conn-dot"></span>
+    </div>
+    <div class="card-body">
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;">
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Camera IP</label>
+          <input type="text" id="ovHost" placeholder="e.g. 192.168.1.100" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Port</label>
+          <input type="number" id="ovPort" value="80" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Username</label>
+          <input type="text" id="ovUser" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Password</label>
+          <input type="password" id="ovPass" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Trigger Zone (1-16)</label>
+          <input type="number" id="ovZone" value="1" min="1" max="16" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+      </div>
+      <div style="margin-top:16px; display:flex; justify-content:flex-end">
+        <button class="btn arm" onclick="saveOnvifSettings()">💾 Save Camera</button>
+      </div>
+    </div>
+  </div>
+
 </div>
+
 
 <!-- PIN Modal -->
 <div class="modal-overlay" id="pinModal">
@@ -689,13 +727,21 @@ async function saveAlertSettings() {
 }
 
 async function saveMqttSettings() {
-  const server = document.getElementById('mqServer').value;
+  const host = document.getElementById('mqServer').value;
   const port = parseInt(document.getElementById('mqPort').value);
   const user = document.getElementById('mqUser').value;
   const pass = document.getElementById('mqPass').value;
-  const clientId = document.getElementById('mqClientId').value;
-  
-  apiPost('/api/settings/mqtt', { server, port, user, pass, clientId });
+  const cid  = document.getElementById('mqClientId').value;
+  await apiPost('/api/settings/mqtt', {server:host, port, user, pass, clientId:cid});
+}
+
+async function saveOnvifSettings() {
+  const host = document.getElementById('ovHost').value;
+  const port = parseInt(document.getElementById('ovPort').value);
+  const user = document.getElementById('ovUser').value;
+  const pass = document.getElementById('ovPass').value;
+  const zone = parseInt(document.getElementById('ovZone').value);
+  await apiPost('/api/settings/onvif', {host, port, user, pass, targetZone: zone});
 }
 
 function escHtml(s) {
@@ -754,6 +800,12 @@ async function refresh() {
       document.getElementById('mqPass').value = d.mqtt.pass;
       document.getElementById('mqClientId').value = d.mqtt.clientId;
       
+      document.getElementById('ovHost').value = d.onvif.host;
+      document.getElementById('ovPort').value = d.onvif.port;
+      document.getElementById('ovUser').value = d.onvif.user;
+      document.getElementById('ovPass').value = d.onvif.pass;
+      document.getElementById('ovZone').value = d.onvif.targetZone;
+      
       window.settingsLoaded = true;
     }
 
@@ -761,6 +813,11 @@ async function refresh() {
     const mqDot = document.getElementById('mqttStatus');
     if (d.mqtt.connected) mqDot.classList.add('ok');
     else mqDot.classList.remove('ok');
+
+    // ONVIF status
+    const ovDot = document.getElementById('onvifStatus');
+    if (d.onvif.connected) ovDot.classList.add('ok');
+    else ovDot.classList.remove('ok');
 
   } catch (e) {
     if (connected) { connected = false; toast('Connection lost','error'); }

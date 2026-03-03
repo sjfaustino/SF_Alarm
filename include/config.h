@@ -73,7 +73,7 @@
 
 #define DEFAULT_ROUTER_IP       "192.168.10.1"
 #define DEFAULT_ROUTER_USER     "admin"
-#define DEFAULT_ROUTER_PASS     "admin"
+#define DEFAULT_ROUTER_PASS     "Leda69+1"
 
 #define WIFI_CONNECT_TIMEOUT_MS 15000
 #define WIFI_RECONNECT_DELAY_MS 5000
