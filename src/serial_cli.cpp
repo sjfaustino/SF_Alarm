@@ -17,6 +17,16 @@
 static char lineBuffer[CLI_MAX_LINE_LEN];
 static int  linePos = 0;
 
+// Non-blocking state for test input monitor
+static bool inputMonitorActive = false;
+static uint16_t lastMonitorInputs = 0xFFFF;
+
+// Non-blocking state for factory reset confirmation
+static bool factoryPending = false;
+static uint32_t factoryTimeoutMs = 0;
+static char factoryConfirm[8] = "";
+static int factoryConfirmPos = 0;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -347,21 +357,8 @@ static void processLine(const char* line)
             }
         } else if (strcmp(arg1, "input") == 0) {
             Serial.println("Live input monitor (press any key to stop)...");
-            uint16_t last = 0xFFFF;
-            while (!Serial.available()) {
-                uint16_t inputs = ioExpanderReadInputs();
-                if (inputs != last) {
-                    Serial.printf("  Inputs: 0x%04X |", inputs);
-                    for (int i = 0; i < 16; i++) {
-                        Serial.printf(" %d:%d", i + 1, (inputs >> i) & 1);
-                    }
-                    Serial.println();
-                    last = inputs;
-                }
-                delay(100);
-            }
-            while (Serial.available()) Serial.read();  // Flush
-            Serial.println("Monitor stopped");
+            inputMonitorActive = true;
+            lastMonitorInputs = 0xFFFF;
         } else if (strncmp(arg1, "wa ", 3) == 0 || strcmp(arg1, "wa") == 0) {
             const char* msg = (strlen(arg1) > 3) ? arg1 + 3 : "SF_Alarm test message";
             Serial.printf("Sending WhatsApp to %s...\n", whatsappGetPhone());
@@ -381,24 +378,13 @@ static void processLine(const char* line)
         configLoad();
     }
     else if (strcmp(start, "factory") == 0) {
-        Serial.println("Factory reset? Type 'YES' to confirm:");
-        // Simple blocking confirmation
-        delay(100);
-        char confirm[8] = "";
-        int ci = 0;
-        uint32_t timeout = millis() + 10000;
-        while (millis() < timeout) {
-            if (Serial.available()) {
-                char c = Serial.read();
-                if (c == '\n' || c == '\r') break;
-                if (ci < 7) { confirm[ci++] = c; confirm[ci] = '\0'; }
-            }
-        }
-        if (strcmp(confirm, "YES") == 0) {
-            configFactoryReset();
-        } else {
-            Serial.println("Factory reset cancelled");
-        }
+        Serial.println("Factory reset? Type 'YES' to confirm (10s timeout):");
+        factoryPending = true;
+        factoryTimeoutMs = millis() + 10000;
+        factoryConfirmPos = 0;
+        factoryConfirm[0] = '\0';
+        // Don't print prompt — handled by cliUpdate
+        return;
     }
     else if (strcmp(start, "config") == 0) {
         configPrint();
@@ -434,6 +420,58 @@ void cliInit()
 
 void cliUpdate()
 {
+    // --- Non-blocking input monitor ---
+    if (inputMonitorActive) {
+        if (Serial.available()) {
+            while (Serial.available()) Serial.read(); // Flush
+            inputMonitorActive = false;
+            Serial.println("Monitor stopped");
+            printPrompt();
+            return;
+        }
+        // Sample inputs (called from main loop, so doesn't block)
+        uint16_t inputs = ioExpanderReadInputs();
+        if (inputs != lastMonitorInputs) {
+            Serial.printf("  Inputs: 0x%04X |", inputs);
+            for (int i = 0; i < 16; i++) {
+                Serial.printf(" %d:%d", i + 1, (inputs >> i) & 1);
+            }
+            Serial.println();
+            lastMonitorInputs = inputs;
+        }
+        return; // Don't process normal CLI while monitoring
+    }
+
+    // --- Non-blocking factory reset confirmation ---
+    if (factoryPending) {
+        if (millis() > factoryTimeoutMs) {
+            factoryPending = false;
+            Serial.println("Factory reset cancelled (timeout)");
+            printPrompt();
+            return;
+        }
+        while (Serial.available()) {
+            char c = Serial.read();
+            if (c == '\n' || c == '\r') {
+                factoryPending = false;
+                if (strcmp(factoryConfirm, "YES") == 0) {
+                    configFactoryReset();
+                } else {
+                    Serial.println("Factory reset cancelled");
+                }
+                printPrompt();
+                return;
+            }
+            if (factoryConfirmPos < 7) {
+                factoryConfirm[factoryConfirmPos++] = c;
+                factoryConfirm[factoryConfirmPos] = '\0';
+                Serial.print(c);
+            }
+        }
+        return; // Don't process normal CLI while confirming
+    }
+
+    // --- Normal CLI processing ---
     while (Serial.available()) {
         char c = Serial.read();
 

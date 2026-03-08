@@ -83,11 +83,21 @@ const char* alarmGetPin();
 void alarmSetExitDelay(uint16_t seconds);
 void alarmSetEntryDelay(uint16_t seconds);
 
+/// Get entry/exit delay durations (in seconds).
+uint16_t alarmGetExitDelay();
+uint16_t alarmGetEntryDelay();
+
 /// Set siren duration (in seconds, 0 = unlimited until disarm).
 void alarmSetSirenDuration(uint16_t seconds);
 
+/// Get siren duration (in seconds).
+uint16_t alarmGetSirenDuration();
+
 /// Set the output channel used for the siren (0–15, default 0).
 void alarmSetSirenOutput(uint8_t channel);
+
+/// Get the siren output channel.
+uint8_t alarmGetSirenOutput();
 
 /// Print alarm status to Serial.
 void alarmPrintStatus();

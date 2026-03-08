@@ -24,4 +24,10 @@ int networkGetRSSI();
 /// Print network status to Serial.
 void networkPrintStatus();
 
+/// Get current WiFi SSID (for config persistence).
+const char* networkGetSsid();
+
+/// Get current WiFi password (for config persistence).
+const char* networkGetPass();
+
 #endif // SF_ALARM_NETWORK_H

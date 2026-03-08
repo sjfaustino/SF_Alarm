@@ -25,7 +25,9 @@ void networkInit()
 void networkSetWifi(const char* ssid, const char* password)
 {
     strncpy(wifiSsid, ssid, sizeof(wifiSsid) - 1);
+    wifiSsid[sizeof(wifiSsid) - 1] = '\0';
     strncpy(wifiPass, password, sizeof(wifiPass) - 1);
+    wifiPass[sizeof(wifiPass) - 1] = '\0';
 
     // Disconnect and reconnect
     WiFi.disconnect();
@@ -97,3 +99,6 @@ void networkPrintStatus()
     }
     Serial.println("----------------------");
 }
+
+const char* networkGetSsid() { return wifiSsid; }
+const char* networkGetPass() { return wifiPass; }

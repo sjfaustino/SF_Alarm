@@ -163,6 +163,16 @@ void configSave()
     // --- Alarm PIN ---
     prefs.putString(KEY_PIN, alarmGetPin());
 
+    // --- Alarm timing ---
+    prefs.putUShort(KEY_EXIT_DELAY, alarmGetExitDelay());
+    prefs.putUShort(KEY_ENTRY_DELAY, alarmGetEntryDelay());
+    prefs.putUShort(KEY_SIREN_DUR, alarmGetSirenDuration());
+    prefs.putUChar(KEY_SIREN_CH, alarmGetSirenOutput());
+
+    // --- WiFi credentials ---
+    prefs.putString(KEY_WIFI_SSID, networkGetSsid());
+    prefs.putString(KEY_WIFI_PASS, networkGetPass());
+
     // --- Phone numbers ---
     int phoneCnt = smsCmdGetPhoneCount();
     prefs.putInt(KEY_PHONE_COUNT, phoneCnt);

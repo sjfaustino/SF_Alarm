@@ -214,13 +214,17 @@ void onvifInit() {
 
 void onvifSetServer(const char* host, uint16_t port, const char* user, const char* pass, uint8_t targetZone) {
     strncpy(state.host, host, sizeof(state.host)-1);
+    state.host[sizeof(state.host)-1] = '\0';
     state.port = port;
     strncpy(state.user, user, sizeof(state.user)-1);
+    state.user[sizeof(state.user)-1] = '\0';
     strncpy(state.pass, pass, sizeof(state.pass)-1);
+    state.pass[sizeof(state.pass)-1] = '\0';
     state.targetZone = (targetZone > 0 && targetZone <= MAX_ZONES) ? targetZone - 1 : 0;
     
     state.connected = false; // Reset to force new subscription
     state.subscriptionAddress = "";
+    state.lastRenewMs = 0;
 }
 
 void onvifUpdate() {
@@ -234,8 +238,19 @@ void onvifUpdate() {
         if (now - state.lastPollMs > 10000) {
             createSubscription();
             state.lastPollMs = now;
+            state.lastRenewMs = now; // Reset renewal timer on new subscription
         }
     } else {
+        // Renew subscription every 50 seconds (before typical 60s expiry)
+        if (now - state.lastRenewMs > 50000) {
+            state.lastRenewMs = now;
+            // Re-create subscription to renew (simple approach)
+            if (!createSubscription()) {
+                state.connected = false;
+                Serial.println("[ONVIF] Subscription renewal failed");
+            }
+        }
+
         // Poll every 1 second
         if (now - state.lastPollMs > 1000) {
             pollMessages();

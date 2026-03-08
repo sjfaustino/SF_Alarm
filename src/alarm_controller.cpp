@@ -353,17 +353,23 @@ void alarmSetExitDelay(uint16_t seconds)
     Serial.printf("[ALARM] Exit delay set to %d seconds\n", seconds);
 }
 
+uint16_t alarmGetExitDelay() { return exitDelaySec; }
+
 void alarmSetEntryDelay(uint16_t seconds)
 {
     entryDelaySec = seconds;
     Serial.printf("[ALARM] Entry delay set to %d seconds\n", seconds);
 }
 
+uint16_t alarmGetEntryDelay() { return entryDelaySec; }
+
 void alarmSetSirenDuration(uint16_t seconds)
 {
     sirenDurationSec = seconds;
     Serial.printf("[ALARM] Siren duration set to %d seconds\n", seconds);
 }
+
+uint16_t alarmGetSirenDuration() { return sirenDurationSec; }
 
 void alarmSetSirenOutput(uint8_t channel)
 {
@@ -372,6 +378,8 @@ void alarmSetSirenOutput(uint8_t channel)
         Serial.printf("[ALARM] Siren output channel set to %d\n", channel);
     }
 }
+
+uint8_t alarmGetSirenOutput() { return sirenOutputChannel; }
 
 void alarmPrintStatus()
 {

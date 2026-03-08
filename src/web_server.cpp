@@ -260,11 +260,11 @@ static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* respons
 {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, request->body());
-    // Allow empty body for backward compat, but require PIN if provided
+    // If PIN is provided, validate it before muting
     if (!err && !doc["pin"].isNull()) {
         const char* pin = doc["pin"] | "";
-        if (!alarmDisarm(pin) && strlen(pin) > 0) {
-            // PIN provided but wrong — still allow mute (it's non-destructive)
+        if (strlen(pin) > 0 && !alarmDisarm(pin)) {
+            return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"Wrong PIN\"}");
         }
     }
     alarmMuteSiren();
