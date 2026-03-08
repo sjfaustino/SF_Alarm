@@ -45,4 +45,9 @@ bool smsGatewayIsLoggedIn();
 /// Get the last error message (for debugging).
 const char* smsGatewayGetLastError();
 
+/// Get current router credentials (for config persistence).
+const char* smsGatewayGetRouterIp();
+const char* smsGatewayGetRouterUser();
+const char* smsGatewayGetRouterPass();
+
 #endif // SF_ALARM_SMS_GATEWAY_H

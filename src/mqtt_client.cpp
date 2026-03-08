@@ -22,8 +22,18 @@ static unsigned long lastReconnectAttempt = 0;
 // SF_Alarm/zone/N -> ON/OFF
 // SF_Alarm/output/N -> ON/OFF
 
+/// Parse "COMMAND:PIN" format, returns pointer to PIN or empty string
+static const char* extractPin(char* message) {
+    char* sep = strchr(message, ':');
+    if (sep) {
+        *sep = '\0';
+        return sep + 1;
+    }
+    return "";
+}
+
 void mqttCallback(char* topic, byte* payload, unsigned long length) {
-    char message[32];
+    char message[64];
     if (length >= sizeof(message)) length = sizeof(message) - 1;
     memcpy(message, payload, length);
     message[length] = '\0';
@@ -31,26 +41,31 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
     Serial.printf("[MQTT] Message arrived [%s]: %s\n", topic, message);
 
     if (strstr(topic, "/cmd")) {
-        if (strcmp(message, "DISARM") == 0) {
-            // we don't have PIN here, so we allow it for now if PIN is empty or 
-            // maybe we should require PIN in the payload?
-            // For now, let's assume we need a bypass or a dedicated MQTT pin.
-            // Matching CLI/SMS: we should technically require a PIN.
-            // Payload could be "DISARM:1234"
-            char* sep = strchr(message, ':');
-            if (sep) {
-                *sep = '\0';
-                const char* pin = sep + 1;
-                alarmDisarm(pin);
+        // All arm/disarm commands require PIN: "COMMAND:pin"
+        // MUTE is non-destructive and allowed without PIN
+        if (strncmp(message, "DISARM", 6) == 0) {
+            const char* pin = extractPin(message);
+            if (alarmDisarm(pin)) {
+                mqttPublish("SF_Alarm/events", "DISARMED via MQTT");
             } else {
-                alarmDisarm(""); // Try empty pin
+                mqttPublish("SF_Alarm/events", "DISARM failed (wrong PIN)");
             }
-        } 
-        else if (strcmp(message, "ARM_HOME") == 0) {
-            alarmArmHome("");
         }
-        else if (strcmp(message, "ARM_AWAY") == 0) {
-            alarmArmAway("");
+        else if (strncmp(message, "ARM_HOME", 8) == 0) {
+            const char* pin = extractPin(message);
+            if (alarmArmHome(pin)) {
+                mqttPublish("SF_Alarm/events", "ARM_HOME via MQTT");
+            } else {
+                mqttPublish("SF_Alarm/events", "ARM_HOME failed (wrong PIN)");
+            }
+        }
+        else if (strncmp(message, "ARM_AWAY", 8) == 0) {
+            const char* pin = extractPin(message);
+            if (alarmArmAway(pin)) {
+                mqttPublish("SF_Alarm/events", "ARM_AWAY via MQTT");
+            } else {
+                mqttPublish("SF_Alarm/events", "ARM_AWAY failed (wrong PIN)");
+            }
         }
         else if (strcmp(message, "MUTE") == 0) {
             alarmMuteSiren();
@@ -65,10 +80,14 @@ void mqttInit() {
 
 void mqttSetConfig(const char* server, uint16_t port, const char* user, const char* pass, const char* clientId) {
     strncpy(mqttServer, server, sizeof(mqttServer)-1);
+    mqttServer[sizeof(mqttServer)-1] = '\0';
     mqttPort = port;
     strncpy(mqttUser, user, sizeof(mqttUser)-1);
+    mqttUser[sizeof(mqttUser)-1] = '\0';
     strncpy(mqttPass, pass, sizeof(mqttPass)-1);
+    mqttPass[sizeof(mqttPass)-1] = '\0';
     strncpy(mqttClientId, clientId, sizeof(mqttClientId)-1);
+    mqttClientId[sizeof(mqttClientId)-1] = '\0';
     
     client.setServer(mqttServer, mqttPort);
 }

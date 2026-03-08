@@ -19,6 +19,7 @@
 static uint32_t lastInputScan   = 0;
 static uint32_t lastSmsPoll     = 0;
 static uint32_t lastReportMs    = 0;
+static uint32_t lastMqttSync    = 0;
 static bool     lastAllClear    = true;
 
 // ---------------------------------------------------------------------------
@@ -248,10 +249,10 @@ void loop()
     // --- 6. Serial CLI ---
     cliUpdate();
 
-    // --- 7. MQTT Loop (sync state at ~1 Hz via SMS_POLL_INTERVAL_MS) ---
+    // --- 7. MQTT Loop ---
     mqttUpdate();
-    if (now - lastSmsPoll < SMS_POLL_INTERVAL_MS + 20) {
-        // Sync state roughly once per SMS poll cycle (~5s) instead of 50Hz
+    if (now - lastMqttSync >= 5000) {
+        lastMqttSync = now;
         mqttSyncState();
     }
 

@@ -172,6 +172,11 @@ void configSave()
         prefs.putString(key, smsCmdGetPhone(i));
     }
 
+    // --- Router credentials ---
+    prefs.putString(KEY_ROUTER_IP, smsGatewayGetRouterIp());
+    prefs.putString(KEY_ROUTER_USER, smsGatewayGetRouterUser());
+    prefs.putString(KEY_ROUTER_PASS, smsGatewayGetRouterPass());
+
     // --- Zone configurations ---
     for (int i = 0; i < MAX_ZONES; i++) {
         const ZoneInfo* info = zonesGetInfo(i);

@@ -549,8 +549,11 @@ bool smsGatewayDeleteMessage(int messageId)
 void smsGatewayInit(const char* ip, const char* user, const char* pass)
 {
     strncpy(routerIp, ip, sizeof(routerIp) - 1);
+    routerIp[sizeof(routerIp) - 1] = '\0';
     strncpy(routerUser, user, sizeof(routerUser) - 1);
+    routerUser[sizeof(routerUser) - 1] = '\0';
     strncpy(routerPass, pass, sizeof(routerPass) - 1);
+    routerPass[sizeof(routerPass) - 1] = '\0';
     loggedIn = false;
     sysauthCookie = "";
     csrfToken = "";
@@ -560,8 +563,11 @@ void smsGatewayInit(const char* ip, const char* user, const char* pass)
 void smsGatewaySetCredentials(const char* ip, const char* user, const char* pass)
 {
     strncpy(routerIp, ip, sizeof(routerIp) - 1);
+    routerIp[sizeof(routerIp) - 1] = '\0';
     strncpy(routerUser, user, sizeof(routerUser) - 1);
+    routerUser[sizeof(routerUser) - 1] = '\0';
     strncpy(routerPass, pass, sizeof(routerPass) - 1);
+    routerPass[sizeof(routerPass) - 1] = '\0';
     loggedIn = false;
     sysauthCookie = "";
     csrfToken = "";
@@ -576,4 +582,19 @@ bool smsGatewayIsLoggedIn()
 const char* smsGatewayGetLastError()
 {
     return lastError;
+}
+
+const char* smsGatewayGetRouterIp()
+{
+    return routerIp;
+}
+
+const char* smsGatewayGetRouterUser()
+{
+    return routerUser;
+}
+
+const char* smsGatewayGetRouterPass()
+{
+    return routerPass;
 }

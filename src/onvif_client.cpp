@@ -41,10 +41,39 @@ static OnvifState state = {0};
 // ---------------------------------------------------------------------------
 
 static String getTimestamp() {
-    // Ideally use SNTP, but for digest a local monotonic approximation might work 
-    // if the camera isn't too strict. However, standard ONVIF prefers UTC.
-    // For now, we'll use a dummy or just zeros if time isn't synced.
-    return "2026-03-01T23:45:00Z"; 
+    // Use millis()-based epoch estimate. Real ONVIF should use NTP-synced time,
+    // but many cameras accept approximate timestamps for digest auth.
+    // Base: 2026-03-08T00:00:00Z epoch = 1772956800
+    unsigned long uptimeSec = millis() / 1000;
+    unsigned long epoch = 1772956800UL + uptimeSec;
+    
+    // Convert epoch to ISO 8601 (simplified — good enough for digest nonce)
+    unsigned long days = epoch / 86400;
+    unsigned long rem  = epoch % 86400;
+    int hours = rem / 3600;
+    int mins  = (rem % 3600) / 60;
+    int secs  = rem % 60;
+    
+    // Approximate year/month/day from days since epoch 1970
+    int year = 1970;
+    while (true) {
+        int daysInYear = (year % 4 == 0) ? 366 : 365;
+        if ((int)days < daysInYear) break;
+        days -= daysInYear;
+        year++;
+    }
+    int monthDays[] = {31,28+(year%4==0?1:0),31,30,31,30,31,31,30,31,30,31};
+    int month = 1;
+    for (int i = 0; i < 12; i++) {
+        if ((int)days < monthDays[i]) break;
+        days -= monthDays[i];
+        month++;
+    }
+    int day = days + 1;
+    
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ", year, month, day, hours, mins, secs);
+    return String(buf);
 }
 
 static String generateDigest(const char* nonce, const char* created, const char* password) {
@@ -141,9 +170,21 @@ static void pollMessages() {
     if (code == 200) {
         String res = http.getString();
         // Look for Motion Detection events
-        // Typically: <tt:Data><tt:SimpleItem Name="IsMotion" Value="true"/></tt:Data>
-        // Or similar for CellMotionDetector
-        bool motion = (res.indexOf("Value=\"true\"") != -1 && res.indexOf("Motion") != -1);
+        // Match specifically: Name="IsMotion" ... Value="true" within the same SimpleItem
+        // Avoids false positives from unrelated "true" values in the response
+        bool motion = false;
+        int searchPos = 0;
+        while (true) {
+            int namePos = res.indexOf("IsMotion", searchPos);
+            if (namePos < 0) break;
+            // Look for Value="true" within 100 chars after IsMotion
+            int valuePos = res.indexOf("Value=\"true\"", namePos);
+            if (valuePos >= 0 && valuePos - namePos < 100) {
+                motion = true;
+                break;
+            }
+            searchPos = namePos + 8;
+        }
         
         zonesSetVirtualInput(state.targetZone, motion);
         

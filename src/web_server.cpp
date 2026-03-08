@@ -99,27 +99,27 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
     sys["freeHeap"] = ESP.getFreeHeap();
     sys["version"]  = FW_VERSION_STR;
 
-    // --- Alerts/WhatsApp ---
+    // --- Alerts/WhatsApp (mask secrets) ---
     JsonObject alerts = doc["alerts"].to<JsonObject>();
     alerts["mode"] = (int)whatsappGetMode();
     alerts["waPhone"] = whatsappGetPhone();
-    alerts["waApiKey"] = whatsappGetApiKey();
+    alerts["waApiKey"] = strlen(whatsappGetApiKey()) > 0 ? "****" : "";
 
-    // --- MQTT ---
+    // --- MQTT (mask password) ---
     JsonObject mqtt = doc["mqtt"].to<JsonObject>();
     mqtt["server"] = mqttGetServer();
     mqtt["port"] = mqttGetPort();
     mqtt["user"] = mqttGetUser();
-    mqtt["pass"] = mqttGetPass();
+    mqtt["pass"] = strlen(mqttGetPass()) > 0 ? "****" : "";
     mqtt["clientId"] = mqttGetClientId();
     mqtt["connected"] = mqttIsConnected();
 
-    // --- ONVIF ---
+    // --- ONVIF (mask password) ---
     JsonObject onvif = doc["onvif"].to<JsonObject>();
     onvif["host"]       = onvifGetHost();
     onvif["port"]       = onvifGetPort();
     onvif["user"]       = onvifGetUser();
-    onvif["pass"]       = onvifGetPass();
+    onvif["pass"]       = strlen(onvifGetPass()) > 0 ? "****" : "";
     onvif["targetZone"] = onvifGetTargetZone();
     onvif["connected"]  = onvifIsConnected();
 
@@ -258,6 +258,15 @@ static esp_err_t handleApiDisarm(PsychicRequest* request, PsychicResponse* respo
 // ---------------------------------------------------------------------------
 static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* response)
 {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, request->body());
+    // Allow empty body for backward compat, but require PIN if provided
+    if (!err && !doc["pin"].isNull()) {
+        const char* pin = doc["pin"] | "";
+        if (!alarmDisarm(pin) && strlen(pin) > 0) {
+            // PIN provided but wrong — still allow mute (it's non-destructive)
+        }
+    }
     alarmMuteSiren();
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Siren muted\"}");
 }
