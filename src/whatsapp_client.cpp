@@ -39,14 +39,18 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
 
     HTTPClient http;
     
-    // CallMeBot API URL format:
-    // https://api.callmebot.com/whatsapp.php?phone=[phone]&text=[text]&apikey=[apikey]
-    String url = "https://api.callmebot.com/whatsapp.php?phone=";
-    url += phone;
-    url += "&text=";
-    url += urlEncode(message);
-    url += "&apikey=";
-    url += apiKey;
+    // Build URL using fixed buffer to avoid String heap fragmentation
+    // CallMeBot API: https://api.callmebot.com/whatsapp.php?phone=X&text=Y&apikey=Z
+    String encodedMsg = urlEncode(message);
+    int urlLen = 60 + strlen(phone) + encodedMsg.length() + strlen(apiKey);
+    char* url = (char*)malloc(urlLen + 1);
+    if (!url) {
+        Serial.println("[WA] Error: URL buffer allocation failed");
+        return false;
+    }
+    snprintf(url, urlLen + 1,
+             "https://api.callmebot.com/whatsapp.php?phone=%s&text=%s&apikey=%s",
+             phone, encodedMsg.c_str(), apiKey);
 
     Serial.printf("[WA] Sending alert to %s...\n", phone);
     
@@ -62,9 +66,16 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
     }
     
     http.end();
+    free(url);
     return success;
 }
 
+/// Master alert router — controlled by WhatsAppMode:
+///   WA_MODE_SMS:      SMS only (via smsCmdSendAlert)
+///   WA_MODE_WHATSAPP: WhatsApp only (via whatsappSend)
+///   WA_MODE_BOTH:     SMS + WhatsApp
+/// Note: WorkingMode in sms_commands controls SMS delivery method (SMS/Call/Both),
+/// while WhatsAppMode here controls which channels get the alert.
 void alarmBroadcast(const char* message) {
     // 1. Send via SMS if needed
     if (waMode == WA_MODE_SMS || waMode == WA_MODE_BOTH) {

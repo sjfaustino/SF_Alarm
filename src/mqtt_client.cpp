@@ -146,31 +146,53 @@ static const char* haStateMap[] = {
     "triggered"   // MODE_TRIGGERED
 };
 
+// Change detection for MQTT sync
+static int lastPublishedState = -1;
+static uint16_t lastPublishedZones = 0xFFFF;  // bitmask of zone rawInput
+static uint16_t lastPublishedOutputs = 0xFFFF;
+
 void mqttSyncState() {
     if (!client.connected()) return;
 
-    // 1. Alarm State
+    // 1. Alarm State (only publish on change)
     AlarmState st = alarmGetState();
-    if ((int)st < 6) {
+    if ((int)st != lastPublishedState && (int)st < 6) {
         client.publish("SF_Alarm/state", haStateMap[(int)st], true);
+        lastPublishedState = (int)st;
     }
 
-    // 2. Zones
+    // 2. Zones (build current bitmask and compare)
+    uint16_t currentZones = 0;
     for (int i = 0; i < 16; i++) {
         const ZoneInfo* zi = zonesGetInfo(i);
-        if (zi) {
-            char topic[32];
-            snprintf(topic, sizeof(topic), "SF_Alarm/zone/%d", i + 1);
-            client.publish(topic, zi->rawInput ? "ON" : "OFF", true);
+        if (zi && zi->rawInput) currentZones |= (1 << i);
+    }
+    if (currentZones != lastPublishedZones) {
+        for (int i = 0; i < 16; i++) {
+            bool current = (currentZones >> i) & 1;
+            bool previous = (lastPublishedZones >> i) & 1;
+            if (current != previous) {
+                char topic[32];
+                snprintf(topic, sizeof(topic), "SF_Alarm/zone/%d", i + 1);
+                client.publish(topic, current ? "ON" : "OFF", true);
+            }
         }
+        lastPublishedZones = currentZones;
     }
 
-    // 3. Outputs
+    // 3. Outputs (only publish changed)
     uint16_t outs = ioExpanderGetOutputs();
-    for (int i = 0; i < 16; i++) {
-        char topic[32];
-        snprintf(topic, sizeof(topic), "SF_Alarm/output/%d", i + 1);
-        client.publish(topic, (outs & (1 << i)) ? "ON" : "OFF", true);
+    if (outs != lastPublishedOutputs) {
+        for (int i = 0; i < 16; i++) {
+            bool current = (outs >> i) & 1;
+            bool previous = (lastPublishedOutputs >> i) & 1;
+            if (current != previous) {
+                char topic[32];
+                snprintf(topic, sizeof(topic), "SF_Alarm/output/%d", i + 1);
+                client.publish(topic, current ? "ON" : "OFF", true);
+            }
+        }
+        lastPublishedOutputs = outs;
     }
 }
 

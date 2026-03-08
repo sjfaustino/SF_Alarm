@@ -149,6 +149,13 @@ void configLoad()
                 cfg->enabled = prefs.getBool(key, true);
             }
         }
+
+        // Load alarm text
+        snprintf(key, sizeof(key), "zTxt%d", i);
+        String txt = prefs.getString(key, "");
+        if (txt.length() > 0) {
+            smsCmdSetAlarmText(i, txt.c_str());
+        }
     }
 
     Serial.println("[CFG] Configuration loaded");
@@ -205,6 +212,10 @@ void configSave()
 
         snprintf(key, sizeof(key), "zEn%d", i);
         prefs.putBool(key, info->config.enabled);
+
+        // Save alarm text
+        snprintf(key, sizeof(key), "zTxt%d", i);
+        prefs.putString(key, smsCmdGetAlarmText(i));
     }
 
     // --- Periodic Report & Recovery ---

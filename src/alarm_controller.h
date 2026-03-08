@@ -79,6 +79,9 @@ void alarmSetPin(const char* pin);
 /// Get the current alarm PIN code.
 const char* alarmGetPin();
 
+/// Validate a PIN without side effects (does NOT disarm).
+bool alarmValidatePin(const char* pin);
+
 /// Set entry/exit delay durations (in seconds).
 void alarmSetExitDelay(uint16_t seconds);
 void alarmSetEntryDelay(uint16_t seconds);

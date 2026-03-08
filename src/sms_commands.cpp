@@ -678,7 +678,18 @@ void smsCmdInit()
 
 void smsCmdProcess(const char* sender, const char* body)
 {
-    Serial.printf("[CMD] SMS from %s: \"%s\"\n", sender, body);
+    // Redact PIN-containing commands in serial output
+    char upper4[8] = "";
+    strncpy(upper4, body, 7);
+    upper4[7] = '\0';
+    for (int i = 0; upper4[i]; i++) upper4[i] = toupper(upper4[i]);
+    
+    bool hasPIN = (strncmp(upper4, "ARM", 3) == 0 || strncmp(upper4, "DISARM", 6) == 0);
+    if (hasPIN) {
+        Serial.printf("[CMD] SMS from %s: \"[PIN REDACTED]\"\n", sender);
+    } else {
+        Serial.printf("[CMD] SMS from %s: \"%s\"\n", sender, body);
+    }
 
     // Make a trimmed copy
     char trimmed[160];

@@ -347,6 +347,11 @@ const char* alarmGetPin()
     return alarmPin;
 }
 
+bool alarmValidatePin(const char* pin)
+{
+    return validatePin(pin);
+}
+
 void alarmSetExitDelay(uint16_t seconds)
 {
     exitDelaySec = seconds;
