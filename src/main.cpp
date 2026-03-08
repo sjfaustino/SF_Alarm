@@ -197,9 +197,6 @@ void loop()
         uint16_t inputs = ioExpanderReadInputs();
         zonesUpdate(inputs);
 
-        // Sync to MQTT if any zone raw input changed (simplified: sync every scan)
-        mqttSyncState();
-
         // --- Recovery alert (GA09: #0#) ---
         bool currentAllClear = zonesAllClear();
         if (currentAllClear && !lastAllClear) {
@@ -251,8 +248,12 @@ void loop()
     // --- 6. Serial CLI ---
     cliUpdate();
 
-    // --- 7. MQTT Loop ---
+    // --- 7. MQTT Loop (sync state at ~1 Hz via SMS_POLL_INTERVAL_MS) ---
     mqttUpdate();
+    if (now - lastSmsPoll < SMS_POLL_INTERVAL_MS + 20) {
+        // Sync state roughly once per SMS poll cycle (~5s) instead of 50Hz
+        mqttSyncState();
+    }
 
     // --- 8. ONVIF ---
     onvifUpdate();

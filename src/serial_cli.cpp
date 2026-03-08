@@ -176,8 +176,10 @@ static void processLine(const char* line)
                     else if (strcmp(typeStr, "dly") == 0) cfg->type = ZONE_DELAYED;
                     else if (strcmp(typeStr, "24h") == 0) cfg->type = ZONE_24H;
                     else if (strcmp(typeStr, "flw") == 0) cfg->type = ZONE_FOLLOWER;
-                    else { Serial.println("Unknown type: inst|dly|24h|flw"); goto done; }
-                    Serial.printf("Zone %d type updated\n", zoneNum);
+                    else { Serial.println("Unknown type: inst|dly|24h|flw"); }
+                    if (cfg->type != ZONE_INSTANT || strcmp(typeStr, "inst") == 0) {
+                        Serial.printf("Zone %d type updated\n", zoneNum);
+                    }
                 } else if (strcmp(subcmd, "nc") == 0) {
                     cfg->wiring = ZONE_NC;
                     Serial.printf("Zone %d set to NC\n", zoneNum);
@@ -410,7 +412,6 @@ static void processLine(const char* line)
         Serial.printf("Unknown command: '%s'. Type 'help' for options.\n", start);
     }
 
-done:
     printPrompt();
 }
 

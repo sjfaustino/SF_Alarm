@@ -343,13 +343,23 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
         httpPost.addHeader("Cookie", String("sysauth=") + sysauthCookie);
         httpPost.setTimeout(15000);
 
-        // URL-encode message
-        String encodedMsg = message;
-        encodedMsg.replace("%", "%25");
-        encodedMsg.replace(" ", "+");
-        encodedMsg.replace("&", "%26");
-        encodedMsg.replace("=", "%3D");
-        encodedMsg.replace("#", "%23");
+        // URL-encode message (form encoding)
+        String encodedMsg = "";
+        for (unsigned int i = 0; i < strlen(message); i++) {
+            char c = message[i];
+            if (c == ' ') encodedMsg += '+';
+            else if (c == '%') encodedMsg += "%25";
+            else if (c == '&') encodedMsg += "%26";
+            else if (c == '=') encodedMsg += "%3D";
+            else if (c == '#') encodedMsg += "%23";
+            else if (c == '+') encodedMsg += "%2B";
+            else if (c == '\n') encodedMsg += "%0A";
+            else if (c == '\r') encodedMsg += "%0D";
+            else if (c == '"') encodedMsg += "%22";
+            else if (c == '<') encodedMsg += "%3C";
+            else if (c == '>') encodedMsg += "%3E";
+            else encodedMsg += c;
+        }
 
         String postData = String("token=") + sendToken +
                           "&cbid.smsnew.1.phone=" + phoneNumber +

@@ -115,6 +115,13 @@ void configLoad()
         }
     }
 
+    // --- WiFi credentials ---
+    String wifiSsid = prefs.getString(KEY_WIFI_SSID, "");
+    String wifiPassStr = prefs.getString(KEY_WIFI_PASS, "");
+    if (wifiSsid.length() > 0) {
+        networkSetWifi(wifiSsid.c_str(), wifiPassStr.c_str());
+    }
+
     // --- Router credentials ---
     String routerIp   = prefs.getString(KEY_ROUTER_IP, DEFAULT_ROUTER_IP);
     String routerUser = prefs.getString(KEY_ROUTER_USER, DEFAULT_ROUTER_USER);
@@ -153,9 +160,8 @@ void configSave()
 
     prefs.putBool(KEY_CONFIGURED, true);
 
-    // We don't have direct getters for PIN etc., so the user must set them
-    // via CLI before saving. The alarm controller stores them internally.
-    // For robust persistence, we save what we can get.
+    // --- Alarm PIN ---
+    prefs.putString(KEY_PIN, alarmGetPin());
 
     // --- Phone numbers ---
     int phoneCnt = smsCmdGetPhoneCount();

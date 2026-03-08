@@ -22,6 +22,10 @@ static bool     sirenMuted               = false;
 
 static uint8_t  triggeringZone           = 0xFF; // Which zone triggered the alarm
 
+// Pending arm mode during exit delay (separate from triggeringZone)
+enum PendingArmMode : uint8_t { ARM_PENDING_AWAY = 0, ARM_PENDING_HOME = 1 };
+static PendingArmMode pendingArmMode     = ARM_PENDING_AWAY;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -64,10 +68,9 @@ static bool validatePin(const char* pin)
 static void setState(AlarmState newState)
 {
     if (currentState == newState) return;
-    Serial.printf("[ALARM] State: %s -> %s\n",
-                  alarmGetStateStr(), "...");
+    const char* oldStr = alarmGetStateStr();
     currentState = newState;
-    Serial.printf("[ALARM] State: ... -> %s\n", alarmGetStateStr());
+    Serial.printf("[ALARM] State: %s -> %s\n", oldStr, alarmGetStateStr());
 }
 
 // ---------------------------------------------------------------------------
@@ -186,9 +189,7 @@ void alarmUpdate()
             uint32_t elapsed = now - delayStartMs;
             if (elapsed >= (uint32_t)exitDelaySec * 1000) {
                 // Exit delay complete — system is armed
-                // Determine which mode we were arming into
-                // (We store this in triggeringZone as a flag: 0 = away, 1 = home)
-                if (triggeringZone == 1) {
+                if (pendingArmMode == ARM_PENDING_HOME) {
                     setState(ALARM_ARMED_HOME);
                     fireEvent(EVT_ARMED_HOME, "System armed (HOME)");
                 } else {
@@ -242,8 +243,8 @@ bool alarmArmAway(const char* pin)
     }
 
     // Start exit delay
-    delayStartMs   = millis();
-    triggeringZone  = 0;   // 0 = away mode flag
+    delayStartMs    = millis();
+    pendingArmMode  = ARM_PENDING_AWAY;
     setState(ALARM_EXIT_DELAY);
     fireEvent(EVT_EXIT_DELAY, "Arming AWAY — exit delay started");
     Serial.printf("[ALARM] Exit delay: %d seconds\n", exitDelaySec);
@@ -263,8 +264,8 @@ bool alarmArmHome(const char* pin)
         return false;
     }
 
-    delayStartMs   = millis();
-    triggeringZone  = 1;   // 1 = home mode flag
+    delayStartMs    = millis();
+    pendingArmMode  = ARM_PENDING_HOME;
     setState(ALARM_EXIT_DELAY);
     fireEvent(EVT_EXIT_DELAY, "Arming HOME — exit delay started");
     Serial.printf("[ALARM] Exit delay: %d seconds\n", exitDelaySec);
@@ -339,6 +340,11 @@ void alarmSetPin(const char* pin)
     strncpy(alarmPin, pin, MAX_PIN_LEN - 1);
     alarmPin[MAX_PIN_LEN - 1] = '\0';
     Serial.println("[ALARM] PIN updated");
+}
+
+const char* alarmGetPin()
+{
+    return alarmPin;
 }
 
 void alarmSetExitDelay(uint16_t seconds)

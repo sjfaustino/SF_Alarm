@@ -1,7 +1,6 @@
 #include "network.h"
 #include "config.h"
 #include <WiFi.h>
-#include <Preferences.h>
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -19,38 +18,14 @@ void networkInit()
 {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
-
-    // Load saved credentials from NVS
-    Preferences prefs;
-    prefs.begin(NVS_NAMESPACE, true);  // read-only
-    String ssid = prefs.getString("wifiSsid", "");
-    String pass = prefs.getString("wifiPass", "");
-    prefs.end();
-
-    if (ssid.length() > 0) {
-        strncpy(wifiSsid, ssid.c_str(), sizeof(wifiSsid) - 1);
-        strncpy(wifiPass, pass.c_str(), sizeof(wifiPass) - 1);
-
-        Serial.printf("[NET] Connecting to Wi-Fi: %s\n", wifiSsid);
-        WiFi.begin(wifiSsid, wifiPass);
-        connecting = true;
-        lastReconnectAttempt = millis();
-    } else {
-        Serial.println("[NET] No Wi-Fi credentials configured");
-    }
+    // WiFi credentials loaded by configLoad() -> networkSetWifi()
+    Serial.println("[NET] WiFi initialized (waiting for config)");
 }
 
 void networkSetWifi(const char* ssid, const char* password)
 {
     strncpy(wifiSsid, ssid, sizeof(wifiSsid) - 1);
     strncpy(wifiPass, password, sizeof(wifiPass) - 1);
-
-    // Save to NVS
-    Preferences prefs;
-    prefs.begin(NVS_NAMESPACE, false);
-    prefs.putString("wifiSsid", wifiSsid);
-    prefs.putString("wifiPass", wifiPass);
-    prefs.end();
 
     // Disconnect and reconnect
     WiFi.disconnect();
@@ -59,7 +34,7 @@ void networkSetWifi(const char* ssid, const char* password)
     connecting = true;
     lastReconnectAttempt = millis();
 
-    Serial.printf("[NET] Wi-Fi credentials updated: %s\n", wifiSsid);
+    Serial.printf("[NET] Wi-Fi credentials updated: %s (use 'save' to persist)\n", wifiSsid);
 }
 
 void networkUpdate()

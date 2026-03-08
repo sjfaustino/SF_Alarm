@@ -76,6 +76,9 @@ uint16_t alarmGetDelayRemaining();
 /// Set the alarm PIN code.
 void alarmSetPin(const char* pin);
 
+/// Get the current alarm PIN code.
+const char* alarmGetPin();
+
 /// Set entry/exit delay durations (in seconds).
 void alarmSetExitDelay(uint16_t seconds);
 void alarmSetEntryDelay(uint16_t seconds);

@@ -48,18 +48,21 @@ static bool isAuthorized(const char* sender)
     if (phoneCount == 0) return false;
 
     for (int i = 0; i < phoneCount; i++) {
-        // Compare last 10 digits for flexibility with country code formatting
-        int senderLen = strlen(sender);
-        int storedLen = strlen(phoneNumbers[i]);
-
-        if (senderLen >= 10 && storedLen >= 10) {
-            if (strcmp(sender + senderLen - 10,
-                       phoneNumbers[i] + storedLen - 10) == 0) {
-                return true;
-            }
-        }
+        // Exact match first
         if (strcmp(sender, phoneNumbers[i]) == 0) {
             return true;
+        }
+        // Compare last 11 digits for flexibility with country code formatting
+        // (11 digits = country code + local number, avoids cross-country collisions)
+        int senderLen = strlen(sender);
+        int storedLen = strlen(phoneNumbers[i]);
+        const int MATCH_DIGITS = 11;
+
+        if (senderLen >= MATCH_DIGITS && storedLen >= MATCH_DIGITS) {
+            if (strcmp(sender + senderLen - MATCH_DIGITS,
+                       phoneNumbers[i] + storedLen - MATCH_DIGITS) == 0) {
+                return true;
+            }
         }
     }
     return false;
