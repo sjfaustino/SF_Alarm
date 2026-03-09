@@ -51,8 +51,6 @@ void networkUpdate()
             Serial.printf("[NET] Connected! IP: %s  RSSI: %d dBm\n",
                           WiFi.localIP().toString().c_str(),
                           WiFi.RSSI());
-            // Small delay to ensure network stack is fully up before other services start firing
-            delay(500);
         }
     } else {
         if (!connecting) {

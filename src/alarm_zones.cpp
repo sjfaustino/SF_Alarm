@@ -6,7 +6,8 @@
 // ---------------------------------------------------------------------------
 static ZoneInfo zones[MAX_ZONES];
 static ZoneEventCallback eventCallback = nullptr;
-static uint16_t virtualInputBitmask = 0;
+static volatile uint16_t virtualInputBitmask = 0;
+static portMUX_TYPE vInputMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -75,7 +76,12 @@ void zonesUpdate(uint16_t inputBitmask)
         if (!zones[i].config.enabled) continue;
         if (zones[i].state == ZONE_BYPASSED) continue;
 
-        bool triggered = isInputTriggered(i, inputBitmask) || ((virtualInputBitmask >> i) & 1);
+        // Read virtual inputs under spinlock (shared with ONVIF task on Core 0)
+        portENTER_CRITICAL(&vInputMux);
+        uint16_t vInput = virtualInputBitmask;
+        portEXIT_CRITICAL(&vInputMux);
+
+        bool triggered = isInputTriggered(i, inputBitmask) || ((vInput >> i) & 1);
 
         // --- Debounce logic ---
         if (triggered != zones[i].rawInput) {
@@ -139,11 +145,13 @@ void zonesSetVirtualInput(uint8_t zoneIndex, bool state)
 {
     if (zoneIndex >= MAX_ZONES) return;
 
+    portENTER_CRITICAL(&vInputMux);
     if (state) {
         virtualInputBitmask |= (1 << zoneIndex);
     } else {
         virtualInputBitmask &= ~(1 << zoneIndex);
     }
+    portEXIT_CRITICAL(&vInputMux);
 }
 
 bool zonesAllClear()

@@ -64,6 +64,9 @@
 #define DEFAULT_REPORT_INTERVAL_MIN  0       // 0 = disabled
 #define MAX_REPORT_INTERVAL_MIN      9999
 
+// Alert queue
+#define ALERT_QUEUE_SIZE        10
+
 // Input scan interval
 #define INPUT_SCAN_INTERVAL_MS   20     // 50 Hz scan rate
 

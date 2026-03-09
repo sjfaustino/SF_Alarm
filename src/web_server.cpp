@@ -292,6 +292,12 @@ static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* respo
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
     }
 
+    // Require PIN for zone bypass/unbypass
+    const char* pin = doc["pin"] | "";
+    if (strlen(pin) == 0 || !alarmValidatePin(pin)) {
+        return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
+    }
+
     int zone     = doc["zone"] | -1;
     bool bypass  = doc["bypass"] | false;
 
@@ -326,6 +332,12 @@ static esp_err_t handleApiOutput(PsychicRequest* request, PsychicResponse* respo
     DeserializationError err = deserializeJson(doc, request->body());
     if (err) {
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+    }
+
+    // Require PIN for output control
+    const char* pin = doc["pin"] | "";
+    if (strlen(pin) == 0 || !alarmValidatePin(pin)) {
+        return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
 
     int ch     = doc["channel"] | -1;

@@ -22,12 +22,15 @@ static unsigned long lastReconnectAttempt = 0;
 // SF_Alarm/zone/N -> ON/OFF
 // SF_Alarm/output/N -> ON/OFF
 
-/// Parse "COMMAND:PIN" format, returns pointer to PIN or empty string
-static const char* extractPin(char* message) {
-    char* sep = strchr(message, ':');
+/// Parse "COMMAND:PIN" format safely without mutating the input buffer
+static char mqttPinBuffer[32];
+
+static const char* extractPin(const char* message) {
+    const char* sep = strchr(message, ':');
     if (sep) {
-        *sep = '\0';
-        return sep + 1;
+        strncpy(mqttPinBuffer, sep + 1, sizeof(mqttPinBuffer) - 1);
+        mqttPinBuffer[sizeof(mqttPinBuffer) - 1] = '\0';
+        return mqttPinBuffer;
     }
     return "";
 }

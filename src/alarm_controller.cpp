@@ -28,7 +28,8 @@ static PendingArmMode pendingArmMode     = ARM_PENDING_AWAY;
 
 // Security: PIN Lockout
 static uint8_t  failedAttempts           = 0;
-static uint32_t lockoutEndMs             = 0;
+static uint32_t lockoutStartMs           = 0;
+static bool     lockedOut                = false;
 static const uint8_t  MAX_FAILED_ATTEMPTS = 5;
 static const uint32_t LOCKOUT_DURATION_MS = 300000; // 5 minutes
 
@@ -67,10 +68,12 @@ static void sirenOff()
 
 static bool validatePin(const char* pin)
 {
-    if (millis() < lockoutEndMs) {
+    // Overflow-safe lockout check
+    if (lockedOut && (millis() - lockoutStartMs) < LOCKOUT_DURATION_MS) {
         Serial.println("[ALARM] SECURITY: PIN entry locked due to multiple failures");
         return false;
     }
+    lockedOut = false; // Lockout expired
 
     if (pin == nullptr || strlen(pin) == 0) return false;
     
@@ -80,8 +83,9 @@ static bool validatePin(const char* pin)
     } else {
         failedAttempts++;
         if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
-            lockoutEndMs = millis() + LOCKOUT_DURATION_MS;
-            Serial.println("[ALARM] SECURITY: Too many failed attempts! Locking out for 5 minutes.");
+            lockedOut = true;
+            lockoutStartMs = millis();
+            Serial.println("[ALARM] SECURITY: Too many failed attempts! Locked out for 5 minutes.");
         }
         return false;
     }
@@ -376,8 +380,10 @@ bool alarmValidatePin(const char* pin)
 
 uint32_t alarmGetLockoutRemaining()
 {
-    if (millis() >= lockoutEndMs) return 0;
-    return (lockoutEndMs - millis()) / 1000;
+    if (!lockedOut) return 0;
+    uint32_t elapsed = millis() - lockoutStartMs;
+    if (elapsed >= LOCKOUT_DURATION_MS) return 0;
+    return (LOCKOUT_DURATION_MS - elapsed) / 1000;
 }
 
 void alarmSetExitDelay(uint16_t seconds)

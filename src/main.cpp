@@ -5,7 +5,7 @@
 #include "alarm_controller.h"
 #include "sms_gateway.h"
 #include "sms_commands.h"
-#include "whatsapp_client.h" // Added by user instruction
+#include "whatsapp_client.h"
 #include "config_manager.h"
 #include "network.h"
 #include "serial_cli.h"
@@ -28,7 +28,7 @@ struct PendingAlert {
     char message[160];
     bool active;
 };
-static PendingAlert alertQueue[10]; 
+static PendingAlert alertQueue[ALERT_QUEUE_SIZE]; 
 static uint32_t lastAlertProcessedMs = 0;
 static const uint32_t ALERT_PROCESS_INTERVAL_MS = 1000; // Small gap between alerts
 
@@ -47,24 +47,23 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
             break;
 
         case EVT_ARMED_AWAY:
-            smsCmdSendAlert("SF_Alarm: System ARMED (Away)");
+            alarmBroadcast("SF_Alarm: System ARMED (Away)");
             break;
 
         case EVT_ARMED_HOME:
-            smsCmdSendAlert("SF_Alarm: System ARMED (Home)");
+            alarmBroadcast("SF_Alarm: System ARMED (Home)");
             break;
 
         case EVT_DISARMED:
-            smsCmdSendAlert("SF_Alarm: System DISARMED");
+            alarmBroadcast("SF_Alarm: System DISARMED");
             break;
 
         case EVT_TAMPER:
             snprintf(msg, sizeof(msg), "SF_Alarm TAMPER: %s", details);
-            smsCmdSendAlert(msg);
+            alarmBroadcast(msg);
             break;
 
         case EVT_ENTRY_DELAY:
-            // Notify about entry delay (optional — can be noisy)
             Serial.printf("[MAIN] Entry delay: %s\n", details);
             break;
 
@@ -102,7 +101,7 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
 void alarmBroadcast(const char* message)
 {
     // Push into queue instead of sending immediately (avoids 25s hang)
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < ALERT_QUEUE_SIZE; i++) {
         if (!alertQueue[i].active) {
             strncpy(alertQueue[i].message, message, sizeof(alertQueue[i].message) - 1);
             alertQueue[i].message[sizeof(alertQueue[i].message) - 1] = '\0';
@@ -119,7 +118,7 @@ static void processAlertQueue()
     uint32_t now = millis();
     if (now - lastAlertProcessedMs < ALERT_PROCESS_INTERVAL_MS) return;
 
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < ALERT_QUEUE_SIZE; i++) {
         if (alertQueue[i].active) {
             lastAlertProcessedMs = now;
             
@@ -189,6 +188,9 @@ void setup()
 
     // --- Configuration ---
     configInit();
+
+    // --- Alert Queue ---
+    memset(alertQueue, 0, sizeof(alertQueue));
 
     // --- I/O Expander ---
     Serial.println("[INIT] I/O Expander...");
