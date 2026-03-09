@@ -69,25 +69,3 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
     free(url);
     return success;
 }
-
-/// Master alert router — controlled by WhatsAppMode:
-///   WA_MODE_SMS:      SMS only (via smsCmdSendAlert)
-///   WA_MODE_WHATSAPP: WhatsApp only (via whatsappSend)
-///   WA_MODE_BOTH:     SMS + WhatsApp
-/// Note: WorkingMode in sms_commands controls SMS delivery method (SMS/Call/Both),
-/// while WhatsAppMode here controls which channels get the alert.
-void alarmBroadcast(const char* message) {
-    // 1. Send via SMS if needed
-    if (waMode == WA_MODE_SMS || waMode == WA_MODE_BOTH) {
-        smsCmdSendAlert(message);
-    }
-
-    // 2. Send via WhatsApp if needed
-    if (waMode == WA_MODE_WHATSAPP || waMode == WA_MODE_BOTH) {
-        if (strlen(waPhone) > 0 && strlen(waApiKey) > 0) {
-            whatsappSend(waPhone, waApiKey, message);
-        } else {
-            Serial.println("[WA] Skipped WhatsApp (not configured)");
-        }
-    }
-}

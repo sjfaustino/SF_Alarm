@@ -12,6 +12,7 @@
 #include "web_server.h"
 #include "mqtt_client.h"
 #include "onvif_client.h"
+#include <esp_task_wdt.h>
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -21,6 +22,15 @@ static uint32_t lastSmsPoll     = 0;
 static uint32_t lastReportMs    = 0;
 static uint32_t lastMqttSync    = 0;
 static bool     lastAllClear    = true;
+
+// Alert Queue for non-blocking broadcasts
+struct PendingAlert {
+    char message[160];
+    bool active;
+};
+static PendingAlert alertQueue[10]; 
+static uint32_t lastAlertProcessedMs = 0;
+static const uint32_t ALERT_PROCESS_INTERVAL_MS = 1000; // Small gap between alerts
 
 // ---------------------------------------------------------------------------
 // Alarm Event Handler — sends SMS alerts
@@ -32,18 +42,8 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
 
     switch (event) {
         case EVT_ALARM_TRIGGERED:
-            // Use custom alarm text for the triggered zone if available
             snprintf(msg, sizeof(msg), "SF_Alarm ALERT: %s", details);
-            
-            // Check working mode (M1=SMS, M2=Call, M3=Both)
-            if (smsCmdGetWorkingMode() != MODE_CALL) {
-                alarmBroadcast(msg);
-            } else {
-                // Call mode simulation (we can't call, so we send a voice-prefixed SMS)
-                char voiceMsg[180];
-                snprintf(voiceMsg, sizeof(voiceMsg), "[VOICE CALL] %s", msg);
-                alarmBroadcast(voiceMsg);
-            }
+            alarmBroadcast(msg);
             break;
 
         case EVT_ARMED_AWAY:
@@ -93,6 +93,59 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
     char eventMsg[128];
     snprintf(eventMsg, sizeof(eventMsg), "EVENT: %d | %s", (int)event, details ? details : "");
     mqttPublish("SF_Alarm/events", eventMsg);
+}
+
+// ---------------------------------------------------------------------------
+// Non-Blocking Alert Dispatcher
+// ---------------------------------------------------------------------------
+
+void alarmBroadcast(const char* message)
+{
+    // Push into queue instead of sending immediately (avoids 25s hang)
+    for (int i = 0; i < 10; i++) {
+        if (!alertQueue[i].active) {
+            strncpy(alertQueue[i].message, message, sizeof(alertQueue[i].message) - 1);
+            alertQueue[i].message[sizeof(alertQueue[i].message) - 1] = '\0';
+            alertQueue[i].active = true;
+            Serial.printf("[MAIN] Alert queued at slot %d\n", i);
+            return;
+        }
+    }
+    Serial.println("[MAIN] ERROR: Alert queue full!");
+}
+
+static void processAlertQueue()
+{
+    uint32_t now = millis();
+    if (now - lastAlertProcessedMs < ALERT_PROCESS_INTERVAL_MS) return;
+
+    for (int i = 0; i < 10; i++) {
+        if (alertQueue[i].active) {
+            lastAlertProcessedMs = now;
+            
+            Serial.printf("[MAIN] Processing queued alert: %s\n", alertQueue[i].message);
+            
+            // 1. WhatsApp Delivery
+            WhatsAppMode waM = whatsappGetMode();
+            if (waM == WA_MODE_WHATSAPP || waM == WA_MODE_BOTH) {
+                whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), alertQueue[i].message);
+            }
+
+            // 2. SMS/Call Delivery
+            if (waM == WA_MODE_SMS || waM == WA_MODE_BOTH) {
+                if (smsCmdGetWorkingMode() == MODE_CALL) {
+                    char voiceMsg[180];
+                    snprintf(voiceMsg, sizeof(voiceMsg), "[VOICE CALL] %s", alertQueue[i].message);
+                    smsCmdSendAlert(voiceMsg);
+                } else {
+                    smsCmdSendAlert(alertQueue[i].message);
+                }
+            }
+
+            alertQueue[i].active = false;
+            return; // Process only one per cycle to maintain responsiveness
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,8 +222,8 @@ void setup()
     webServerInit();
 
     // --- Watchdog ---
-    // esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
-    // esp_task_wdt_add(NULL);
+    esp_task_wdt_init(30, true); // 30s timeout
+    esp_task_wdt_add(NULL);      // Add current thread (loop)
 
     // --- CLI ---
     cliInit();
@@ -258,9 +311,12 @@ void loop()
 
     // --- 8. ONVIF ---
     onvifUpdate();
+
+    // --- 9. Alert Queue ---
+    processAlertQueue();
     
-    // --- 9. Watchdog ---
-    // esp_task_wdt_reset();
+    // --- 10. Watchdog ---
+    esp_task_wdt_reset();
 
     // Small yield for WiFi/system tasks
     yield();

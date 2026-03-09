@@ -58,16 +58,41 @@ uint16_t ioExpanderReadInputs()
     uint8_t low  = 0xFF;
     uint8_t high = 0xFF;
 
+    // Runtime Health Check: Try a dummy transmission to verify chip presence
     if (chipOk[0]) {
-        low = pcfIn1.read8();
+        Wire.beginTransmission(PCF_INPUT_1_ADDR);
+        if (Wire.endTransmission() != 0) {
+            chipOk[0] = false;
+            Serial.println("[IO] ERROR: IN1 chip lost!");
+        } else {
+            low = pcfIn1.read8();
+        }
+    } else {
+        // Retry initialization occasionally
+        if (pcfIn1.begin()) {
+            chipOk[0] = true;
+            Serial.println("[IO] INFO: IN1 chip recovered");
+            low = pcfIn1.read8();
+        }
     }
+
     if (chipOk[1]) {
-        high = pcfIn2.read8();
+        Wire.beginTransmission(PCF_INPUT_2_ADDR);
+        if (Wire.endTransmission() != 0) {
+            chipOk[1] = false;
+            Serial.println("[IO] ERROR: IN2 chip lost!");
+        } else {
+            high = pcfIn2.read8();
+        }
+    } else {
+        if (pcfIn2.begin()) {
+            chipOk[1] = true;
+            Serial.println("[IO] INFO: IN2 chip recovered");
+            high = pcfIn2.read8();
+        }
     }
 
     // Combine into 16-bit value.
-    // PCF8574 inputs are active-low (pulled high, shorted to GND = triggered).
-    // Invert so that 1 = triggered, 0 = normal.
     uint16_t raw = ((uint16_t)high << 8) | (uint16_t)low;
     return ~raw & 0xFFFF;
 }

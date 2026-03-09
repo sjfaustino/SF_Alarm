@@ -430,7 +430,9 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
         return 0;
     }
 
-    String body = http.getString();
+    String body;
+    body.reserve(16384); 
+    body = http.getString();
     http.end();
 
     // --- Parse HTML table rows ---

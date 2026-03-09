@@ -26,6 +26,12 @@ static uint8_t  triggeringZone           = 0xFF; // Which zone triggered the ala
 enum PendingArmMode : uint8_t { ARM_PENDING_AWAY = 0, ARM_PENDING_HOME = 1 };
 static PendingArmMode pendingArmMode     = ARM_PENDING_AWAY;
 
+// Security: PIN Lockout
+static uint8_t  failedAttempts           = 0;
+static uint32_t lockoutEndMs             = 0;
+static const uint8_t  MAX_FAILED_ATTEMPTS = 5;
+static const uint32_t LOCKOUT_DURATION_MS = 300000; // 5 minutes
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -61,8 +67,24 @@ static void sirenOff()
 
 static bool validatePin(const char* pin)
 {
+    if (millis() < lockoutEndMs) {
+        Serial.println("[ALARM] SECURITY: PIN entry locked due to multiple failures");
+        return false;
+    }
+
     if (pin == nullptr || strlen(pin) == 0) return false;
-    return strcmp(pin, alarmPin) == 0;
+    
+    if (strcmp(pin, alarmPin) == 0) {
+        failedAttempts = 0;
+        return true;
+    } else {
+        failedAttempts++;
+        if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
+            lockoutEndMs = millis() + LOCKOUT_DURATION_MS;
+            Serial.println("[ALARM] SECURITY: Too many failed attempts! Locking out for 5 minutes.");
+        }
+        return false;
+    }
 }
 
 static void setState(AlarmState newState)
@@ -350,6 +372,12 @@ const char* alarmGetPin()
 bool alarmValidatePin(const char* pin)
 {
     return validatePin(pin);
+}
+
+uint32_t alarmGetLockoutRemaining()
+{
+    if (millis() >= lockoutEndMs) return 0;
+    return (lockoutEndMs - millis()) / 1000;
 }
 
 void alarmSetExitDelay(uint16_t seconds)
