@@ -123,9 +123,18 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
     onvif["targetZone"] = onvifGetTargetZone();
     onvif["connected"]  = onvifIsConnected();
 
-    String json;
-    serializeJson(doc, json);
-    return response->send(200, "application/json", json.c_str());
+    // Prevent heap fragmentation by allocating exactly what we need once
+    size_t jsonLen = measureJson(doc);
+    char* jsonBuffer = (char*)malloc(jsonLen + 1);
+    if (!jsonBuffer) {
+        return response->send(500, "application/json", "{\"ok\":false,\"msg\":\"Out of memory\"}");
+    }
+    
+    serializeJson(doc, jsonBuffer, jsonLen + 1);
+    esp_err_t res = response->send(200, "application/json", jsonBuffer);
+    free(jsonBuffer);
+    
+    return res;
 }
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,8 @@ void networkSetWifi(const char* ssid, const char* password)
 
 void networkUpdate()
 {
+    // Let ESP-IDF handle auto-reconnect in the background.
+    // Just optional state tracking here.
     if (strlen(wifiSsid) == 0) return;
 
     if (WiFi.status() == WL_CONNECTED) {
@@ -49,18 +51,14 @@ void networkUpdate()
             Serial.printf("[NET] Connected! IP: %s  RSSI: %d dBm\n",
                           WiFi.localIP().toString().c_str(),
                           WiFi.RSSI());
+            // Small delay to ensure network stack is fully up before other services start firing
+            delay(500);
         }
-        return;
-    }
-
-    // Not connected — attempt reconnection with backoff
-    uint32_t now = millis();
-    if (now - lastReconnectAttempt >= WIFI_RECONNECT_DELAY_MS) {
-        lastReconnectAttempt = now;
-        connecting = true;
-        Serial.printf("[NET] Reconnecting to %s...\n", wifiSsid);
-        WiFi.disconnect();
-        WiFi.begin(wifiSsid, wifiPass);
+    } else {
+        if (!connecting) {
+            connecting = true;
+            Serial.printf("[NET] Connection lost. ESP-IDF AutoReconnect active for %s...\n", wifiSsid);
+        }
     }
 }
 

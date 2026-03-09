@@ -30,11 +30,14 @@ struct OnvifState {
     uint8_t targetZone;
     bool connected;
     String subscriptionAddress;
-    uint32_t lastPollMs;
     uint32_t lastRenewMs;
+    TaskHandle_t taskHandle;
 };
 
 static OnvifState state = {0};
+
+// Forward declaration of the task
+static void onvifTask(void* pvParameters);
 
 // ---------------------------------------------------------------------------
 // Security Helpers
@@ -209,7 +212,20 @@ void onvifInit() {
     // Loaded from NVS in main or here
     state.port = 80;
     state.connected = false;
-    state.lastPollMs = 0;
+    state.taskHandle = NULL;
+
+    // Create the background task pinned to Core 0 (default Arduino loop runs on Core 1)
+    xTaskCreatePinnedToCore(
+        onvifTask,          // Task function
+        "ONVIF_Poll",       // Name
+        8192,               // Stack size (HTTP client needs decent stack)
+        NULL,               // Parameters
+        1,                  // Priority (low priority, we don't want to starve anything)
+        &state.taskHandle,  // Task handle
+        0                   // Core 0 (Network/Protocol core)
+    );
+    
+    Serial.println("[ONVIF] Client initialized (FreeRTOS Task created)");
 }
 
 void onvifSetServer(const char* host, uint16_t port, const char* user, const char* pass, uint8_t targetZone) {
@@ -227,36 +243,46 @@ void onvifSetServer(const char* host, uint16_t port, const char* user, const cha
     state.lastRenewMs = 0;
 }
 
-void onvifUpdate() {
-    if (WiFi.status() != WL_CONNECTED) return;
-    if (strlen(state.host) == 0) return;
-
-    uint32_t now = millis();
-
-    if (!state.connected) {
-        // Throttle reconnection attempts
-        if (now - state.lastPollMs > 10000) {
-            createSubscription();
-            state.lastPollMs = now;
-            state.lastRenewMs = now; // Reset renewal timer on new subscription
+// The FreeRTOS Task Loop
+static void onvifTask(void* pvParameters) {
+    while (true) {
+        if (WiFi.status() != WL_CONNECTED || strlen(state.host) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
-    } else {
-        // Renew subscription every 50 seconds (before typical 60s expiry)
-        if (now - state.lastRenewMs > 50000) {
-            state.lastRenewMs = now;
-            // Re-create subscription to renew (simple approach)
-            if (!createSubscription()) {
-                state.connected = false;
-                Serial.println("[ONVIF] Subscription renewal failed");
+
+        uint32_t now = millis();
+
+        if (!state.connected) {
+            // Reconnection attempt
+            if (createSubscription()) {
+                state.lastRenewMs = now;
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(10000)); // Wait 10s before retry if failed
             }
-        }
+        } else {
+            // Connected — Handle Renewal
+            if (now - state.lastRenewMs > 50000) {
+                state.lastRenewMs = now;
+                if (!createSubscription()) {
+                    state.connected = false;
+                    Serial.println("[ONVIF] Subscription renewal failed");
+                    continue; // Skip polling this round
+                }
+            }
 
-        // Poll every 1 second
-        if (now - state.lastPollMs > 1000) {
+            // Poll events (this will block the task for up to 2 seconds, but NOT the main loop!)
             pollMessages();
-            state.lastPollMs = now;
+            
+            // Minimal delay between polls to let the camera breathe
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
+}
+
+void onvifUpdate() {
+    // Nothing to do here anymore! The FreeRTOS task handles everything continuously.
+    // This empty function remains to avoid touching main.cpp and maintain the API surface.
 }
 
 bool onvifIsConnected() {
