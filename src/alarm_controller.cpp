@@ -66,6 +66,7 @@ static void sirenOff()
     }
 }
 
+/// Internal: verify PIN with full lockout side-effects (for arm/disarm)
 static bool validatePin(const char* pin)
 {
     // Overflow-safe lockout check
@@ -89,6 +90,14 @@ static bool validatePin(const char* pin)
         }
         return false;
     }
+}
+
+/// Public: check PIN without lockout side-effects (for non-critical web auth)
+/// Does NOT disarm, does NOT count failed attempts.
+bool alarmValidatePin(const char* pin)
+{
+    if (pin == nullptr || strlen(pin) == 0) return false;
+    return strcmp(pin, alarmPin) == 0;
 }
 
 static void setState(AlarmState newState)
@@ -373,10 +382,7 @@ const char* alarmGetPin()
     return alarmPin;
 }
 
-bool alarmValidatePin(const char* pin)
-{
-    return validatePin(pin);
-}
+
 
 uint32_t alarmGetLockoutRemaining()
 {

@@ -536,6 +536,27 @@ bool smsGatewayDeleteMessage(int messageId)
     int httpCode = http.GET();
     http.end();
 
+    if (httpCode == 401 || httpCode == 403) {
+        // Session expired — re-authenticate and retry once
+        loggedIn = false;
+        if (smsGatewayLogin()) {
+            HTTPClient http2;
+            String url2 = buildUrl("/cgi-bin/luci/admin/network/gcom/sms/delsms?iface=4g&cfg=");
+            url2 += cfgBuf;
+            http2.begin(url2);
+            http2.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+            http2.setTimeout(10000);
+            int code2 = http2.GET();
+            http2.end();
+            if (code2 == HTTP_CODE_OK || code2 == 302) {
+                Serial.printf("[SMS] Deleted message %s (after re-auth)\n", cfgBuf);
+                return true;
+            }
+        }
+        setError("Delete failed after re-auth");
+        return false;
+    }
+
     if (httpCode == HTTP_CODE_OK || httpCode == 200 || httpCode == 302) {
         Serial.printf("[SMS] Deleted message %s\n", cfgBuf);
         return true;

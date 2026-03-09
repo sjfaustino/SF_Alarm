@@ -35,6 +35,7 @@ struct OnvifState {
 };
 
 static OnvifState state = {0};
+static SemaphoreHandle_t stateMutex = NULL;
 
 // Forward declaration of the task
 static void onvifTask(void* pvParameters);
@@ -209,26 +210,29 @@ static void pollMessages() {
 // ---------------------------------------------------------------------------
 
 void onvifInit() {
-    // Loaded from NVS in main or here
     state.port = 80;
     state.connected = false;
     state.taskHandle = NULL;
 
-    // Create the background task pinned to Core 0 (default Arduino loop runs on Core 1)
+    // Create mutex to protect state struct from Core 0/Core 1 concurrent access
+    stateMutex = xSemaphoreCreateMutex();
+
     xTaskCreatePinnedToCore(
-        onvifTask,          // Task function
-        "ONVIF_Poll",       // Name
-        8192,               // Stack size (HTTP client needs decent stack)
-        NULL,               // Parameters
-        1,                  // Priority (low priority, we don't want to starve anything)
-        &state.taskHandle,  // Task handle
-        0                   // Core 0 (Network/Protocol core)
+        onvifTask,
+        "ONVIF_Poll",
+        8192,
+        NULL,
+        1,
+        &state.taskHandle,
+        0
     );
     
     Serial.println("[ONVIF] Client initialized (FreeRTOS Task created)");
 }
 
 void onvifSetServer(const char* host, uint16_t port, const char* user, const char* pass, uint8_t targetZone) {
+    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+
     strncpy(state.host, host, sizeof(state.host)-1);
     state.host[sizeof(state.host)-1] = '\0';
     state.port = port;
@@ -237,44 +241,57 @@ void onvifSetServer(const char* host, uint16_t port, const char* user, const cha
     strncpy(state.pass, pass, sizeof(state.pass)-1);
     state.pass[sizeof(state.pass)-1] = '\0';
     state.targetZone = (targetZone > 0 && targetZone <= MAX_ZONES) ? targetZone - 1 : 0;
-    
-    state.connected = false; // Reset to force new subscription
+    state.connected = false;
     state.subscriptionAddress = "";
     state.lastRenewMs = 0;
+
+    if (stateMutex) xSemaphoreGive(stateMutex);
 }
 
 // The FreeRTOS Task Loop
 static void onvifTask(void* pvParameters) {
     while (true) {
-        if (WiFi.status() != WL_CONNECTED || strlen(state.host) == 0) {
+        // Take a local snapshot of config under mutex to prevent TOCTOU race with onvifSetServer()
+        if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+        bool hasHost = (strlen(state.host) > 0);
+        bool isConnected = state.connected;
+        if (stateMutex) xSemaphoreGive(stateMutex);
+
+        if (WiFi.status() != WL_CONNECTED || !hasHost) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
         uint32_t now = millis();
 
-        if (!state.connected) {
-            // Reconnection attempt
+        if (!isConnected) {
             if (createSubscription()) {
+                if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
                 state.lastRenewMs = now;
+                if (stateMutex) xSemaphoreGive(stateMutex);
             } else {
-                vTaskDelay(pdMS_TO_TICKS(10000)); // Wait 10s before retry if failed
+                vTaskDelay(pdMS_TO_TICKS(10000));
             }
         } else {
-            // Connected — Handle Renewal
-            if (now - state.lastRenewMs > 50000) {
+            bool renewNeeded = false;
+            if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+            renewNeeded = (now - state.lastRenewMs > 50000);
+            if (stateMutex) xSemaphoreGive(stateMutex);
+
+            if (renewNeeded) {
+                if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
                 state.lastRenewMs = now;
+                if (stateMutex) xSemaphoreGive(stateMutex);
                 if (!createSubscription()) {
+                    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
                     state.connected = false;
+                    if (stateMutex) xSemaphoreGive(stateMutex);
                     Serial.println("[ONVIF] Subscription renewal failed");
-                    continue; // Skip polling this round
+                    continue;
                 }
             }
 
-            // Poll events (this will block the task for up to 2 seconds, but NOT the main loop!)
             pollMessages();
-            
-            // Minimal delay between polls to let the camera breathe
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }

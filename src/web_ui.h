@@ -412,7 +412,7 @@ body {
   <div class="conn">
     <div class="conn-dot" id="connDot"></div>
     <span id="connLabel">Connecting…</span>
-    <span id="fwVer"></span>
+    <span id="headerVer"></span>
   </div>
 </div>
 
@@ -650,11 +650,15 @@ function doAction(action, mode) {
 function doMute() { apiPost('/api/mute', {}); }
 
 function doBypass(zone, bypass) {
-  apiPost('/api/bypass', {zone, bypass});
+  openModal(bypass ? 'Enter PIN to Bypass Zone' : 'Enter PIN to Unbypass Zone', pin => {
+    apiPost('/api/bypass', {zone, bypass, pin});
+  });
 }
 
 function doOutput(ch, state) {
-  apiPost('/api/output', {channel: ch, state});
+  openModal('Enter PIN to Toggle Output', pin => {
+    apiPost('/api/output', {channel: ch, state, pin});
+  });
 }
 
 // --- Status ---
@@ -786,7 +790,7 @@ async function refresh() {
     document.getElementById('sysRssi').textContent = d.network.rssi;
     document.getElementById('sysUptime').textContent = fmtUptime(d.system.uptime);
     document.getElementById('sysHeap').textContent = (d.system.freeHeap/1024).toFixed(1)+'KB';
-    document.getElementById('fwVer').textContent = 'v'+d.system.version;
+    document.getElementById('headerVer').textContent = 'v'+d.system.version;
 
     // Alert settings (fill once)
     if (!window.settingsLoaded) {

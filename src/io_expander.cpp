@@ -15,6 +15,9 @@ static uint16_t currentOutputs = 0x0000;
 
 // Chip health flags
 static bool chipOk[4] = { false, false, false, false };
+// Chip recovery cooldown (avoid hammering I2C at 50Hz when a chip is down)
+static uint32_t chipRetryMs[4] = { 0, 0, 0, 0 };
+static const uint32_t CHIP_RETRY_INTERVAL_MS = 5000; // Retry once per 5 seconds
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -63,16 +66,21 @@ uint16_t ioExpanderReadInputs()
         Wire.beginTransmission(PCF_INPUT_1_ADDR);
         if (Wire.endTransmission() != 0) {
             chipOk[0] = false;
+            chipRetryMs[0] = 0;
             Serial.println("[IO] ERROR: IN1 chip lost!");
         } else {
             low = pcfIn1.read8();
         }
     } else {
-        // Retry initialization occasionally
-        if (pcfIn1.begin()) {
-            chipOk[0] = true;
-            Serial.println("[IO] INFO: IN1 chip recovered");
-            low = pcfIn1.read8();
+        // Retry with cooldown to avoid hammering I2C at 50Hz
+        uint32_t now = millis();
+        if (now - chipRetryMs[0] >= CHIP_RETRY_INTERVAL_MS) {
+            chipRetryMs[0] = now;
+            if (pcfIn1.begin()) {
+                chipOk[0] = true;
+                Serial.println("[IO] INFO: IN1 chip recovered");
+                low = pcfIn1.read8();
+            }
         }
     }
 
@@ -80,15 +88,20 @@ uint16_t ioExpanderReadInputs()
         Wire.beginTransmission(PCF_INPUT_2_ADDR);
         if (Wire.endTransmission() != 0) {
             chipOk[1] = false;
+            chipRetryMs[1] = 0;
             Serial.println("[IO] ERROR: IN2 chip lost!");
         } else {
             high = pcfIn2.read8();
         }
     } else {
-        if (pcfIn2.begin()) {
-            chipOk[1] = true;
-            Serial.println("[IO] INFO: IN2 chip recovered");
-            high = pcfIn2.read8();
+        uint32_t now = millis();
+        if (now - chipRetryMs[1] >= CHIP_RETRY_INTERVAL_MS) {
+            chipRetryMs[1] = now;
+            if (pcfIn2.begin()) {
+                chipOk[1] = true;
+                Serial.println("[IO] INFO: IN2 chip recovered");
+                high = pcfIn2.read8();
+            }
         }
     }
 
