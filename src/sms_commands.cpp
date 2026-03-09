@@ -364,7 +364,8 @@ static bool parseArmDisarm(const char* body, const char* sender)
 
     // ARM HOME <pin>
     if (strncmp(upper, "ARM HOME", 8) == 0) {
-        const char* pin = upper + 8;
+        // Extract PIN from original body to preserve case
+        const char* pin = body + 8;
         while (*pin && isspace(*pin)) pin++;
         if (alarmArmHome(pin)) {
             sendReply(sender, "SF_Alarm: Arming HOME. Exit delay started.");
@@ -376,7 +377,8 @@ static bool parseArmDisarm(const char* body, const char* sender)
 
     // ARM <pin>
     if (strncmp(upper, "ARM", 3) == 0 && (upper[3] == '\0' || isspace(upper[3]))) {
-        const char* pin = upper + 3;
+        // Extract PIN from original body to preserve case
+        const char* pin = body + 3;
         while (*pin && isspace(*pin)) pin++;
         if (alarmArmAway(pin)) {
             sendReply(sender, "SF_Alarm: Arming AWAY. Exit delay started.");

@@ -253,10 +253,12 @@ void loop()
         uint16_t inputs = ioExpanderReadInputs();
         zonesUpdate(inputs);
 
-        // --- Recovery alert (GA09: #0#) ---
+        // --- Recovery alert (GA09: #0#) — only when system was/is armed ---
         bool currentAllClear = zonesAllClear();
-        if (currentAllClear && !lastAllClear) {
-            // All zones just returned to normal
+        AlarmState st = alarmGetState();
+        bool isArmedOrActive = (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME ||
+                                st == ALARM_TRIGGERED  || st == ALARM_ENTRY_DELAY);
+        if (currentAllClear && !lastAllClear && isArmedOrActive) {
             alarmBroadcast(smsCmdGetRecoveryText());
         }
         lastAllClear = currentAllClear;

@@ -44,6 +44,25 @@ static void fireEvent(AlarmEvent event, const char* details = "")
     }
 }
 
+/// Constant-time string comparison — prevents timing side-channel PIN brute-force.
+/// Returns true only if both strings are identical AND same length.
+static bool pinEquals(const char* a, const char* b)
+{
+    uint8_t diff = 0;
+    size_t  lenA = strlen(a);
+    size_t  lenB = strlen(b);
+    // XOR lengths — non-zero if different
+    diff |= (uint8_t)(lenA ^ lenB);
+    // Compare up to the longer length so every branch takes the same time
+    size_t maxLen = lenA > lenB ? lenA : lenB;
+    for (size_t i = 0; i < maxLen; i++) {
+        uint8_t ca = (i < lenA) ? (uint8_t)a[i] : 0;
+        uint8_t cb = (i < lenB) ? (uint8_t)b[i] : 0;
+        diff |= ca ^ cb;
+    }
+    return diff == 0;
+}
+
 static void sirenOn()
 {
     if (!sirenActive) {
@@ -78,7 +97,7 @@ static bool validatePin(const char* pin)
 
     if (pin == nullptr || strlen(pin) == 0) return false;
     
-    if (strcmp(pin, alarmPin) == 0) {
+    if (pinEquals(pin, alarmPin)) {
         failedAttempts = 0;
         return true;
     } else {
@@ -97,7 +116,7 @@ static bool validatePin(const char* pin)
 bool alarmValidatePin(const char* pin)
 {
     if (pin == nullptr || strlen(pin) == 0) return false;
-    return strcmp(pin, alarmPin) == 0;
+    return pinEquals(pin, alarmPin);
 }
 
 static void setState(AlarmState newState)

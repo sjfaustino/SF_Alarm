@@ -15,8 +15,8 @@ void networkUpdate();
 /// Check if connected to Wi-Fi.
 bool networkIsConnected();
 
-/// Get the local IP address as a string.
-String networkGetIP();
+/// Get the local IP address as a static string (valid until next call).
+const char* networkGetIP();
 
 /// Get Wi-Fi signal strength (RSSI).
 int networkGetRSSI();

@@ -149,6 +149,12 @@ static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* resp
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
     }
 
+    // PIN required — changing alert destination is a security-sensitive operation
+    const char* pin = doc["pin"] | "";
+    if (!alarmValidatePin(pin)) {
+        return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
+    }
+
     if (doc["mode"].isNull() || doc["phone"].isNull() || doc["apikey"].isNull()) {
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Missing fields\"}");
     }
@@ -175,6 +181,12 @@ static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* respon
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
     }
 
+    // PIN required — changing broker redirects all alarm events
+    const char* pin = doc["pin"] | "";
+    if (!alarmValidatePin(pin)) {
+        return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
+    }
+
     const char* server = doc["server"] | "";
     uint16_t port = doc["port"] | 1883;
     const char* user = doc["user"] | "";
@@ -197,6 +209,12 @@ static esp_err_t handlePostOnvif(PsychicRequest* request, PsychicResponse* respo
     DeserializationError err = deserializeJson(doc, request->body());
     if (err) {
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+    }
+
+    // PIN required — changing camera config affects motion detection source
+    const char* pin = doc["pin"] | "";
+    if (!alarmValidatePin(pin)) {
+        return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
 
     const char* host = doc["host"] | "";
@@ -269,13 +287,16 @@ static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* respons
 {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, request->body());
-    // If PIN is provided, validate it before muting (without disarming!)
-    if (!err && !doc["pin"].isNull()) {
-        const char* pin = doc["pin"] | "";
-        if (strlen(pin) > 0 && !alarmValidatePin(pin)) {
-            return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"Wrong PIN\"}");
-        }
+    if (err) {
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
     }
+
+    // Mute requires PIN — silencing the siren is a security-sensitive action
+    const char* pin = doc["pin"] | "";
+    if (!alarmValidatePin(pin)) {
+        return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
+    }
+
     alarmMuteSiren();
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Siren muted\"}");
 }

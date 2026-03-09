@@ -41,7 +41,12 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
     memcpy(message, payload, length);
     message[length] = '\0';
 
-    Serial.printf("[MQTT] Message arrived [%s]: %s\n", topic, message);
+    // Redact PIN from log — commands with ':' contain a PIN (e.g. "DISARM:1234")
+    if (strchr(message, ':')) {
+        Serial.printf("[MQTT] Message arrived [%s]: [PIN REDACTED]\n", topic);
+    } else {
+        Serial.printf("[MQTT] Message arrived [%s]: %s\n", topic, message);
+    }
 
     if (strstr(topic, "/cmd")) {
         // All arm/disarm commands require PIN: "COMMAND:pin"
@@ -125,9 +130,7 @@ void mqttUpdate() {
         unsigned long now = millis();
         if (now - lastReconnectAttempt > 5000) {
             lastReconnectAttempt = now;
-            if (mqttReconnect()) {
-                lastReconnectAttempt = 0;
-            }
+            mqttReconnect();
         }
     } else {
         client.loop();

@@ -647,7 +647,11 @@ function doAction(action, mode) {
     });
   }
 }
-function doMute() { apiPost('/api/mute', {}); }
+function doMute() {
+  openModal('Enter PIN to Mute Siren', pin => {
+    apiPost('/api/mute', {pin});
+  });
+}
 
 function doBypass(zone, bypass) {
   openModal(bypass ? 'Enter PIN to Bypass Zone' : 'Enter PIN to Unbypass Zone', pin => {
@@ -723,29 +727,34 @@ function renderOutputs(mask) {
 }
 
 async function saveAlertSettings() {
-  const mode = parseInt(document.getElementById('waMode').value);
-  const phone = document.getElementById('waPhone').value;
-  const apikey = document.getElementById('waApiKey').value;
-  
-  apiPost('/api/settings/alerts', { mode, phone, apikey });
+  openModal('Enter PIN to Save Alert Settings', pin => {
+    const mode = parseInt(document.getElementById('waMode').value);
+    const phone = document.getElementById('waPhone').value;
+    const apikey = document.getElementById('waApiKey').value;
+    apiPost('/api/settings/alerts', { mode, phone, apikey, pin });
+  });
 }
 
 async function saveMqttSettings() {
-  const host = document.getElementById('mqServer').value;
-  const port = parseInt(document.getElementById('mqPort').value);
-  const user = document.getElementById('mqUser').value;
-  const pass = document.getElementById('mqPass').value;
-  const cid  = document.getElementById('mqClientId').value;
-  await apiPost('/api/settings/mqtt', {server:host, port, user, pass, clientId:cid});
+  openModal('Enter PIN to Save MQTT Settings', pin => {
+    const host = document.getElementById('mqServer').value;
+    const port = parseInt(document.getElementById('mqPort').value);
+    const user = document.getElementById('mqUser').value;
+    const pass = document.getElementById('mqPass').value;
+    const cid  = document.getElementById('mqClientId').value;
+    apiPost('/api/settings/mqtt', {server:host, port, user, pass, clientId:cid, pin});
+  });
 }
 
 async function saveOnvifSettings() {
-  const host = document.getElementById('ovHost').value;
-  const port = parseInt(document.getElementById('ovPort').value);
-  const user = document.getElementById('ovUser').value;
-  const pass = document.getElementById('ovPass').value;
-  const zone = parseInt(document.getElementById('ovZone').value);
-  await apiPost('/api/settings/onvif', {host, port, user, pass, targetZone: zone});
+  openModal('Enter PIN to Save Camera Settings', pin => {
+    const host = document.getElementById('ovHost').value;
+    const port = parseInt(document.getElementById('ovPort').value);
+    const user = document.getElementById('ovUser').value;
+    const pass = document.getElementById('ovPass').value;
+    const zone = parseInt(document.getElementById('ovZone').value);
+    apiPost('/api/settings/onvif', {host, port, user, pass, targetZone: zone, pin});
+  });
 }
 
 function escHtml(s) {

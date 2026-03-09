@@ -65,12 +65,16 @@ bool networkIsConnected()
     return WiFi.status() == WL_CONNECTED;
 }
 
-String networkGetIP()
+const char* networkGetIP()
 {
+    static char ipBuf[16];
     if (WiFi.status() == WL_CONNECTED) {
-        return WiFi.localIP().toString();
+        strncpy(ipBuf, WiFi.localIP().toString().c_str(), sizeof(ipBuf) - 1);
+        ipBuf[sizeof(ipBuf) - 1] = '\0';
+    } else {
+        strncpy(ipBuf, "0.0.0.0", sizeof(ipBuf));
     }
-    return "0.0.0.0";
+    return ipBuf;
 }
 
 int networkGetRSSI()
