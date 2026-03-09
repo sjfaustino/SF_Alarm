@@ -23,7 +23,8 @@ static uint16_t lastMonitorInputs = 0xFFFF;
 
 // Non-blocking state for factory reset confirmation
 static bool factoryPending = false;
-static uint32_t factoryTimeoutMs = 0;
+static uint32_t factoryStartMs = 0;
+static const uint32_t FACTORY_TIMEOUT_MS = 10000;
 static char factoryConfirm[8] = "";
 static int factoryConfirmPos = 0;
 
@@ -179,6 +180,7 @@ static void processLine(const char* line)
                     Serial.println("Error getting zone config");
                 } else if (strncmp(subcmd, "name ", 5) == 0) {
                     strncpy(cfg->name, subcmd + 5, MAX_ZONE_NAME_LEN - 1);
+                    cfg->name[MAX_ZONE_NAME_LEN - 1] = '\0';
                     Serial.printf("Zone %d name: %s\n", zoneNum, cfg->name);
                 } else if (strncmp(subcmd, "type ", 5) == 0) {
                     char* typeStr = subcmd + 5;
@@ -380,7 +382,7 @@ static void processLine(const char* line)
     else if (strcmp(start, "factory") == 0) {
         Serial.println("Factory reset? Type 'YES' to confirm (10s timeout):");
         factoryPending = true;
-        factoryTimeoutMs = millis() + 10000;
+        factoryStartMs = millis();
         factoryConfirmPos = 0;
         factoryConfirm[0] = '\0';
         // Don't print prompt — handled by cliUpdate
@@ -444,25 +446,21 @@ void cliUpdate()
 
     // --- Non-blocking factory reset confirmation ---
     if (factoryPending) {
-        if (millis() > factoryTimeoutMs) {
+        if (millis() - factoryStartMs > FACTORY_TIMEOUT_MS) {
             factoryPending = false;
-            Serial.println("Factory reset cancelled (timeout)");
+            Serial.println("\n[CLI] Factory reset timed out");
             printPrompt();
-            return;
-        }
-        while (Serial.available()) {
+        } else if (Serial.available()) {
             char c = Serial.read();
             if (c == '\n' || c == '\r') {
                 factoryPending = false;
                 if (strcmp(factoryConfirm, "YES") == 0) {
                     configFactoryReset();
                 } else {
-                    Serial.println("Factory reset cancelled");
+                    Serial.println("\n[CLI] Factory reset cancelled");
                 }
                 printPrompt();
-                return;
-            }
-            if (factoryConfirmPos < 7) {
+            } else if (factoryConfirmPos < 7) {
                 factoryConfirm[factoryConfirmPos++] = c;
                 factoryConfirm[factoryConfirmPos] = '\0';
                 Serial.print(c);

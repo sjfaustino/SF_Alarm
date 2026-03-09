@@ -419,6 +419,7 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
         if (smsGatewayLogin()) {
             http.begin(url);
             http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+            http.setTimeout(10000); // Ensure timeout is set on retry
             httpCode = http.GET();
         }
     }

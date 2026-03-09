@@ -773,8 +773,10 @@ bool smsCmdRemovePhone(const char* phone)
 {
     for (int i = 0; i < phoneCount; i++) {
         if (strcmp(phoneNumbers[i], phone) == 0) {
+            // Shift remaining numbers
             for (int j = i; j < phoneCount - 1; j++) {
-                strncpy(phoneNumbers[j], phoneNumbers[j + 1], MAX_PHONE_LEN);
+                strncpy(phoneNumbers[j], phoneNumbers[j + 1], MAX_PHONE_LEN - 1);
+                phoneNumbers[j][MAX_PHONE_LEN - 1] = '\0';
             }
             phoneCount--;
             memset(phoneNumbers[phoneCount], 0, MAX_PHONE_LEN);

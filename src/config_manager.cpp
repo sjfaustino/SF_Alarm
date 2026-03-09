@@ -138,6 +138,7 @@ void configLoad()
             ZoneConfig* cfg = zonesGetConfig(i);
             if (cfg) {
                 strncpy(cfg->name, name.c_str(), MAX_ZONE_NAME_LEN - 1);
+                cfg->name[MAX_ZONE_NAME_LEN - 1] = '\0';
 
                 snprintf(key, sizeof(key), "zType%d", i);
                 cfg->type = (ZoneType)prefs.getUChar(key, ZONE_INSTANT);
@@ -256,13 +257,13 @@ void configPrint()
 {
     Serial.println("=== Configuration ===");
 
-    Serial.printf("  Router IP:   %s\n", prefs.getString(KEY_ROUTER_IP, DEFAULT_ROUTER_IP).c_str());
-    Serial.printf("  Router User: %s\n", prefs.getString(KEY_ROUTER_USER, DEFAULT_ROUTER_USER).c_str());
-    Serial.printf("  Wi-Fi SSID:  %s\n", prefs.getString(KEY_WIFI_SSID, "").c_str());
-    Serial.printf("  Exit delay:  %d sec\n", prefs.getUShort(KEY_EXIT_DELAY, DEFAULT_EXIT_DELAY_S));
-    Serial.printf("  Entry delay: %d sec\n", prefs.getUShort(KEY_ENTRY_DELAY, DEFAULT_ENTRY_DELAY_S));
-    Serial.printf("  Siren dur:   %d sec\n", prefs.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
-    Serial.printf("  Siren ch:    %d\n", prefs.getUChar(KEY_SIREN_CH, 0));
+    Serial.printf("  Router IP:   %s\n", smsGatewayGetRouterIp());
+    Serial.printf("  Router User: %s\n", smsGatewayGetRouterUser());
+    Serial.printf("  Wi-Fi SSID:  %s\n", networkGetSsid());
+    Serial.printf("  Exit delay:  %d sec\n", alarmGetExitDelay());
+    Serial.printf("  Entry delay: %d sec\n", alarmGetEntryDelay());
+    Serial.printf("  Siren dur:   %d sec\n", alarmGetSirenDuration());
+    Serial.printf("  Siren ch:    %d\n", alarmGetSirenOutput());
     Serial.printf("  Report int:  %d min\n", smsCmdGetReportInterval());
     Serial.printf("  Alarm mode:  %d (1:SMS, 2:Call, 3:Both)\n", (int)smsCmdGetWorkingMode());
     Serial.printf("  Recovery:    %s\n", smsCmdGetRecoveryText());
