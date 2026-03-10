@@ -106,6 +106,45 @@ uint16_t ioExpanderReadInputs()
         }
     }
 
+    // --- Output Chip Runtime Health Checks ---
+    if (chipOk[2]) {
+        Wire.beginTransmission(PCF_OUTPUT_1_ADDR);
+        if (Wire.endTransmission() != 0) {
+            chipOk[2] = false;
+            chipRetryMs[2] = 0;
+            Serial.println("[IO] ERROR: OUT1 chip lost!");
+        }
+    } else {
+        uint32_t now = millis();
+        if (now - chipRetryMs[2] >= CHIP_RETRY_INTERVAL_MS) {
+            chipRetryMs[2] = now;
+            if (pcfOut1.begin()) {
+                chipOk[2] = true;
+                pcfOut1.write8((uint8_t)(currentOutputs & 0xFF));
+                Serial.println("[IO] INFO: OUT1 chip recovered");
+            }
+        }
+    }
+
+    if (chipOk[3]) {
+        Wire.beginTransmission(PCF_OUTPUT_2_ADDR);
+        if (Wire.endTransmission() != 0) {
+            chipOk[3] = false;
+            chipRetryMs[3] = 0;
+            Serial.println("[IO] ERROR: OUT2 chip lost!");
+        }
+    } else {
+        uint32_t now = millis();
+        if (now - chipRetryMs[3] >= CHIP_RETRY_INTERVAL_MS) {
+            chipRetryMs[3] = now;
+            if (pcfOut2.begin()) {
+                chipOk[3] = true;
+                pcfOut2.write8((uint8_t)((currentOutputs >> 8) & 0xFF));
+                Serial.println("[IO] INFO: OUT2 chip recovered");
+            }
+        }
+    }
+
     // Combine into 16-bit value.
     uint16_t raw = ((uint16_t)high << 8) | (uint16_t)low;
     return ~raw & 0xFFFF;
@@ -163,8 +202,23 @@ bool ioExpanderChipOk(uint8_t chipIndex)
     return chipOk[chipIndex];
 }
 
+static uint32_t tamperStartMs = 0;
+static bool tamperDebouncing = false;
+
 bool ioExpanderIsTampered()
 {
     // If either input chip is dead/disconnected, the I2C line has been tampered with
-    return !chipOk[0] || !chipOk[1];
+    bool currentTamper = !chipOk[0] || !chipOk[1];
+    
+    if (currentTamper) {
+        if (!tamperDebouncing) {
+            tamperDebouncing = true;
+            tamperStartMs = millis();
+        } else if (millis() - tamperStartMs >= 500) { // 500ms debounce
+            return true;
+        }
+    } else {
+        tamperDebouncing = false;
+    }
+    return false;
 }

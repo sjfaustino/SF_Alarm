@@ -312,8 +312,8 @@ void alarmUpdate()
         }
 
         case ALARM_TRIGGERED: {
-            // Auto-silence siren after duration
-            if (sirenActive && !sirenMuted && sirenDurationSec > 0) {
+            // Auto-silence siren and trigger state-recovery after duration
+            if (sirenDurationSec > 0) {
                 uint32_t elapsed = now - sirenStartMs;
                 if (elapsed >= (uint32_t)sirenDurationSec * 1000) {
                     sirenOff();
