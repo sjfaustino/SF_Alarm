@@ -105,6 +105,8 @@ void alarmBroadcast(const char* message)
 {
     if (!rtosAlertQueue) return;
     PendingAlert alert;
+    memset(&alert, 0, sizeof(PendingAlert)); // Zero-out to prevent RTOS stack memory leak
+    
     strncpy(alert.message, message, sizeof(alert.message) - 1);
     alert.message[sizeof(alert.message) - 1] = '\0';
     alert.targetPhone[0] = '\0'; // Empty for broadcast
@@ -120,6 +122,8 @@ void alarmQueueReply(const char* phone, const char* message)
 {
     if (!rtosAlertQueue) return;
     PendingAlert alert;
+    memset(&alert, 0, sizeof(PendingAlert)); // Zero-out to prevent RTOS stack memory leak
+    
     strncpy(alert.message, message, sizeof(alert.message) - 1);
     alert.message[sizeof(alert.message) - 1] = '\0';
     strncpy(alert.targetPhone, phone, sizeof(alert.targetPhone) - 1);
