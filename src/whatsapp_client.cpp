@@ -75,6 +75,7 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
     Serial.printf("[WA] Sending alert to %s...\n", phone);
     
     http.begin(url);
+    http.setTimeout(1500); // Fix: Fast-fail limit to prevent netWorkerTask queue throttling
     int httpResponseCode = http.GET();
     
     bool success = false;

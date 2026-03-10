@@ -26,6 +26,7 @@ static bool     lastAllClear    = true;
 // Alert Queue for non-blocking broadcasts
 struct PendingAlert {
     char message[160];
+    char targetPhone[32]; // Empty for broadcast, populated for targeted reply
     volatile bool active;
 };
 static PendingAlert alertQueue[ALERT_QUEUE_SIZE]; 
@@ -105,12 +106,29 @@ void alarmBroadcast(const char* message)
         if (!alertQueue[i].active) {
             strncpy(alertQueue[i].message, message, sizeof(alertQueue[i].message) - 1);
             alertQueue[i].message[sizeof(alertQueue[i].message) - 1] = '\0';
+            alertQueue[i].targetPhone[0] = '\0'; // Empty for broadcast
             alertQueue[i].active = true;
             Serial.printf("[MAIN] Alert queued at slot %d\n", i);
             return;
         }
     }
     Serial.println("[MAIN] ERROR: Alert queue full!");
+}
+
+void alarmQueueReply(const char* phone, const char* message)
+{
+    for (int i = 0; i < ALERT_QUEUE_SIZE; i++) {
+        if (!alertQueue[i].active) {
+            strncpy(alertQueue[i].message, message, sizeof(alertQueue[i].message) - 1);
+            alertQueue[i].message[sizeof(alertQueue[i].message) - 1] = '\0';
+            strncpy(alertQueue[i].targetPhone, phone, sizeof(alertQueue[i].targetPhone) - 1);
+            alertQueue[i].targetPhone[sizeof(alertQueue[i].targetPhone) - 1] = '\0';
+            alertQueue[i].active = true;
+            Serial.printf("[MAIN] Targeted reply queued at slot %d\n", i);
+            return;
+        }
+    }
+    Serial.println("[MAIN] ERROR: Alert queue full! (Reply dropped)");
 }
 
 static void processAlertQueue()
@@ -122,22 +140,29 @@ static void processAlertQueue()
         if (alertQueue[i].active) {
             lastAlertProcessedMs = now;
             
-            Serial.printf("[MAIN] Processing queued alert: %s\n", alertQueue[i].message);
-            
-            // 1. WhatsApp Delivery
-            WhatsAppMode waM = whatsappGetMode();
-            if (waM == WA_MODE_WHATSAPP || waM == WA_MODE_BOTH) {
-                whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), alertQueue[i].message);
-            }
+            if (strlen(alertQueue[i].targetPhone) > 0) {
+                // Targeted Reply Only
+                Serial.printf("[MAIN] Processing queued targeted reply to %s: %s\n", alertQueue[i].targetPhone, alertQueue[i].message);
+                smsGatewaySend(alertQueue[i].targetPhone, alertQueue[i].message);
+            } else {
+                // Broadcast Delivery
+                Serial.printf("[MAIN] Processing queued broadcast alert: %s\n", alertQueue[i].message);
+                
+                // 1. WhatsApp Delivery
+                WhatsAppMode waM = whatsappGetMode();
+                if (waM == WA_MODE_WHATSAPP || waM == WA_MODE_BOTH) {
+                    whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), alertQueue[i].message);
+                }
 
-            // 2. SMS/Call Delivery
-            if (waM == WA_MODE_SMS || waM == WA_MODE_BOTH) {
-                if (smsCmdGetWorkingMode() == MODE_CALL) {
-                    char voiceMsg[180];
-                    snprintf(voiceMsg, sizeof(voiceMsg), "[VOICE CALL] %s", alertQueue[i].message);
-                    smsCmdSendAlert(voiceMsg);
-                } else {
-                    smsCmdSendAlert(alertQueue[i].message);
+                // 2. SMS/Call Delivery
+                if (waM == WA_MODE_SMS || waM == WA_MODE_BOTH) {
+                    if (smsCmdGetWorkingMode() == MODE_CALL) {
+                        char voiceMsg[180];
+                        snprintf(voiceMsg, sizeof(voiceMsg), "[VOICE CALL] %s", alertQueue[i].message);
+                        smsCmdSendAlert(voiceMsg);
+                    } else {
+                        smsCmdSendAlert(alertQueue[i].message);
+                    }
                 }
             }
 
@@ -221,6 +246,26 @@ static void pollSmsInbox()
 }
 
 // ---------------------------------------------------------------------------
+// Background MQTT Worker Task
+// ---------------------------------------------------------------------------
+
+static void mqttWorkerTask(void* pvParameters)
+{
+    while (true) {
+        uint32_t now = millis();
+
+        mqttUpdate();
+
+        if (now - lastMqttSync >= 5000) {
+            lastMqttSync = now;
+            mqttSyncState();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50)); // Yield
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Arduino Setup & Loop
 // ---------------------------------------------------------------------------
 
@@ -282,6 +327,7 @@ void setup()
     // --- MQTT ---
     Serial.println("[INIT] MQTT...");
     mqttInit();
+    xTaskCreatePinnedToCore(mqttWorkerTask, "MQTTWorker", 4096, NULL, 1, NULL, 0); // Pin to Core 0 (Network)
 
     // --- ONVIF ---
     Serial.println("[INIT] ONVIF...");
@@ -326,14 +372,7 @@ void loop()
     // --- 4. Serial CLI ---
     cliUpdate();
 
-    // --- 5. MQTT Loop ---
-    mqttUpdate();
-    if (now - lastMqttSync >= 5000) {
-        lastMqttSync = now;
-        mqttSyncState();
-    }
-
-    // --- 6. Watchdog ---
+    // --- 5. Watchdog ---
     esp_task_wdt_reset();
 
     // Small yield for WiFi/system tasks

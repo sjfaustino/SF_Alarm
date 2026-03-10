@@ -99,28 +99,16 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
     sys["freeHeap"] = ESP.getFreeHeap();
     sys["version"]  = FW_VERSION_STR;
 
-    // --- Alerts/WhatsApp (mask secrets) ---
+    // --- Alerts/WhatsApp (Safe status only) ---
     JsonObject alerts = doc["alerts"].to<JsonObject>();
     alerts["mode"] = (int)whatsappGetMode();
-    alerts["waPhone"] = whatsappGetPhone();
-    alerts["waApiKey"] = strlen(whatsappGetApiKey()) > 0 ? "****" : "";
 
-    // --- MQTT (mask password) ---
+    // --- MQTT (Safe status only) ---
     JsonObject mqtt = doc["mqtt"].to<JsonObject>();
-    mqtt["server"] = mqttGetServer();
-    mqtt["port"] = mqttGetPort();
-    mqtt["user"] = mqttGetUser();
-    mqtt["pass"] = strlen(mqttGetPass()) > 0 ? "****" : "";
-    mqtt["clientId"] = mqttGetClientId();
     mqtt["connected"] = mqttIsConnected();
 
-    // --- ONVIF (mask password) ---
+    // --- ONVIF (Safe status only) ---
     JsonObject onvif = doc["onvif"].to<JsonObject>();
-    onvif["host"]       = onvifGetHost();
-    onvif["port"]       = onvifGetPort();
-    onvif["user"]       = onvifGetUser();
-    onvif["pass"]       = strlen(onvifGetPass()) > 0 ? "****" : "";
-    onvif["targetZone"] = onvifGetTargetZone();
     onvif["connected"]  = onvifIsConnected();
 
     // Prevent heap fragmentation by allocating exactly what we need once
@@ -135,6 +123,50 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
     free(jsonBuffer);
     
     return res;
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/settings/get — Retrieve full sensitive config (Requires PIN)
+// Body: { "pin": "1234" }
+// ---------------------------------------------------------------------------
+static esp_err_t handleApiGetSettings(PsychicRequest* request, PsychicResponse* response)
+{
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, request->body());
+    if (err) {
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+    }
+
+    const char* pin = doc["pin"] | "";
+    if (!alarmValidatePin(pin)) {
+        return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"ACCESS DENIED: PIN required\"}");
+    }
+
+    JsonDocument reply;
+    reply["ok"] = true;
+
+    JsonObject alerts = reply["alerts"].to<JsonObject>();
+    alerts["mode"] = (int)whatsappGetMode();
+    alerts["waPhone"] = whatsappGetPhone();
+    alerts["waApiKey"] = whatsappGetApiKey();
+
+    JsonObject mqtt = reply["mqtt"].to<JsonObject>();
+    mqtt["server"] = mqttGetServer();
+    mqtt["port"] = mqttGetPort();
+    mqtt["user"] = mqttGetUser();
+    mqtt["pass"] = mqttGetPass();
+    mqtt["clientId"] = mqttGetClientId();
+
+    JsonObject onvif = reply["onvif"].to<JsonObject>();
+    onvif["host"]       = onvifGetHost();
+    onvif["port"]       = onvifGetPort();
+    onvif["user"]       = onvifGetUser();
+    onvif["pass"]       = onvifGetPass();
+    onvif["targetZone"] = onvifGetTargetZone();
+
+    String out;
+    serializeJson(reply, out);
+    return response->send(200, "application/json", out.c_str());
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +423,7 @@ void webServerInit()
     server.on("/api/outputs", HTTP_GET, handleApiOutputs);
 
     // REST API — POST
+    server.on("/api/settings/get", HTTP_POST, handleApiGetSettings);
     server.on("/api/settings/onvif", HTTP_POST, handlePostOnvif);
     
     server.on("/api/arm", HTTP_POST, handleApiArm);

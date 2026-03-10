@@ -4,9 +4,20 @@
 #include "alarm_controller.h"
 #include "alarm_zones.h"
 #include "io_expander.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 static WiFiClient espClient;
 static PubSubClient client(espClient);
+
+struct MqttMsg {
+    char topic[64];
+    char payload[128];
+    bool retained;
+};
+
+static QueueHandle_t mqttMsgQueue = NULL;
+static volatile bool mqttSyncRequested = false;
 
 static char mqttServer[64] = "";
 static uint16_t mqttPort = 1883;
@@ -82,8 +93,9 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
 }
 
 void mqttInit() {
+    mqttMsgQueue = xQueueCreate(10, sizeof(MqttMsg));
     client.setCallback(mqttCallback);
-    Serial.println("[MQTT] MQTT client initialized");
+    Serial.println("[MQTT] MQTT client initialized with RTOS async queue");
 }
 
 void mqttSetConfig(const char* server, uint16_t port, const char* user, const char* pass, const char* clientId) {
@@ -123,6 +135,8 @@ bool mqttReconnect() {
     return connected;
 }
 
+static void internalSyncState(); // Forward declaration
+
 void mqttUpdate() {
     if (strlen(mqttServer) == 0) return;
 
@@ -134,12 +148,33 @@ void mqttUpdate() {
         }
     } else {
         client.loop();
+
+        if (mqttSyncRequested) {
+            mqttSyncRequested = false;
+            internalSyncState();
+        }
+
+        if (mqttMsgQueue) {
+            MqttMsg msg;
+            while (xQueueReceive(mqttMsgQueue, &msg, 0) == pdTRUE) {
+                client.publish(msg.topic, msg.payload, msg.retained);
+            }
+        }
     }
 }
 
 void mqttPublish(const char* topic, const char* payload, bool retained) {
-    if (client.connected()) {
-        client.publish(topic, payload, retained);
+    // Only queue if we have a queue initialized to prevent crashes
+    if (mqttMsgQueue) {
+        MqttMsg msg;
+        strncpy(msg.topic, topic, sizeof(msg.topic)-1);
+        msg.topic[sizeof(msg.topic)-1] = '\0';
+        strncpy(msg.payload, payload, sizeof(msg.payload)-1);
+        msg.payload[sizeof(msg.payload)-1] = '\0';
+        msg.retained = retained;
+        
+        // Push to queue, dropping if full (10 item max to save heap)
+        xQueueSend(mqttMsgQueue, &msg, 0);
     }
 }
 
@@ -158,6 +193,10 @@ static uint16_t lastPublishedZones = 0xFFFF;  // bitmask of zone rawInput
 static uint16_t lastPublishedOutputs = 0xFFFF;
 
 void mqttSyncState() {
+    mqttSyncRequested = true;
+}
+
+static void internalSyncState() {
     if (!client.connected()) return;
 
     // 1. Alarm State (only publish on change)
