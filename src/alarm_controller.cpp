@@ -89,11 +89,17 @@ static void sirenOff()
 static bool validatePin(const char* pin)
 {
     // Overflow-safe lockout check
-    if (lockedOut && (millis() - lockoutStartMs) < LOCKOUT_DURATION_MS) {
-        Serial.println("[ALARM] SECURITY: PIN entry locked due to multiple failures");
-        return false;
+    if (lockedOut) {
+        if ((millis() - lockoutStartMs) < LOCKOUT_DURATION_MS) {
+            Serial.println("[ALARM] SECURITY: PIN entry locked due to multiple failures");
+            return false;
+        } else {
+            // Lockout expired — MUST reset counter to prevent instant re-lockout on next failure
+            lockedOut = false;
+            failedAttempts = 0;
+            Serial.println("[ALARM] SECURITY: Lockout expired");
+        }
     }
-    lockedOut = false; // Lockout expired
 
     if (pin == nullptr || strlen(pin) == 0) return false;
     
@@ -437,8 +443,19 @@ uint16_t alarmGetSirenDuration() { return sirenDurationSec; }
 
 void alarmSetSirenOutput(uint8_t channel)
 {
-    if (channel < 16) {
+    if (channel < 16 && channel != sirenOutputChannel) {
+        // If the siren is currently active, turn off the old relay before switching
+        bool wasActive = sirenActive;
+        if (wasActive) {
+            ioExpanderSetOutput(sirenOutputChannel, false);
+        }
+        
         sirenOutputChannel = channel;
+        
+        // Turn on the new relay
+        if (wasActive) {
+            ioExpanderSetOutput(sirenOutputChannel, true);
+        }
         Serial.printf("[ALARM] Siren output channel set to %d\n", channel);
     }
 }

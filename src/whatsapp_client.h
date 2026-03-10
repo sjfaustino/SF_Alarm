@@ -47,11 +47,4 @@ const char* whatsappGetApiKey();
  */
 WhatsAppMode whatsappGetMode();
 
-/**
- * @brief Broadcast an alarm message via configured channels (SMS, WhatsApp, or Both)
- * 
- * @param message The message to broadcast
- */
-void alarmBroadcast(const char* message);
-
 #endif // SF_ALARM_WHATSAPP_CLIENT_H

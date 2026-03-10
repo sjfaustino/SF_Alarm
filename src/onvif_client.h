@@ -6,9 +6,6 @@
 /// Initialize ONVIF client.
 void onvifInit();
 
-/// Update ONVIF client (poll events). Call in main loop.
-void onvifUpdate();
-
 /// Set camera configuration.
 void onvifSetServer(const char* host, uint16_t port, const char* user, const char* pass, uint8_t targetZone);
 

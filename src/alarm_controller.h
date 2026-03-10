@@ -105,4 +105,7 @@ uint8_t alarmGetSirenOutput();
 /// Print alarm status to Serial.
 void alarmPrintStatus();
 
+/// Broadcast an alert message to all configured channels (WhatsApp, SMS, Call)
+void alarmBroadcast(const char* message);
+
 #endif // SF_ALARM_CONTROLLER_H

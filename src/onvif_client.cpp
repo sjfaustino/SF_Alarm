@@ -297,10 +297,7 @@ static void onvifTask(void* pvParameters) {
     }
 }
 
-void onvifUpdate() {
-    // Nothing to do here anymore! The FreeRTOS task handles everything continuously.
-    // This empty function remains to avoid touching main.cpp and maintain the API surface.
-}
+// onvifUpdate() removed — functionality is purely in the FreeRTOS task
 
 bool onvifIsConnected() {
     return state.connected;

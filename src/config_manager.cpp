@@ -257,9 +257,12 @@ void configPrint()
 {
     Serial.println("=== Configuration ===");
 
-    Serial.printf("  Router IP:   %s\n", smsGatewayGetRouterIp());
-    Serial.printf("  Router User: %s\n", smsGatewayGetRouterUser());
-    Serial.printf("  Wi-Fi SSID:  %s\n", networkGetSsid());
+    Serial.println("Network:");
+    Serial.printf("  WiFi SSID:     %s\n", networkGetSsid());
+    Serial.printf("  WiFi Pass:     %s\n", strlen(networkGetPass()) ? "********" : "");
+    Serial.printf("  Router IP:     %s\n", smsGatewayGetRouterIp());
+    Serial.printf("  Router User:   %s\n", smsGatewayGetRouterUser());
+    Serial.printf("  Router Pass:   %s\n", strlen(smsGatewayGetRouterPass()) ? "********" : "");
     Serial.printf("  Exit delay:  %d sec\n", alarmGetExitDelay());
     Serial.printf("  Entry delay: %d sec\n", alarmGetEntryDelay());
     Serial.printf("  Siren dur:   %d sec\n", alarmGetSirenDuration());

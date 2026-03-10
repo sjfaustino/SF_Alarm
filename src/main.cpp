@@ -314,7 +314,6 @@ void loop()
     }
 
     // --- 8. ONVIF ---
-    onvifUpdate();
 
     // --- 9. Alert Queue ---
     processAlertQueue();
