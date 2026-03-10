@@ -179,6 +179,8 @@ static void processLine(const char* line)
         }
 
         // --- Authenticated Command Dispatch ---
+        bool configChanged = false;
+
         if (strcmp(start, "arm") == 0) {
             if (arg1 && strncmp(arg1, "home", 4) == 0) {
                 alarmArmHome(providedPin); // Validated above, but pass for logging
@@ -207,35 +209,42 @@ static void processLine(const char* line)
                             strncpy(cfg->name, subcmd + 5, MAX_ZONE_NAME_LEN - 1);
                             cfg->name[MAX_ZONE_NAME_LEN - 1] = '\0';
                             Serial.printf("Zone %d name: %s\n", zoneNum, cfg->name);
+                            configChanged = true;
                         } else if (strncmp(subcmd, "type ", 5) == 0) {
                             char* typeStr = subcmd + 5;
                             char* endptr = strchr(typeStr, ' '); // Stop at " pin " which was cut
                             if (endptr) *endptr = '\0';
                             
-                            if (strcmp(typeStr, "inst") == 0) cfg->type = ZONE_INSTANT;
-                            else if (strcmp(typeStr, "dly") == 0) cfg->type = ZONE_DELAYED;
-                            else if (strcmp(typeStr, "24h") == 0) cfg->type = ZONE_24H;
-                            else if (strcmp(typeStr, "flw") == 0) cfg->type = ZONE_FOLLOWER;
+                            if (strcmp(typeStr, "inst") == 0) { cfg->type = ZONE_INSTANT; configChanged = true; }
+                            else if (strcmp(typeStr, "dly") == 0) { cfg->type = ZONE_DELAYED; configChanged = true; }
+                            else if (strcmp(typeStr, "24h") == 0) { cfg->type = ZONE_24H; configChanged = true; }
+                            else if (strcmp(typeStr, "flw") == 0) { cfg->type = ZONE_FOLLOWER; configChanged = true; }
                             else { Serial.println("Unknown type: inst|dly|24h|flw"); }
-                            Serial.printf("Zone %d type updated\n", zoneNum);
+                            
+                            if (configChanged) Serial.printf("Zone %d type updated\n", zoneNum);
                         } else if (strncmp(subcmd, "nc", 2) == 0) {
                             cfg->wiring = ZONE_NC;
                             Serial.printf("Zone %d set to NC\n", zoneNum);
+                            configChanged = true;
                         } else if (strncmp(subcmd, "no", 2) == 0) {
                             cfg->wiring = ZONE_NO;
                             Serial.printf("Zone %d set to NO\n", zoneNum);
+                            configChanged = true;
                         } else if (strncmp(subcmd, "enable", 6) == 0) {
                             cfg->enabled = true;
                             Serial.printf("Zone %d enabled\n", zoneNum);
+                            configChanged = true;
                         } else if (strncmp(subcmd, "disable", 7) == 0) {
                             cfg->enabled = false;
                             Serial.printf("Zone %d disabled\n", zoneNum);
+                            configChanged = true;
                         } else if (strncmp(subcmd, "bypass", 6) == 0) {
                             zonesSetBypassed(zoneNum - 1, true);
                         } else if (strncmp(subcmd, "unbypass", 8) == 0) {
                             zonesSetBypassed(zoneNum - 1, false);
                         } else if (strncmp(subcmd, "text ", 5) == 0) {
                             smsCmdSetAlarmText(zoneNum - 1, subcmd + 5);
+                            configChanged = true;
                         } else {
                             Serial.println("Unknown zone subcommand");
                         }
@@ -250,15 +259,22 @@ static void processLine(const char* line)
                 pass++;
                 networkSetWifi(arg1, pass);
                 Serial.printf("Wi-Fi set: SSID=%s\n", arg1);
+                configChanged = true;
             } else {
                 Serial.println("Usage: wifi <ssid> <password> pin <pin>");
             }
         }
         else if (strcmp(start, "pin") == 0 && arg1) {
             alarmSetPin(arg1);
+            configChanged = true;
         }
         else {
             Serial.printf("Unknown command: '%s'. Type 'help' for options.\n", start);
+        }
+
+        if (configChanged) {
+            configSave();
+            Serial.println("[CLI] Configuration saved to NVS");
         }
     }
 

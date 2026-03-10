@@ -465,6 +465,16 @@ body {
     </div>
   </div>
 
+  <!-- Settings Unlock Card -->
+  <div class="card" id="unlockCard">
+    <div class="card-body" style="text-align:center; padding: 24px;">
+      <svg style="width:32px; height:32px; color:var(--text2); margin-bottom:8px" viewBox="0 0 24 24" fill="currentColor"><path d="M12 17C10.9 17 10 16.1 10 15C10 13.9 10.9 13 12 13C13.1 13 14 13.9 14 15C14 16.1 13.1 17 12 17M18 8H17V6C17 3.24 14.76 1 12 1C9.24 1 7 3.24 7 6V8H6C4.9 8 4 8.9 4 10V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V10C20 8.9 19.1 8 18 8M8.9 6C8.9 4.29 10.29 2.9 12 2.9C13.71 2.9 15.1 4.29 15.1 6V8H8.9V6Z"/></svg>
+      <p style="color:var(--text2); margin-bottom:16px">Advanced settings are locked to prevent unauthorized access.</p>
+      <button class="btn" style="border-color:var(--accent); color:var(--accent)" onclick="unlockSettings()">Unlock Settings</button>
+    </div>
+  </div>
+
+  <div id="settingsContainer" style="display:none">
   <!-- Alert Settings -->
   <div class="card">
     <div class="card-header"><h2>Alert Settings</h2></div>
@@ -565,6 +575,8 @@ body {
     </div>
   </div>
 
+  </div>
+
 </div>
 
 
@@ -662,6 +674,47 @@ function doBypass(zone, bypass) {
 function doOutput(ch, state) {
   openModal('Enter PIN to Toggle Output', pin => {
     apiPost('/api/output', {channel: ch, state, pin});
+  });
+}
+
+function unlockSettings() {
+  openModal('Enter PIN to Unlock Settings', async pin => {
+    try {
+      const r = await fetch('/api/settings/get', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ pin })
+      });
+      const d = await r.json();
+      if (!d.ok) {
+        toast(d.msg || 'Access Denied', 'error');
+        return;
+      }
+      
+      // Populate fields from authenticated response
+      document.getElementById('waMode').value = d.alerts.mode;
+      document.getElementById('waPhone').value = d.alerts.waPhone;
+      document.getElementById('waApiKey').value = d.alerts.waApiKey;
+      
+      document.getElementById('mqServer').value = d.mqtt.server;
+      document.getElementById('mqPort').value = d.mqtt.port;
+      document.getElementById('mqUser').value = d.mqtt.user;
+      document.getElementById('mqPass').value = d.mqtt.pass;
+      document.getElementById('mqClientId').value = d.mqtt.clientId;
+      
+      document.getElementById('ovHost').value = d.onvif.host;
+      document.getElementById('ovPort').value = d.onvif.port;
+      document.getElementById('ovUser').value = d.onvif.user;
+      document.getElementById('ovPass').value = d.onvif.pass;
+      document.getElementById('ovZone').value = d.onvif.targetZone;
+
+      // Reveal settings panel
+      document.getElementById('unlockCard').style.display = 'none';
+      document.getElementById('settingsContainer').style.display = 'block';
+      toast('Settings Unlocked', 'success');
+    } catch(e) {
+      toast('Network error', 'error');
+    }
   });
 }
 
@@ -801,26 +854,7 @@ async function refresh() {
     document.getElementById('sysHeap').textContent = (d.system.freeHeap/1024).toFixed(1)+'KB';
     document.getElementById('headerVer').textContent = 'v'+d.system.version;
 
-    // Alert settings (fill once)
-    if (!window.settingsLoaded) {
-      document.getElementById('waMode').value = d.alerts.mode;
-      document.getElementById('waPhone').value = d.alerts.waPhone;
-      document.getElementById('waApiKey').value = d.alerts.waApiKey;
-      
-      document.getElementById('mqServer').value = d.mqtt.server;
-      document.getElementById('mqPort').value = d.mqtt.port;
-      document.getElementById('mqUser').value = d.mqtt.user;
-      document.getElementById('mqPass').value = d.mqtt.pass;
-      document.getElementById('mqClientId').value = d.mqtt.clientId;
-      
-      document.getElementById('ovHost').value = d.onvif.host;
-      document.getElementById('ovPort').value = d.onvif.port;
-      document.getElementById('ovUser').value = d.onvif.user;
-      document.getElementById('ovPass').value = d.onvif.pass;
-      document.getElementById('ovZone').value = d.onvif.targetZone;
-      
-      window.settingsLoaded = true;
-    }
+    document.getElementById('headerVer').textContent = 'v'+d.system.version;
 
     // MQTT connection status
     const mqDot = document.getElementById('mqttStatus');

@@ -59,6 +59,9 @@
 /// Initialize the SMS command processor.
 void smsCmdInit();
 
+/// Queue an asynchronous targeted SMS reply
+void alarmQueueReply(const char* phone, const char* message);
+
 /// Process a received SMS message. Executes the command and sends a reply.
 void smsCmdProcess(const char* sender, const char* body);
 

@@ -8,6 +8,7 @@
 #include "config.h"
 #include <string.h>
 #include <ctype.h>
+#include "config_manager.h"
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -70,7 +71,10 @@ static bool isAuthorized(const char* sender)
 
 static void sendReply(const char* sender, const char* message)
 {
-    smsGatewaySend(sender, message);
+    // Fix: Queue Starvation DoS vulnerability offload.
+    // Instead of synchronously triggering smsGatewaySend (which halts the task for 10s),
+    // push the reply into the async queue so core processing can continue immediately.
+    alarmQueueReply(sender, message);
 }
 
 static void trimStr(char* str)
@@ -721,23 +725,34 @@ void smsCmdProcess(const char* sender, const char* body)
         }
     }
 
-    // Try each parser in order
-    if (parseSetPhone(trimmed, sender)) return;       // #01#phone#
-    if (parseSetMultiplePhones(trimmed, sender)) return; // @#num1#num2#
-    if (parseSetAlarmText(trimmed, sender)) return;    // #N#text
-    if (parseSetNC(trimmed, sender)) return;           // *NCxyz
-    if (parseStatus(trimmed, sender)) return;          // @#STATUS? or STATUS
-    if (parseArmDisarm(trimmed, sender)) return;       // ARM/DISARM
-    if (parseMute(trimmed, sender)) return;            // MUTE
-    if (parseBypass(trimmed, sender)) return;          // BYPASS/UNBYPASS
-    if (parseReportTimer(trimmed, sender)) return;     // %#Txx
-    if (parseWorkingMode(trimmed, sender)) return;     // %#Mx
-    if (parseAlertChannel(trimmed, sender)) return;    // %#Wx
-    if (parseSetWhatsApp(trimmed, sender)) return;     // #WA#...
-    if (parseSetMQTT(trimmed, sender)) return;        // #MQTT#...
-    if (parseArmInputs(trimmed, sender)) return;      // @#ARMxxx
-    if (parseCallNumbers(trimmed, sender)) return;     // &xxx
-    if (parseHelp(trimmed, sender)) return;            // HELP
+    // Try each parser in order. If a configuration-altering parser succeeds, save to NVS.
+    bool handled = false;
+    bool configChanged = false;
+
+    if (parseSetPhone(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseSetMultiplePhones(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseSetAlarmText(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseSetNC(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseStatus(trimmed, sender)) { handled = true; }
+    else if (parseArmDisarm(trimmed, sender)) { handled = true; }
+    else if (parseMute(trimmed, sender)) { handled = true; }
+    else if (parseBypass(trimmed, sender)) { handled = true; }     // Bypass is RAM-only by design
+    else if (parseReportTimer(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseWorkingMode(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseAlertChannel(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseSetWhatsApp(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseSetMQTT(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseArmInputs(trimmed, sender)) { handled = true; configChanged = true; }
+    else if (parseCallNumbers(trimmed, sender)) { handled = true; }
+    else if (parseHelp(trimmed, sender)) { handled = true; }
+
+    if (handled) {
+        if (configChanged) {
+            configSave();
+            Serial.println("[CMD] Configuration saved to NVS via SMS command");
+        }
+        return;
+    }
 
     Serial.printf("[CMD] Unknown command: \"%s\"\n", trimmed);
     sendReply(sender, "SF_Alarm: Unknown command. Send HELP for options.");

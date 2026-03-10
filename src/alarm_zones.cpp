@@ -1,4 +1,5 @@
 #include "alarm_zones.h"
+#include "io_expander.h"
 #include <string.h>
 
 // ---------------------------------------------------------------------------
@@ -81,10 +82,17 @@ void zonesUpdate(uint16_t inputBitmask)
         uint16_t vInput = virtualInputBitmask;
         portEXIT_CRITICAL(&vInputMux);
 
+        bool isTampered = ioExpanderIsTampered();
         bool triggered = isInputTriggered(i, inputBitmask) || ((vInput >> i) & 1);
 
-        // --- Debounce logic ---
-        if (triggered != zones[i].rawInput) {
+        // --- Tamper & Debounce logic ---
+        if (isTampered) {
+            // If the I2C physical wire is cut, instantly fault all zones to prevent bypass
+            zones[i].rawInput = true;
+            zones[i].debouncing = false;
+            setZoneState(i, ZONE_TAMPER);
+        }
+        else if (triggered != zones[i].rawInput) {
             if (!zones[i].debouncing) {
                 // Start debounce
                 zones[i].debouncing     = true;

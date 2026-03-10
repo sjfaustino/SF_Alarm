@@ -29,4 +29,7 @@ uint16_t ioExpanderGetOutputs();
 /// chipIndex: 0=input1, 1=input2, 2=output1, 3=output2
 bool ioExpanderChipOk(uint8_t chipIndex);
 
+/// Check if the I2C input bus has been physically compromised (wires cut/shorted)
+bool ioExpanderIsTampered();
+
 #endif // SF_ALARM_IO_EXPANDER_H
