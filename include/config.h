@@ -12,11 +12,11 @@
 #define I2C_SCL_PIN         5
 #define I2C_CLOCK_HZ        100000  // 100 kHz standard mode
 
-// PCF8574 I2C Addresses (Kincony KC868-A16 V1.6)
-#define PCF_INPUT_1_ADDR    0x39    // Digital inputs 1–8
-#define PCF_INPUT_2_ADDR    0x3A    // Digital inputs 9–16
-#define PCF_OUTPUT_1_ADDR   0x3C    // Relay outputs 1–8
-#define PCF_OUTPUT_2_ADDR   0x3D    // Relay outputs 9–16
+// PCF8574 I2C Addresses (Kincony KC868-A16 V1.6 standard)
+#define PCF_INPUT_1_ADDR    0x22    // Digital inputs 1–8
+#define PCF_INPUT_2_ADDR    0x21    // Digital inputs 9–16
+#define PCF_OUTPUT_1_ADDR   0x24    // Relay outputs 1–8
+#define PCF_OUTPUT_2_ADDR   0x25    // Relay outputs 9–16
 
 // Analog Inputs (direct ESP32 GPIOs)
 #define ANALOG_IN_1_PIN     36      // ADC1_CH0
