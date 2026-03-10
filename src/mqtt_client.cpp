@@ -6,6 +6,8 @@
 #include "io_expander.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <esp_task_wdt.h>
+#include <esp_task_wdt.h>
 
 static WiFiClient espClient;
 static PubSubClient client(espClient);

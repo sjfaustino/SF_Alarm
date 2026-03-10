@@ -10,6 +10,8 @@
 // Constants & Templates
 // ---------------------------------------------------------------------------
 
+#include <esp_task_wdt.h>
+
 static const char* SOAP_ENV_START = 
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
     "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" "
@@ -106,14 +108,19 @@ static String getAuthHeader() {
     String created = getTimestamp();
     String digest = generateDigest((const char*)rawNonce, created.c_str(), state.pass);
 
-    String header = "<s:Header>";
+    String header;
+    header.reserve(512); // Pre-allocate to prevent heap fragmentation
+    header = "<s:Header>";
     header += "<Security s:mustUnderstand=\"1\" xmlns=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\">";
-    header += "<UsernameToken>";
-    header += "<Username>" + String(state.user) + "</Username>";
-    header += "<Password Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\">" + digest + "</Password>";
-    header += "<Nonce EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\">" + nonceB64 + "</Nonce>";
-    header += "<Created xmlns=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\">" + created + "</Created>";
-    header += "</UsernameToken></Security></s:Header>";
+    header += "<UsernameToken><Username>";
+    header += state.user;
+    header += "</Username><Password Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\">";
+    header += digest;
+    header += "</Password><Nonce EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\">";
+    header += nonceB64;
+    header += "</Nonce><Created xmlns=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\">";
+    header += created;
+    header += "</Created></UsernameToken></Security></s:Header>";
     return header;
 }
 
@@ -130,7 +137,9 @@ static bool createSubscription() {
     http.begin(url);
     http.addHeader("Content-Type", "application/soap+xml; charset=utf-8");
 
-    String body = SOAP_ENV_START;
+    String body;
+    body.reserve(1024); // Pre-allocate to prevent heap fragmentation
+    body = SOAP_ENV_START;
     body += getAuthHeader();
     body += "<s:Body><e:CreatePullPointSubscription/></s:Body>";
     body += SOAP_ENV_END;
@@ -165,29 +174,66 @@ static void pollMessages() {
     http.addHeader("Content-Type", "application/soap+xml; charset=utf-8");
     http.setTimeout(5000); // 5s timeout for PullMessages
 
-    String body = SOAP_ENV_START;
+    String body;
+    body.reserve(1024); // Pre-allocate to prevent heap fragmentation
+    body = SOAP_ENV_START;
     body += getAuthHeader();
     body += "<s:Body><e:PullMessages><e:Timeout>PT2S</e:Timeout><e:MessageLimit>10</e:MessageLimit></e:PullMessages></s:Body>";
     body += SOAP_ENV_END;
 
     int code = http.POST(body);
     if (code == 200) {
-        String res = http.getString();
-        // Look for Motion Detection events
-        // Match specifically: Name="IsMotion" ... Value="true" within the same SimpleItem
-        // Avoids false positives from unrelated "true" values in the response
+        // --- THE XML HEAP DETONATOR FIX ---
+        // DO NOT DO: String res = http.getString();
+        // The XML payload from cameras can routinely exceed 64KB. Pulling it
+        // fully into a contiguous RAM String array will instantly shatter the
+        // ESP32 Heap and cause an Out-Of-Memory kernel crash.
+        // We use a sliding-window stream scanner.
+        
+        WiFiClient* stream = http.getStreamPtr();
+        if (!stream) {
+            http.end();
+            return;
+        }
+        
+        String window;
+        window.reserve(1024); // Micro-buffer for parsing tags
         bool motion = false;
-        int searchPos = 0;
-        while (true) {
-            int namePos = res.indexOf("IsMotion", searchPos);
-            if (namePos < 0) break;
-            // Look for Value="true" within 100 chars after IsMotion
-            int valuePos = res.indexOf("Value=\"true\"", namePos);
-            if (valuePos >= 0 && valuePos - namePos < 100) {
-                motion = true;
-                break;
+        unsigned long timeoutMs = millis();
+        
+        while (http.connected() || stream->available()) {
+            if (millis() - timeoutMs > 5000) break; // Emergency timeout
+            
+            size_t size = stream->available();
+            if (size) {
+                timeoutMs = millis();
+                uint8_t buf[256];
+                int c = stream->readBytes(buf, min(size, sizeof(buf)));
+                window += String((char*)buf, c);
+                
+                // Stream parsing logic: find IsMotion and true in close proximity
+                int namePos = window.indexOf("IsMotion");
+                if (namePos >= 0) {
+                    int valPos = window.indexOf("Value=\"true\"", namePos);
+                    if (valPos >= 0 && valPos - namePos < 100) {
+                        motion = true;
+                        break; // Found motion, abort scanning the rest of the stream
+                    }
+                }
+                
+                // Keep the sliding window small to prevent OOM
+                if (window.length() > 512) {
+                    // Retain the last 150 characters to catch spanning tags like "IsMotion... Value="true""
+                    window.remove(0, window.length() - 150);
+                }
+            } else {
+                delay(10);
             }
-            searchPos = namePos + 8;
+        }
+        
+        if (motion) {
+            // Flush remaining stream nicely
+            while (stream->available()) stream->read();
         }
         
         zonesSetVirtualInput(state.targetZone, motion);
@@ -196,7 +242,6 @@ static void pollMessages() {
             Serial.println("[ONVIF] Motion detected on camera!");
         }
     } else if (code > 0) {
-        // Handle error/expiration
         if (code == 400 || code == 404 || code == 500) {
             state.connected = false;
             Serial.println("[ONVIF] Connection lost, will retry subscription");
@@ -250,7 +295,10 @@ void onvifSetServer(const char* host, uint16_t port, const char* user, const cha
 
 // The FreeRTOS Task Loop
 static void onvifTask(void* pvParameters) {
+    esp_task_wdt_add(NULL); // Add to watchdog
     while (true) {
+        esp_task_wdt_reset(); // Pet watchdog
+
         // Take a local snapshot of config under mutex to prevent TOCTOU race with onvifSetServer()
         if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
         bool hasHost = (strlen(state.host) > 0);
