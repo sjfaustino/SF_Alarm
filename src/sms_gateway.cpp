@@ -304,7 +304,7 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
                 if (smsGatewayLogin()) continue;
                 return false;
             }
-            if (attempt < MAX_RETRIES - 1) delay(RETRY_DELAY_MS);
+            if (attempt < MAX_RETRIES - 1) vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
@@ -330,7 +330,7 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
 
         if (sendToken.length() == 0) {
             setError("No token on smsnew page (attempt %d)", attempt + 1);
-            if (attempt < MAX_RETRIES - 1) delay(RETRY_DELAY_MS);
+            if (attempt < MAX_RETRIES - 1) vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
@@ -385,7 +385,8 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
         }
 
         if (attempt < MAX_RETRIES - 1) {
-            delay(RETRY_DELAY_MS * (attempt + 1));
+            // Replaced delay() with non-blocking yield to keep netWorkerTask alive
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
     return false;
@@ -518,14 +519,15 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
             }
 
             // Eject processed HTML or truncate to prevent OOM panic
+            // Use .remove(0, size) instead of substring to prevent string allocation fragmentation
             if (searchPos > 0) {
-                window = window.substring(searchPos);
+                window.remove(0, searchPos);
             } else if (window.length() > 2048) {
                 int lastPartial = window.lastIndexOf("<tr ");
                 if (lastPartial >= 0) {
-                    window = window.substring(lastPartial);
+                    window.remove(0, lastPartial);
                 } else {
-                    window = window.substring(1024); // Flush half if entirely garbage
+                    window.remove(0, 1024); // Flush half if entirely garbage
                 }
             }
         } else {

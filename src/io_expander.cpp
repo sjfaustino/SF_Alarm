@@ -111,9 +111,13 @@ uint16_t ioExpanderReadInputs()
     return ~raw & 0xFFFF;
 }
 
+static portMUX_TYPE ioMux = portMUX_INITIALIZER_UNLOCKED;
+
 void ioExpanderWriteOutputs(uint16_t mask)
 {
+    portENTER_CRITICAL(&ioMux);
     currentOutputs = mask;
+    portEXIT_CRITICAL(&ioMux);
 
     if (chipOk[2]) {
         pcfOut1.write8((uint8_t)(mask & 0xFF));
@@ -127,22 +131,40 @@ void ioExpanderSetOutput(uint8_t channel, bool state)
 {
     if (channel >= 16) return;
 
+    portENTER_CRITICAL(&ioMux);
     if (state) {
         currentOutputs |= (1 << channel);
     } else {
         currentOutputs &= ~(1 << channel);
     }
+    uint16_t mask = currentOutputs;
+    portEXIT_CRITICAL(&ioMux);
 
-    ioExpanderWriteOutputs(currentOutputs);
+    // Call output writer without nested lock since we bypass ioExpanderWriteOutputs update
+    if (chipOk[2]) {
+        pcfOut1.write8((uint8_t)(mask & 0xFF));
+    }
+    if (chipOk[3]) {
+        pcfOut2.write8((uint8_t)((mask >> 8) & 0xFF));
+    }
 }
 
 uint16_t ioExpanderGetOutputs()
 {
-    return currentOutputs;
+    portENTER_CRITICAL(&ioMux);
+    uint16_t ret = currentOutputs;
+    portEXIT_CRITICAL(&ioMux);
+    return ret;
 }
 
 bool ioExpanderChipOk(uint8_t chipIndex)
 {
     if (chipIndex >= 4) return false;
     return chipOk[chipIndex];
+}
+
+bool ioExpanderIsTampered()
+{
+    // If either input chip is dead/disconnected, the I2C line has been tampered with
+    return !chipOk[0] || !chipOk[1];
 }
