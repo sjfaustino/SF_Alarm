@@ -430,80 +430,110 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
         return 0;
     }
 
-    String body;
-    body.reserve(16384); 
-    body = http.getString();
-    http.end();
+    WiFiClient* stream = http.getStreamPtr();
+    if (!stream) {
+        http.end();
+        return 0;
+    }
 
-    // --- Parse HTML table rows ---
+    String window;
+    window.reserve(4096);
     int count = 0;
-    int searchPos = 0;
+    unsigned long timeoutMs = millis();
 
-    while (count < maxMessages) {
-        int rowStart = body.indexOf("<tr class=\"cbi-section-table-row", searchPos);
-        if (rowStart < 0) break;
+    while ((http.connected() || stream->available()) && count < maxMessages && (millis() - timeoutMs) < 10000) {
+        size_t size = stream->available();
+        if (size) {
+            timeoutMs = millis(); // Refresh timeout
+            uint8_t buf[256];
+            int c = stream->readBytes(buf, min(size, sizeof(buf)));
+            window += String((char*)buf, c);
 
-        int rowEnd = body.indexOf("</tr>", rowStart);
-        if (rowEnd < 0) break;
+            // --- Parse HTML table rows from sliding window ---
+            int searchPos = 0;
+            while (count < maxMessages) {
+                int rowStart = window.indexOf("<tr class=\"cbi-section-table-row", searchPos);
+                if (rowStart < 0) break;
 
-        String row = body.substring(rowStart, rowEnd);
+                int rowEnd = window.indexOf("</tr>", rowStart);
+                if (rowEnd < 0) break;
 
-        // Extract <td> contents
-        int tdPos = 0;
-        int tdIdx = 0;
-        String phone = "";
-        String content = "";
-        String timestamp = "";
-        String cfgId = "";
+                String row = window.substring(rowStart, rowEnd + 5);
 
-        while (tdIdx < 6) {
-            int tdStart = row.indexOf("<td", tdPos);
-            if (tdStart < 0) break;
-            int tdContentStart = row.indexOf(">", tdStart) + 1;
-            int tdEnd = row.indexOf("</td>", tdContentStart);
-            if (tdEnd < 0) break;
+                // Extract <td> contents
+                int tdPos = 0;
+                int tdIdx = 0;
+                String phone = "";
+                String content = "";
+                String timestamp = "";
+                String cfgId = "";
 
-            String cellContent = row.substring(tdContentStart, tdEnd);
-            cellContent.trim();
+                while (tdIdx < 6) {
+                    int tdStart = row.indexOf("<td", tdPos);
+                    if (tdStart < 0) break;
+                    int tdContentStart = row.indexOf(">", tdStart) + 1;
+                    int tdEnd = row.indexOf("</td>", tdContentStart);
+                    if (tdEnd < 0) break;
 
-            switch (tdIdx) {
-                case 1: phone = cellContent; break;
-                case 2: content = cellContent; break;
-                case 3: timestamp = cellContent; break;
-                case 4: {
-                    int cfgStart = cellContent.indexOf("cfg=");
-                    if (cfgStart >= 0) {
-                        cfgStart += 4;
-                        int cfgEnd = cellContent.indexOf("&", cfgStart);
-                        if (cfgEnd < 0) cfgEnd = cellContent.indexOf("\"", cfgStart);
-                        if (cfgEnd < 0) cfgEnd = cellContent.indexOf("'", cfgStart);
-                        if (cfgEnd > cfgStart) cfgId = cellContent.substring(cfgStart, cfgEnd);
+                    String cellContent = row.substring(tdContentStart, tdEnd);
+                    cellContent.trim();
+
+                    switch (tdIdx) {
+                        case 1: phone = cellContent; break;
+                        case 2: content = cellContent; break;
+                        case 3: timestamp = cellContent; break;
+                        case 4: {
+                            int cfgStart = cellContent.indexOf("cfg=");
+                            if (cfgStart >= 0) {
+                                cfgStart += 4;
+                                int cfgEnd = cellContent.indexOf("&", cfgStart);
+                                if (cfgEnd < 0) cfgEnd = cellContent.indexOf("\"", cfgStart);
+                                if (cfgEnd < 0) cfgEnd = cellContent.indexOf("'", cfgStart);
+                                if (cfgEnd > cfgStart) cfgId = cellContent.substring(cfgStart, cfgEnd);
+                            }
+                            break;
+                        }
                     }
-                    break;
+
+                    tdPos = tdEnd + 5;
+                    tdIdx++;
+                }
+
+                if (phone.length() > 0) {
+                    msgs[count].id = count;
+                    strncpy(msgs[count].sender, phone.c_str(), sizeof(msgs[count].sender) - 1);
+                    msgs[count].sender[sizeof(msgs[count].sender) - 1] = '\0';
+                    strncpy(msgs[count].body, content.c_str(), sizeof(msgs[count].body) - 1);
+                    msgs[count].body[sizeof(msgs[count].body) - 1] = '\0';
+                    strncpy(msgs[count].timestamp, timestamp.c_str(), sizeof(msgs[count].timestamp) - 1);
+                    msgs[count].timestamp[sizeof(msgs[count].timestamp) - 1] = '\0';
+
+                    if (cfgId.length() > 0) {
+                        msgs[count].id = (int)strtol(cfgId.c_str() + 3, nullptr, 16);
+                    }
+                    count++;
+                }
+
+                searchPos = rowEnd + 5;
+            }
+
+            // Eject processed HTML or truncate to prevent OOM panic
+            if (searchPos > 0) {
+                window = window.substring(searchPos);
+            } else if (window.length() > 2048) {
+                int lastPartial = window.lastIndexOf("<tr ");
+                if (lastPartial >= 0) {
+                    window = window.substring(lastPartial);
+                } else {
+                    window = window.substring(1024); // Flush half if entirely garbage
                 }
             }
-
-            tdPos = tdEnd + 5;
-            tdIdx++;
+        } else {
+            delay(10);
         }
-
-        if (phone.length() > 0) {
-            msgs[count].id = count;
-            strncpy(msgs[count].sender, phone.c_str(), sizeof(msgs[count].sender) - 1);
-            msgs[count].sender[sizeof(msgs[count].sender) - 1] = '\0';
-            strncpy(msgs[count].body, content.c_str(), sizeof(msgs[count].body) - 1);
-            msgs[count].body[sizeof(msgs[count].body) - 1] = '\0';
-            strncpy(msgs[count].timestamp, timestamp.c_str(), sizeof(msgs[count].timestamp) - 1);
-            msgs[count].timestamp[sizeof(msgs[count].timestamp) - 1] = '\0';
-
-            if (cfgId.length() > 0) {
-                msgs[count].id = (int)strtol(cfgId.c_str() + 3, nullptr, 16);
-            }
-            count++;
-        }
-
-        searchPos = rowEnd + 5;
     }
+
+    http.end();
 
     if (count > 0) {
         Serial.printf("[SMS] Polled %d message(s)\n", count);

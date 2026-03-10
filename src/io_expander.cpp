@@ -26,6 +26,7 @@ static const uint32_t CHIP_RETRY_INTERVAL_MS = 5000; // Retry once per 5 seconds
 bool ioExpanderInit()
 {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_CLOCK_HZ);
+    Wire.setTimeOut(100); // Prevent infinite while() loops if the I2C bus is physically jammed/shorted
 
     // Initialize input chips — set all pins as inputs (write 0xFF)
     chipOk[0] = pcfIn1.begin();

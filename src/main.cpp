@@ -26,7 +26,7 @@ static bool     lastAllClear    = true;
 // Alert Queue for non-blocking broadcasts
 struct PendingAlert {
     char message[160];
-    bool active;
+    volatile bool active;
 };
 static PendingAlert alertQueue[ALERT_QUEUE_SIZE]; 
 static uint32_t lastAlertProcessedMs = 0;
@@ -148,6 +148,55 @@ static void processAlertQueue()
 }
 
 // ---------------------------------------------------------------------------
+// Background Network Worker Task (SMS Polling & Sending)
+// ---------------------------------------------------------------------------
+
+// Forward declaration
+static void pollSmsInbox();
+
+static void netWorkerTask(void* pvParameters)
+{
+    while (true) {
+        uint32_t now = millis();
+        
+        // 1. Poll SMS Inbox
+        if (now - lastSmsPoll >= SMS_POLL_INTERVAL_MS) {
+            lastSmsPoll = now;
+            pollSmsInbox(); // Can block for 10s if router is down
+        }
+
+        // 2. Process Outbound Alerts
+        processAlertQueue(); // Can block for HTTP POSTs
+
+        // 3. Periodic Status Report (GA09)
+        uint16_t reportInt = smsCmdGetReportInterval();
+        if (reportInt > 0) {
+            if (lastReportMs == 0) lastReportMs = now;
+            if (now - lastReportMs >= (uint32_t)reportInt * 60 * 1000) {
+                lastReportMs = now;
+                char buf[160];
+                uint16_t triggered = zonesGetTriggeredMask();
+                int trigCount = 0;
+                for (int j = 0; j < 16; j++) {
+                    if (triggered & (1 << j)) trigCount++;
+                }
+
+                snprintf(buf, sizeof(buf),
+                         "SF_Alarm PERIODIC: [%s] Zones:%d triggered | Clear:%s",
+                         alarmGetStateStr(),
+                         trigCount,
+                         zonesAllClear() ? "YES" : "NO");
+                alarmBroadcast(buf);
+            }
+        } else {
+            lastReportMs = 0;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // Sleep to yield
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SMS Inbox Processing
 // ---------------------------------------------------------------------------
 
@@ -238,6 +287,10 @@ void setup()
     Serial.println("[INIT] ONVIF...");
     onvifInit();
 
+    // --- Start Network Worker Task ---
+    Serial.println("[INIT] Starting Network Worker Task...");
+    xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 8192, NULL, 1, NULL, 1);
+
     Serial.println("[INIT] Startup complete!");
     Serial.println();
 }
@@ -270,55 +323,17 @@ void loop()
     // --- 3. Network ---
     networkUpdate();
 
-    // --- 4. Poll SMS Inbox ---
-    if (now - lastSmsPoll >= SMS_POLL_INTERVAL_MS) {
-        lastSmsPoll = now;
-        pollSmsInbox();
-    }
-
-    // --- 5. Periodic Status Report (GA09) ---
-    uint16_t reportInt = smsCmdGetReportInterval();
-    if (reportInt > 0) {
-        if (lastReportMs == 0) lastReportMs = now; // Initialize on first enable
-
-        if (now - lastReportMs >= (uint32_t)reportInt * 60 * 1000) {
-            lastReportMs = now;
-            
-            char buf[160];
-            uint16_t triggered = zonesGetTriggeredMask();
-            int trigCount = 0;
-            for (int i = 0; i < 16; i++) {
-                if (triggered & (1 << i)) trigCount++;
-            }
-
-            snprintf(buf, sizeof(buf),
-                     "SF_Alarm PERIODIC: [%s] Zones:%d triggered | Clear:%s",
-                     alarmGetStateStr(),
-                     trigCount,
-                     zonesAllClear() ? "YES" : "NO");
-
-            alarmBroadcast(buf);
-        }
-    } else {
-        lastReportMs = 0; // Reset if disabled
-    }
-
-    // --- 6. Serial CLI ---
+    // --- 4. Serial CLI ---
     cliUpdate();
 
-    // --- 7. MQTT Loop ---
+    // --- 5. MQTT Loop ---
     mqttUpdate();
     if (now - lastMqttSync >= 5000) {
         lastMqttSync = now;
         mqttSyncState();
     }
 
-    // --- 8. ONVIF ---
-
-    // --- 9. Alert Queue ---
-    processAlertQueue();
-    
-    // --- 10. Watchdog ---
+    // --- 6. Watchdog ---
     esp_task_wdt_reset();
 
     // Small yield for WiFi/system tasks
