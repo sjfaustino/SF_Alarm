@@ -9,6 +9,7 @@
 #include "onvif_client.h"
 #include "network.h"
 #include <Preferences.h>
+#include <nvs_flash.h>
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -51,8 +52,23 @@ static const char* KEY_CONFIGURED    = "configured";
 
 void configInit()
 {
+    // --- NVS BROWNOUT DEATH SPIRAL FIX ---
+    // Standard prefs.begin() silently panics if the physical flash sector corrupts
+    // during a power-loss write failure. We must interact with the raw IDF API
+    // to trap the corruption and self-heal the physical partition.
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        Serial.println("[CFG] CRITICAL: NVS partition corrupted (brownout)! Executing self-healing erase...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+        Serial.println("[CFG] NVS partition repaired. Rebooting system for clean state.");
+        delay(1000);
+        ESP.restart();
+    }
+    ESP_ERROR_CHECK(err);
+
     prefs.begin(NVS_NAMESPACE, false);
-    Serial.println("[CFG] NVS namespace opened");
+    Serial.println("[CFG] NVS namespace opened securely");
 }
 
 void configLoad()

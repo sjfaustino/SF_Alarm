@@ -95,7 +95,7 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
 
     // System
     JsonObject sys = doc["system"].to<JsonObject>();
-    sys["uptime"]   = millis() / 1000;
+    sys["uptime"]   = esp_timer_get_time() / 1000000ULL;
     sys["freeHeap"] = ESP.getFreeHeap();
     sys["version"]  = FW_VERSION_STR;
 

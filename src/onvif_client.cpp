@@ -47,18 +47,17 @@ static void onvifTask(void* pvParameters);
 // ---------------------------------------------------------------------------
 
 static String getTimestamp() {
-    // Use millis()-based epoch estimate. Real ONVIF should use NTP-synced time,
-    // but many cameras accept approximate timestamps for digest auth.
+    // Use 64-bit hardware timer to prevent 49.7-day rollover cryptographic replay attack lockouts
     // Base: 2026-03-08T00:00:00Z epoch = 1772956800
-    unsigned long uptimeSec = millis() / 1000;
-    unsigned long epoch = 1772956800UL + uptimeSec;
+    uint64_t uptimeSec = esp_timer_get_time() / 1000000ULL;
+    uint64_t epoch = 1772956800ULL + uptimeSec;
     
     // Convert epoch to ISO 8601 (simplified — good enough for digest nonce)
-    unsigned long days = epoch / 86400;
-    unsigned long rem  = epoch % 86400;
-    int hours = rem / 3600;
-    int mins  = (rem % 3600) / 60;
-    int secs  = rem % 60;
+    uint64_t days = epoch / 86400ULL;
+    uint64_t rem  = epoch % 86400ULL;
+    int hours = rem / 3600ULL;
+    int mins  = (rem % 3600ULL) / 60ULL;
+    int secs  = rem % 60ULL;
     
     // Approximate year/month/day from days since epoch 1970
     int year = 1970;

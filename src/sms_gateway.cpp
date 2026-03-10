@@ -78,7 +78,7 @@ static String sha256Hex(const String& input)
 
     char hex[65];
     for (int i = 0; i < 32; i++) {
-        sprintf(hex + i * 2, "%02x", hash[i]);
+        snprintf(hex + i * 2, sizeof(hex) - (i * 2), "%02x", hash[i]);
     }
     hex[64] = '\0';
     return String(hex);
@@ -186,7 +186,7 @@ bool smsGatewayLogin()
                       "&luci_password=" + finalHash +
                       "&luci_language=auto" +
                       "&zonename=UTC" +
-                      "&timeclock=" + String(millis() / 1000) +
+                      "&timeclock=" + String(esp_timer_get_time() / 1000000ULL) +
                       "&cbi.submit=1";
 
     int httpCode = http2.POST(postData);
