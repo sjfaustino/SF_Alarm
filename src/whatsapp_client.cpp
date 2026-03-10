@@ -1,7 +1,27 @@
 #include "whatsapp_client.h"
 #include <HTTPClient.h>
-#include <UrlEncode.h>
 #include "sms_commands.h"
+
+// Safe URL encoder that prevents negative sign-extension panics on UTF-8 characters
+static String safeUrlEncode(const char *msg) {
+    const char *hex = "0123456789ABCDEF";
+    String encodedMsg = "";
+    while (*msg != '\0') {
+        if ( ('a' <= *msg && *msg <= 'z') || 
+             ('A' <= *msg && *msg <= 'Z') || 
+             ('0' <= *msg && *msg <= '9') || 
+             *msg == '-' || *msg == '_' || *msg == '.' || *msg == '~' ) {
+            encodedMsg += *msg;
+        } else {
+            encodedMsg += '%';
+            unsigned char c = (unsigned char)*msg;
+            encodedMsg += hex[c >> 4];
+            encodedMsg += hex[c & 0x0F];
+        }
+        msg++;
+    }
+    return encodedMsg;
+}
 
 static char waPhone[32] = "";
 static char waApiKey[32] = "";
@@ -41,7 +61,7 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
     
     // Build URL using fixed buffer to avoid String heap fragmentation
     // CallMeBot API: https://api.callmebot.com/whatsapp.php?phone=X&text=Y&apikey=Z
-    String encodedMsg = urlEncode(message);
+    String encodedMsg = safeUrlEncode(message);
     int urlLen = 60 + strlen(phone) + encodedMsg.length() + strlen(apiKey);
     char* url = (char*)malloc(urlLen + 1);
     if (!url) {

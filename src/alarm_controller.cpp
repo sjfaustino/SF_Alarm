@@ -248,15 +248,23 @@ void alarmUpdate()
         case ALARM_EXIT_DELAY: {
             uint32_t elapsed = now - delayStartMs;
             if (elapsed >= (uint32_t)exitDelaySec * 1000) {
-                // Exit delay complete — system is armed
-                if (pendingArmMode == ARM_PENDING_HOME) {
-                    setState(ALARM_ARMED_HOME);
-                    fireEvent(EVT_ARMED_HOME, "System armed (HOME)");
+                // Exit delay complete — verify doors actually closed before arming
+                if (!zonesAllClear()) {
+                    setState(ALARM_TRIGGERED);
+                    sirenOn();
+                    fireEvent(EVT_ALARM_TRIGGERED, "Exit delay expired with zones open — ALARM!");
+                    triggeringZone = 0xFF; 
                 } else {
-                    setState(ALARM_ARMED_AWAY);
-                    fireEvent(EVT_ARMED_AWAY, "System armed (AWAY)");
+                    // System is armed normally
+                    if (pendingArmMode == ARM_PENDING_HOME) {
+                        setState(ALARM_ARMED_HOME);
+                        fireEvent(EVT_ARMED_HOME, "System armed (HOME)");
+                    } else {
+                        setState(ALARM_ARMED_AWAY);
+                        fireEvent(EVT_ARMED_AWAY, "System armed (AWAY)");
+                    }
+                    triggeringZone = 0xFF;
                 }
-                triggeringZone = 0xFF;
             }
             break;
         }

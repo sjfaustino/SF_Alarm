@@ -143,6 +143,10 @@ static bool parseSetMultiplePhones(const char* body, const char* sender)
     else return false;
 
     if (ptr[0] != '#') return false;
+    
+    // Check if this is the STATUS? command before wiping the phonebook!
+    if (strcmp(ptr + 1, "STATUS?") == 0) return false;
+
     ptr++; // skip #
 
     smsCmdClearPhones();
