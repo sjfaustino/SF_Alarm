@@ -1,6 +1,7 @@
 #include "network.h"
 #include "config.h"
 #include <WiFi.h>
+#include <ETH.h>
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -9,6 +10,38 @@ static char wifiSsid[64] = "";
 static char wifiPass[64] = "";
 static bool connecting    = false;
 static uint32_t lastReconnectAttempt = 0;
+static bool ethConnected  = false;
+
+static void NetworkEvent(WiFiEvent_t event)
+{
+    switch (event) {
+        case ARDUINO_EVENT_ETH_START:
+            Serial.println("[NET] ETH Started");
+            ETH.setHostname("sf-alarm");
+            break;
+        case ARDUINO_EVENT_ETH_CONNECTED:
+            Serial.println("[NET] ETH Link Up");
+            break;
+        case ARDUINO_EVENT_ETH_GOT_IP:
+            Serial.printf("[NET] ETH MAC: %s, IPv4: %s, FULL_DUPLEX: %d, Mbps: %d\n",
+                          ETH.macAddress().c_str(),
+                          ETH.localIP().toString().c_str(),
+                          ETH.fullDuplex(),
+                          ETH.linkSpeed());
+            ethConnected = true;
+            break;
+        case ARDUINO_EVENT_ETH_DISCONNECTED:
+            Serial.println("[NET] ETH Link Down");
+            ethConnected = false;
+            break;
+        case ARDUINO_EVENT_ETH_STOP:
+            Serial.println("[NET] ETH Stopped");
+            ethConnected = false;
+            break;
+        default:
+            break;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -16,10 +49,20 @@ static uint32_t lastReconnectAttempt = 0;
 
 void networkInit()
 {
+    WiFi.onEvent(NetworkEvent);
+    
+    // Initialize Kincony KC868-A16 LAN8720 Ethernet PHY
+    // (uint8_t phy_addr, int power, int mdc, int mdio, eth_phy_type_t type, eth_clock_mode_t clk_mode)
+    if (ETH.begin(ETH_PHY_ADDR, ETH_PHY_POWER, ETH_PHY_MDC, ETH_PHY_MDIO, ETH_PHY_TYPE, ETH_CLOCK_GPIO17_OUT)) {
+        Serial.println("[NET] Ethernet PHY initialized");
+    } else {
+        Serial.println("[NET] ERROR: Ethernet PHY init failed");
+    }
+
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     // WiFi credentials loaded by configLoad() -> networkSetWifi()
-    Serial.println("[NET] WiFi initialized (waiting for config)");
+    Serial.println("[NET] WiFi subsystem initialized");
 }
 
 void networkSetWifi(const char* ssid, const char* password)
@@ -48,38 +91,42 @@ void networkUpdate()
     if (WiFi.status() == WL_CONNECTED) {
         if (connecting) {
             connecting = false;
-            Serial.printf("[NET] Connected! IP: %s  RSSI: %d dBm\n",
+            Serial.printf("[NET] Wi-Fi Connected! IP: %s  RSSI: %d dBm\n",
                           WiFi.localIP().toString().c_str(),
                           WiFi.RSSI());
         }
     } else {
-        if (!connecting) {
+        if (!connecting && !ethConnected) {
             connecting = true;
-            Serial.printf("[NET] Connection lost. ESP-IDF AutoReconnect active for %s...\n", wifiSsid);
+            Serial.printf("[NET] Wi-Fi Connection lost. ESP-IDF AutoReconnect active for %s...\n", wifiSsid);
         }
     }
 }
 
 bool networkIsConnected()
 {
-    return WiFi.status() == WL_CONNECTED;
+    return ethConnected || (WiFi.status() == WL_CONNECTED);
 }
 
 const char* networkGetIP()
 {
     static char ipBuf[16];
-    if (WiFi.status() == WL_CONNECTED) {
+    if (ethConnected) {
+        strncpy(ipBuf, ETH.localIP().toString().c_str(), sizeof(ipBuf) - 1);
+    } else if (WiFi.status() == WL_CONNECTED) {
         strncpy(ipBuf, WiFi.localIP().toString().c_str(), sizeof(ipBuf) - 1);
-        ipBuf[sizeof(ipBuf) - 1] = '\0';
     } else {
         strncpy(ipBuf, "0.0.0.0", sizeof(ipBuf));
     }
+    ipBuf[sizeof(ipBuf) - 1] = '\0';
     return ipBuf;
 }
 
 int networkGetRSSI()
 {
-    if (WiFi.status() == WL_CONNECTED) {
+    if (ethConnected) {
+        return 0; // Ethernet gets perfect 0 dBm "RSSI"
+    } else if (WiFi.status() == WL_CONNECTED) {
         return WiFi.RSSI();
     }
     return -100;
@@ -88,14 +135,21 @@ int networkGetRSSI()
 void networkPrintStatus()
 {
     Serial.println("--- Network Status ---");
-    Serial.printf("  SSID:       %s\n", wifiSsid);
-    Serial.printf("  Status:     %s\n",
-                  WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED");
+    Serial.printf("  Ethernet:   %s\n", ethConnected ? "CONNECTED" : "DOWN");
+    if (ethConnected) {
+        Serial.printf("    IP:       %s\n", ETH.localIP().toString().c_str());
+        Serial.printf("    Gateway:  %s\n", ETH.gatewayIP().toString().c_str());
+        Serial.printf("    MAC:      %s\n", ETH.macAddress().c_str());
+        Serial.printf("    Speed:    %d Mbps %s\n", ETH.linkSpeed(), ETH.fullDuplex() ? "Full-Duplex" : "Half-Duplex");
+    }
+
+    Serial.printf("  Wi-Fi SSID: %s\n", wifiSsid);
+    Serial.printf("  Wi-Fi Link: %s\n", WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DOWN");
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("  IP:         %s\n", WiFi.localIP().toString().c_str());
-        Serial.printf("  Gateway:    %s\n", WiFi.gatewayIP().toString().c_str());
-        Serial.printf("  RSSI:       %d dBm\n", WiFi.RSSI());
-        Serial.printf("  MAC:        %s\n", WiFi.macAddress().c_str());
+        Serial.printf("    IP:       %s\n", WiFi.localIP().toString().c_str());
+        Serial.printf("    Gateway:  %s\n", WiFi.gatewayIP().toString().c_str());
+        Serial.printf("    RSSI:     %d dBm\n", WiFi.RSSI());
+        Serial.printf("    MAC:      %s\n", WiFi.macAddress().c_str());
     }
     Serial.println("----------------------");
 }
