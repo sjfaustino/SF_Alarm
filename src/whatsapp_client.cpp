@@ -6,6 +6,7 @@
 static String safeUrlEncode(const char *msg) {
     const char *hex = "0123456789ABCDEF";
     String encodedMsg = "";
+    encodedMsg.reserve(strlen(msg) * 3); // Prevent C++ String heap fragmentation
     while (*msg != '\0') {
         if ( ('a' <= *msg && *msg <= 'z') || 
              ('A' <= *msg && *msg <= 'Z') || 

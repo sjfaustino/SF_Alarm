@@ -345,6 +345,7 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
 
         // URL-encode message (form encoding)
         String encodedMsg = "";
+        encodedMsg.reserve(strlen(message) * 3); // Prevent C++ String heap fragmentation
         for (unsigned int i = 0; i < strlen(message); i++) {
             char c = message[i];
             if (c == ' ') encodedMsg += '+';

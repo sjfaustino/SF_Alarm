@@ -13,6 +13,18 @@ void configLoad();
 /// Save all current configuration to NVS.
 void configSave();
 
+/// Modular NVS saves to prevent flash wear-out during web requests
+void configSavePin();
+void configSaveTiming();
+void configSaveWifi();
+void configSavePhones();
+void configSaveRouter();
+void configSaveZones();
+void configSavePeriodic();
+void configSaveWhatsapp();
+void configSaveMqtt();
+void configSaveOnvif();
+
 /// Reset all configuration to factory defaults.
 void configFactoryReset();
 

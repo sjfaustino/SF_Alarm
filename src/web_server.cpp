@@ -196,7 +196,7 @@ static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* resp
     const char* apikey = doc["apikey"];
 
     whatsappSetConfig(phone, apikey, mode);
-    configSave();
+    configSaveWhatsapp();
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Alert settings saved\"}");
 }
@@ -226,7 +226,7 @@ static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* respon
     const char* clientId = doc["clientId"] | "SF_Alarm";
 
     mqttSetConfig(server, port, user, pass, clientId);
-    configSave();
+    configSaveMqtt();
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"MQTT settings saved\"}");
 }
@@ -256,7 +256,7 @@ static esp_err_t handlePostOnvif(PsychicRequest* request, PsychicResponse* respo
     uint8_t zone     = doc["targetZone"] | 1;
 
     onvifSetServer(host, port, user, pass, zone);
-    configSave();
+    configSaveOnvif();
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Camera settings saved\"}");
 }

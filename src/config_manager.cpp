@@ -162,26 +162,23 @@ void configLoad()
     Serial.println("[CFG] Configuration loaded");
 }
 
-void configSave()
-{
-    Serial.println("[CFG] Saving configuration to NVS...");
-
-    prefs.putBool(KEY_CONFIGURED, true);
-
-    // --- Alarm PIN ---
+void configSavePin() {
     prefs.putString(KEY_PIN, alarmGetPin());
+}
 
-    // --- Alarm timing ---
+void configSaveTiming() {
     prefs.putUShort(KEY_EXIT_DELAY, alarmGetExitDelay());
     prefs.putUShort(KEY_ENTRY_DELAY, alarmGetEntryDelay());
     prefs.putUShort(KEY_SIREN_DUR, alarmGetSirenDuration());
     prefs.putUChar(KEY_SIREN_CH, alarmGetSirenOutput());
+}
 
-    // --- WiFi credentials ---
+void configSaveWifi() {
     prefs.putString(KEY_WIFI_SSID, networkGetSsid());
     prefs.putString(KEY_WIFI_PASS, networkGetPass());
+}
 
-    // --- Phone numbers ---
+void configSavePhones() {
     int phoneCnt = smsCmdGetPhoneCount();
     prefs.putInt(KEY_PHONE_COUNT, phoneCnt);
     for (int i = 0; i < phoneCnt; i++) {
@@ -189,19 +186,20 @@ void configSave()
         snprintf(key, sizeof(key), "phone%d", i);
         prefs.putString(key, smsCmdGetPhone(i));
     }
+}
 
-    // --- Router credentials ---
+void configSaveRouter() {
     prefs.putString(KEY_ROUTER_IP, smsGatewayGetRouterIp());
     prefs.putString(KEY_ROUTER_USER, smsGatewayGetRouterUser());
     prefs.putString(KEY_ROUTER_PASS, smsGatewayGetRouterPass());
+}
 
-    // --- Zone configurations ---
+void configSaveZones() {
     for (int i = 0; i < MAX_ZONES; i++) {
         const ZoneInfo* info = zonesGetInfo(i);
         if (!info) continue;
 
         char key[16];
-
         snprintf(key, sizeof(key), "zName%d", i);
         prefs.putString(key, info->config.name);
 
@@ -214,36 +212,56 @@ void configSave()
         snprintf(key, sizeof(key), "zEn%d", i);
         prefs.putBool(key, info->config.enabled);
 
-        // Save alarm text
         snprintf(key, sizeof(key), "zTxt%d", i);
         prefs.putString(key, smsCmdGetAlarmText(i));
     }
+}
 
-    // --- Periodic Report & Recovery ---
+void configSavePeriodic() {
     prefs.putUShort(KEY_REPORT_DUR, smsCmdGetReportInterval());
     prefs.putString(KEY_RECOVERY_TXT, smsCmdGetRecoveryText());
     prefs.putUChar(KEY_ALARM_MODE, (uint8_t)smsCmdGetWorkingMode());
+}
 
-    // --- WhatsApp ---
+void configSaveWhatsapp() {
     prefs.putString(KEY_WA_PHONE, whatsappGetPhone());
     prefs.putString(KEY_WA_APIKEY, whatsappGetApiKey());
     prefs.putUChar(KEY_WA_MODE, (uint8_t)whatsappGetMode());
+}
 
-    // --- MQTT ---
+void configSaveMqtt() {
     prefs.putString(KEY_MQTT_SERVER, mqttGetServer());
     prefs.putUShort(KEY_MQTT_PORT, mqttGetPort());
     prefs.putString(KEY_MQTT_USER, mqttGetUser());
     prefs.putString(KEY_MQTT_PASS, mqttGetPass());
     prefs.putString(KEY_MQTT_CLIENTID, mqttGetClientId());
+}
 
-    // --- ONVIF ---
+void configSaveOnvif() {
     prefs.putString(KEY_ONVIF_HOST, onvifGetHost());
     prefs.putUShort(KEY_ONVIF_PORT, onvifGetPort());
     prefs.putString(KEY_ONVIF_USER, onvifGetUser());
     prefs.putString(KEY_ONVIF_PASS, onvifGetPass());
     prefs.putUChar(KEY_ONVIF_ZONE, onvifGetTargetZone());
+}
 
-    Serial.println("[CFG] Configuration saved");
+void configSave()
+{
+    Serial.println("[CFG] Saving full configuration to NVS...");
+    prefs.putBool(KEY_CONFIGURED, true);
+    
+    configSavePin();
+    configSaveTiming();
+    configSaveWifi();
+    configSavePhones();
+    configSaveRouter();
+    configSaveZones();
+    configSavePeriodic();
+    configSaveWhatsapp();
+    configSaveMqtt();
+    configSaveOnvif();
+
+    Serial.println("[CFG] Full configuration saved");
 }
 
 void configFactoryReset()

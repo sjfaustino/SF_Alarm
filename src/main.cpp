@@ -338,7 +338,7 @@ void setup()
 
     // --- Start Network Worker Task ---
     Serial.println("[INIT] Starting Network Worker Task...");
-    xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 8192, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 8192, NULL, 1, NULL, 0); // Pin to Core 0 (Network)
 
     Serial.println("[INIT] Startup complete!");
     Serial.println();
