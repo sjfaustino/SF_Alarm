@@ -48,14 +48,15 @@ static bool isAuthorized(const char* sender)
 {
     if (phoneCount == 0) return false;
 
+    // Sanitize sender string length to prevent OOB
+    int senderLen = strnlen(sender, MAX_PHONE_LEN + 10);
+
     for (int i = 0; i < phoneCount; i++) {
         // Exact match first
         if (strcmp(sender, phoneNumbers[i]) == 0) {
             return true;
         }
         // Compare last 11 digits for flexibility with country code formatting
-        // (11 digits = country code + local number, avoids cross-country collisions)
-        int senderLen = strlen(sender);
         int storedLen = strlen(phoneNumbers[i]);
         const int MATCH_DIGITS = 11;
 
@@ -80,13 +81,13 @@ static void sendReply(const char* sender, const char* message)
 static void trimStr(char* str)
 {
     // Trim leading whitespace
-    char* start = str;
+    unsigned char* start = (unsigned char*)str;
     while (*start && isspace(*start)) start++;
-    if (start != str) memmove(str, start, strlen(start) + 1);
+    if ((char*)start != str) memmove(str, start, strlen((char*)start) + 1);
 
     // Trim trailing whitespace
     int len = strlen(str);
-    while (len > 0 && isspace(str[len - 1])) {
+    while (len > 0 && isspace((unsigned char)str[len - 1])) {
         str[len - 1] = '\0';
         len--;
     }
@@ -205,10 +206,10 @@ static bool parseSetAlarmText(const char* body, const char* sender)
     int idx = 1;
 
     // Parse zone number (1 or 2 digits)
-    if (isdigit(body[idx])) {
+    if (isdigit((unsigned char)body[idx])) {
         zone = body[idx] - '0';
         idx++;
-        if (isdigit(body[idx])) {
+        if (isdigit((unsigned char)body[idx])) {
             zone = zone * 10 + (body[idx] - '0');
             idx++;
         }
@@ -470,7 +471,7 @@ static bool parseHelp(const char* body, const char* sender)
     char upper[16];
     strncpy(upper, body, sizeof(upper) - 1);
     upper[sizeof(upper) - 1] = '\0';
-    for (int i = 0; upper[i]; i++) upper[i] = toupper(upper[i]);
+    for (int i = 0; upper[i]; i++) upper[i] = toupper((unsigned char)upper[i]);
     trimStr(upper);
 
     if (strcmp(upper, "HELP") == 0) {
@@ -623,7 +624,7 @@ static bool parseSetWhatsApp(const char* body, const char* sender)
 static bool parseSetMQTT(const char* body, const char* sender)
 {
     // Format: #MQTT#192.168.1.50#1883#user#pass#
-    if (body[0] != '#' || toupper(body[1]) != 'M' || toupper(body[2]) != 'Q' || toupper(body[3]) != 'T' || body[4] != '#') return false;
+    if (body[0] != '#' || toupper((unsigned char)body[1]) != 'M' || toupper((unsigned char)body[2]) != 'Q' || toupper((unsigned char)body[3]) != 'T' || body[4] != '#') return false;
 
     // Use a simpler approach: split by #
     char temp[160];

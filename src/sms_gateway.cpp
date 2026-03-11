@@ -454,6 +454,12 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
             streamStartMs = millis(); // Refresh timeout
             uint8_t buf[256];
             int c = stream->readBytes(buf, min(size, sizeof(buf)));
+            
+            // Sanitize: Replace null bytes and non-printable trash that can break String logic
+            for (int j = 0; j < c; j++) {
+                if (buf[j] == '\0') buf[j] = ' '; 
+            }
+            
             window += String((char*)buf, c);
 
             // --- Parse HTML table rows from sliding window ---
