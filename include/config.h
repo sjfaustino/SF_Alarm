@@ -38,6 +38,8 @@
 
 // On-board LEDs / Buzzer (if available)
 // #define STATUS_LED_PIN    2       // Built-in LED (ESP32)
+#define HEARTBEAT_LED_PIN    33      // External Status LED
+#define HEARTBEAT_BUZZER_PIN 14      // External Active Buzzer
 
 // ============================================================================
 // Alarm System Configuration

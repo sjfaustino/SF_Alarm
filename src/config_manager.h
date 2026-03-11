@@ -14,6 +14,7 @@ void configLoad();
 void configSave();
 
 /// Modular NVS saves to prevent flash wear-out during web requests
+/// Modular NVS saves to prevent flash wear-out during web requests
 void configSavePin();
 void configSaveTiming();
 void configSaveWifi();
@@ -24,6 +25,10 @@ void configSavePeriodic();
 void configSaveWhatsapp();
 void configSaveMqtt();
 void configSaveOnvif();
+void configSaveHeartbeat();
+
+bool configGetHeartbeatEnabled();
+void configSetHeartbeatEnabled(bool en);
 
 /// Reset all configuration to factory defaults.
 void configFactoryReset();

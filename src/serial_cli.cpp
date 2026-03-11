@@ -80,6 +80,8 @@ static void printHelp()
     Serial.println("  test output <0-15>       — Toggle an output");
     Serial.println("  test input               — Live input monitor");
     Serial.println();
+    Serial.println("  heartbeat <on|off>     — Toggle armed heartbeat LED/Buzzer");
+    Serial.println();
     Serial.println("  save                   — Save config to NVS");
     Serial.println("  load                   — Load config from NVS");
     Serial.println("  factory                — Factory reset");
@@ -267,6 +269,19 @@ static void processLine(const char* line)
         else if (strcmp(start, "pin") == 0 && arg1) {
             alarmSetPin(arg1);
             configChanged = true;
+        }
+        else if (strcmp(start, "heartbeat") == 0 && arg1) {
+            if (strcmp(arg1, "on") == 0) {
+                configSetHeartbeatEnabled(true);
+                Serial.println("Heartbeat ENABLED. (Pulses only when ARMED)");
+                configChanged = true;
+            } else if (strcmp(arg1, "off") == 0) {
+                configSetHeartbeatEnabled(false);
+                Serial.println("Heartbeat DISABLED.");
+                configChanged = true;
+            } else {
+                Serial.println("Usage: heartbeat <on|off> pin <pin>");
+            }
         }
         else {
             Serial.printf("Unknown command: '%s'. Type 'help' for options.\n", start);

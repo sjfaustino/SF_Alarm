@@ -297,6 +297,29 @@ static void mqttWorkerTask(void* pvParameters)
 }
 
 // ---------------------------------------------------------------------------
+// Background Heartbeat Task (Visual & Audio Status)
+// ---------------------------------------------------------------------------
+
+static void heartbeatTask(void* pvParameters)
+{
+    while (true) {
+        if (configGetHeartbeatEnabled()) {
+            AlarmState st = alarmGetState();
+            // Only pulse if armed (Away or Home)
+            if (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME) {
+                digitalWrite(HEARTBEAT_LED_PIN, HIGH);
+                digitalWrite(HEARTBEAT_BUZZER_PIN, HIGH);
+                vTaskDelay(pdMS_TO_TICKS(50)); // Tiny 50ms blip
+                digitalWrite(HEARTBEAT_LED_PIN, LOW);
+                digitalWrite(HEARTBEAT_BUZZER_PIN, LOW);
+            }
+        }
+        // Wait ~2 seconds before next tick
+        vTaskDelay(pdMS_TO_TICKS(1950));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Arduino Setup & Loop
 // ---------------------------------------------------------------------------
 
@@ -316,6 +339,12 @@ void setup()
 
     // --- Alert Queue ---
     rtosAlertQueue = xQueueCreate(ALERT_QUEUE_SIZE, sizeof(PendingAlert));
+
+    // --- Heartbeat Pins ---
+    pinMode(HEARTBEAT_LED_PIN, OUTPUT);
+    digitalWrite(HEARTBEAT_LED_PIN, LOW);
+    pinMode(HEARTBEAT_BUZZER_PIN, OUTPUT);
+    digitalWrite(HEARTBEAT_BUZZER_PIN, LOW);
 
     // --- I/O Expander ---
     Serial.println("[INIT] I/O Expander...");
@@ -367,6 +396,10 @@ void setup()
     // --- Start Network Worker Task ---
     Serial.println("[INIT] Starting Network Worker Task...");
     xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 8192, NULL, 1, NULL, 0); // Pin to Core 0 (Network)
+
+    // --- Start Heartbeat Task ---
+    Serial.println("[INIT] Starting Heartbeat Task...");
+    xTaskCreatePinnedToCore(heartbeatTask, "Heartbeat", 2048, NULL, 1, NULL, 1); // Pin to Core 1 (App logic)
 
     Serial.println("[INIT] Startup complete!");
     Serial.println();

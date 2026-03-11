@@ -44,7 +44,20 @@ static const char* KEY_ONVIF_PORT     = "ovPort";
 static const char* KEY_ONVIF_USER     = "ovUser";
 static const char* KEY_ONVIF_PASS     = "ovPass";
 static const char* KEY_ONVIF_ZONE     = "ovZone";
+static const char* KEY_HEARTBEAT_EN   = "hbEn";
 static const char* KEY_CONFIGURED    = "configured";
+
+// ---------------------------------------------------------------------------
+// Global config state mapping
+// ---------------------------------------------------------------------------
+static bool g_heartbeatEnabled = true;
+
+bool configGetHeartbeatEnabled() { return g_heartbeatEnabled; }
+void configSetHeartbeatEnabled(bool en) { g_heartbeatEnabled = en; }
+
+void configSaveHeartbeat() {
+    prefs.putBool(KEY_HEARTBEAT_EN, g_heartbeatEnabled);
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -118,6 +131,9 @@ void configLoad()
     String ovPass = prefs.getString(KEY_ONVIF_PASS, "");
     uint8_t ovZone = prefs.getUChar(KEY_ONVIF_ZONE, 1);
     onvifSetServer(ovHost.c_str(), ovPort, ovUser.c_str(), ovPass.c_str(), ovZone);
+
+    // --- System Extras ---
+    g_heartbeatEnabled = prefs.getBool(KEY_HEARTBEAT_EN, true);
 
     // --- Phone numbers ---
     smsCmdClearPhones();
@@ -276,6 +292,7 @@ void configSave()
     configSaveWhatsapp();
     configSaveMqtt();
     configSaveOnvif();
+    configSaveHeartbeat();
 
     Serial.println("[CFG] Full configuration saved");
 }
@@ -309,6 +326,7 @@ void configPrint()
     Serial.printf("  MQTT Server: %s:%d\n", mqttGetServer(), mqttGetPort());
     Serial.printf("  MQTT User:   %s\n", mqttGetUser());
     Serial.printf("  ONVIF Cam:   %s:%d (Zone %d)\n", onvifGetHost(), onvifGetPort(), (int)onvifGetTargetZone());
+    Serial.printf("  Heartbeat:   %s\n", g_heartbeatEnabled ? "ON" : "OFF");
 
     int phoneCnt = smsCmdGetPhoneCount();
     Serial.printf("  Phones (%d):\n", phoneCnt);
