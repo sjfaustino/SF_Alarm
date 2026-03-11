@@ -134,6 +134,7 @@ static bool createSubscription() {
     String url = "http://" + String(state.host) + ":" + String(state.port) + "/onvif/event_service";
     
     http.begin(url);
+    http.setTimeout(2500); // Prevent initial connection stall (dead camera)
     http.addHeader("Content-Type", "application/soap+xml; charset=utf-8");
 
     String body;

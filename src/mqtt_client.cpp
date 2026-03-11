@@ -100,7 +100,12 @@ void mqttInit() {
         mqttConfigMutex = xSemaphoreCreateMutex();
     }
     mqttMsgQueue = xQueueCreate(10, sizeof(MqttMsg));
+    
+    // Safety Clamps: Prevent 15-second default FreeRTOS hangs on dead sockets
+    client.setSocketTimeout(2);
+    client.setKeepAlive(15);
     client.setCallback(mqttCallback);
+    
     Serial.println("[MQTT] MQTT client initialized with RTOS async queue and mutex protection");
 }
 
