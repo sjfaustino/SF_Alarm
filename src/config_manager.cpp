@@ -94,18 +94,16 @@ void configSaveTimezone() {
 }
 
 void configSaveSchedule() {
-    prefs.putUChar("schMode", g_schedMode);
-    for (int i=0; i<7; i++) {
-        char k[16];
-        snprintf(k, sizeof(k), "schAH%d", i);
-        prefs.putChar(k, g_schedArmHr[i]);
-        snprintf(k, sizeof(k), "schAM%d", i);
-        prefs.putChar(k, g_schedArmMin[i]);
-        snprintf(k, sizeof(k), "schDH%d", i);
-        prefs.putChar(k, g_schedDisarmHr[i]);
-        snprintf(k, sizeof(k), "schDM%d", i);
-        prefs.putChar(k, g_schedDisarmMin[i]);
+    // Pack: [mode, armHr0..6, armMin0..6, disarmHr0..6, disarmMin0..6] = 29 bytes
+    uint8_t blob[29];
+    blob[0] = g_schedMode;
+    for (int i = 0; i < 7; i++) {
+        blob[1 + i]      = (uint8_t)g_schedArmHr[i];
+        blob[8 + i]      = (uint8_t)g_schedArmMin[i];
+        blob[15 + i]     = (uint8_t)g_schedDisarmHr[i];
+        blob[22 + i]     = (uint8_t)g_schedDisarmMin[i];
     }
+    prefs.putBytes("sched", blob, sizeof(blob));
 }
 
 // ---------------------------------------------------------------------------
@@ -188,17 +186,15 @@ void configLoad()
     tzset();
 
     // --- Schedule ---
-    g_schedMode = prefs.getUChar("schMode", 2);
-    for (int i=0; i<7; i++) {
-        char k[16];
-        snprintf(k, sizeof(k), "schAH%d", i);
-        g_schedArmHr[i] = prefs.getChar(k, -1);
-        snprintf(k, sizeof(k), "schAM%d", i);
-        g_schedArmMin[i] = prefs.getChar(k, -1);
-        snprintf(k, sizeof(k), "schDH%d", i);
-        g_schedDisarmHr[i] = prefs.getChar(k, -1);
-        snprintf(k, sizeof(k), "schDM%d", i);
-        g_schedDisarmMin[i] = prefs.getChar(k, -1);
+    uint8_t blob[29];
+    if (prefs.getBytes("sched", blob, sizeof(blob)) == sizeof(blob)) {
+        g_schedMode = blob[0];
+        for (int i = 0; i < 7; i++) {
+            g_schedArmHr[i]     = (int8_t)blob[1 + i];
+            g_schedArmMin[i]    = (int8_t)blob[8 + i];
+            g_schedDisarmHr[i]  = (int8_t)blob[15 + i];
+            g_schedDisarmMin[i] = (int8_t)blob[22 + i];
+        }
     }
 
     // --- Phone numbers ---
