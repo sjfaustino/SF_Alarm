@@ -1,7 +1,9 @@
 #include "network.h"
 #include "config.h"
+#include "config_manager.h"
 #include <WiFi.h>
 #include <ETH.h>
+#include <time.h>
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -61,6 +63,12 @@ void networkInit()
 
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
+
+    // Initialize Network Time Protocol (SNTP)
+    // The underlying LwIP stack will automatically sync when network is up.
+    configTzTime(configGetTimezone(), "pool.ntp.org", "time.nist.gov");
+    Serial.println("[NET] NTP Subsystem initialized");
+
     // WiFi credentials loaded by configLoad() -> networkSetWifi()
     Serial.println("[NET] WiFi subsystem initialized");
 }

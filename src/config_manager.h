@@ -26,9 +26,19 @@ void configSaveWhatsapp();
 void configSaveMqtt();
 void configSaveOnvif();
 void configSaveHeartbeat();
+void configSaveTimezone();
+void configSaveSchedule();
 
 bool configGetHeartbeatEnabled();
 void configSetHeartbeatEnabled(bool en);
+
+const char* configGetTimezone();
+void configSetTimezone(const char* tz);
+
+void configGetSchedule(int dayOfWeek, int8_t &armHr, int8_t &armMin, int8_t &disarmHr, int8_t &disarmMin);
+void configSetSchedule(int dayOfWeek, int8_t armHr, int8_t armMin, int8_t disarmHr, int8_t disarmMin);
+uint8_t configGetScheduleMode();
+void configSetScheduleMode(uint8_t mode);
 
 /// Reset all configuration to factory defaults.
 void configFactoryReset();

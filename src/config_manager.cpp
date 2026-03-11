@@ -45,18 +45,67 @@ static const char* KEY_ONVIF_USER     = "ovUser";
 static const char* KEY_ONVIF_PASS     = "ovPass";
 static const char* KEY_ONVIF_ZONE     = "ovZone";
 static const char* KEY_HEARTBEAT_EN   = "hbEn";
+static const char* KEY_TZ            = "timezone";
 static const char* KEY_CONFIGURED    = "configured";
 
 // ---------------------------------------------------------------------------
 // Global config state mapping
 // ---------------------------------------------------------------------------
 static bool g_heartbeatEnabled = true;
+static String g_timezone = "GMT0";
 
 bool configGetHeartbeatEnabled() { return g_heartbeatEnabled; }
 void configSetHeartbeatEnabled(bool en) { g_heartbeatEnabled = en; }
 
+const char* configGetTimezone() { return g_timezone.c_str(); }
+void configSetTimezone(const char* tz) { g_timezone = tz; }
+
+static int8_t g_schedArmHr[7] = {-1, -1, -1, -1, -1, -1, -1};
+static int8_t g_schedArmMin[7] = {-1, -1, -1, -1, -1, -1, -1};
+static int8_t g_schedDisarmHr[7] = {-1, -1, -1, -1, -1, -1, -1};
+static int8_t g_schedDisarmMin[7] = {-1, -1, -1, -1, -1, -1, -1};
+static uint8_t g_schedMode = 2; // ALARM_ARMED_AWAY (see alarm_controller.h)
+
+void configGetSchedule(int dayOfWeek, int8_t &armHr, int8_t &armMin, int8_t &disarmHr, int8_t &disarmMin) {
+    if (dayOfWeek < 0 || dayOfWeek > 6) return;
+    armHr = g_schedArmHr[dayOfWeek];
+    armMin = g_schedArmMin[dayOfWeek];
+    disarmHr = g_schedDisarmHr[dayOfWeek];
+    disarmMin = g_schedDisarmMin[dayOfWeek];
+}
+
+void configSetSchedule(int dayOfWeek, int8_t armHr, int8_t armMin, int8_t disarmHr, int8_t disarmMin) {
+    if (dayOfWeek < 0 || dayOfWeek > 6) return;
+    g_schedArmHr[dayOfWeek] = armHr;
+    g_schedArmMin[dayOfWeek] = armMin;
+    g_schedDisarmHr[dayOfWeek] = disarmHr;
+    g_schedDisarmMin[dayOfWeek] = disarmMin;
+}
+
+uint8_t configGetScheduleMode() { return g_schedMode; }
+void configSetScheduleMode(uint8_t mode) { g_schedMode = mode; }
+
 void configSaveHeartbeat() {
     prefs.putBool(KEY_HEARTBEAT_EN, g_heartbeatEnabled);
+}
+
+void configSaveTimezone() {
+    prefs.putString(KEY_TZ, g_timezone);
+}
+
+void configSaveSchedule() {
+    prefs.putUChar("schMode", g_schedMode);
+    for (int i=0; i<7; i++) {
+        char k[16];
+        snprintf(k, sizeof(k), "schAH%d", i);
+        prefs.putChar(k, g_schedArmHr[i]);
+        snprintf(k, sizeof(k), "schAM%d", i);
+        prefs.putChar(k, g_schedArmMin[i]);
+        snprintf(k, sizeof(k), "schDH%d", i);
+        prefs.putChar(k, g_schedDisarmHr[i]);
+        snprintf(k, sizeof(k), "schDM%d", i);
+        prefs.putChar(k, g_schedDisarmMin[i]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +183,23 @@ void configLoad()
 
     // --- System Extras ---
     g_heartbeatEnabled = prefs.getBool(KEY_HEARTBEAT_EN, true);
+    g_timezone = prefs.getString(KEY_TZ, "GMT0");
+    setenv("TZ", g_timezone.c_str(), 1); // Set POSIX TZ environment var
+    tzset();
+
+    // --- Schedule ---
+    g_schedMode = prefs.getUChar("schMode", 2);
+    for (int i=0; i<7; i++) {
+        char k[16];
+        snprintf(k, sizeof(k), "schAH%d", i);
+        g_schedArmHr[i] = prefs.getChar(k, -1);
+        snprintf(k, sizeof(k), "schAM%d", i);
+        g_schedArmMin[i] = prefs.getChar(k, -1);
+        snprintf(k, sizeof(k), "schDH%d", i);
+        g_schedDisarmHr[i] = prefs.getChar(k, -1);
+        snprintf(k, sizeof(k), "schDM%d", i);
+        g_schedDisarmMin[i] = prefs.getChar(k, -1);
+    }
 
     // --- Phone numbers ---
     smsCmdClearPhones();
@@ -293,6 +359,8 @@ void configSave()
     configSaveMqtt();
     configSaveOnvif();
     configSaveHeartbeat();
+    configSaveTimezone();
+    configSaveSchedule();
 
     Serial.println("[CFG] Full configuration saved");
 }
@@ -327,6 +395,12 @@ void configPrint()
     Serial.printf("  MQTT User:   %s\n", mqttGetUser());
     Serial.printf("  ONVIF Cam:   %s:%d (Zone %d)\n", onvifGetHost(), onvifGetPort(), (int)onvifGetTargetZone());
     Serial.printf("  Heartbeat:   %s\n", g_heartbeatEnabled ? "ON" : "OFF");
+    Serial.printf("  Timezone:    %s\n", g_timezone.c_str());
+    Serial.printf("  Auto-Arm:    %s Mode\n", g_schedMode == 3 ? "HOME" : "AWAY");
+    for (int i=0; i<7; i++) {
+        Serial.printf("    Day %d: Arm %02d:%02d, Disarm %02d:%02d\n", 
+            i, g_schedArmHr[i], g_schedArmMin[i], g_schedDisarmHr[i], g_schedDisarmMin[i]);
+    }
 
     int phoneCnt = smsCmdGetPhoneCount();
     Serial.printf("  Phones (%d):\n", phoneCnt);

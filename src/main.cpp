@@ -320,6 +320,54 @@ static void heartbeatTask(void* pvParameters)
 }
 
 // ---------------------------------------------------------------------------
+// Background Scheduler Task (Auto-Arm/Disarm)
+// ---------------------------------------------------------------------------
+
+static void schedulerTask(void* pvParameters)
+{
+    int lastFiredMin = -1;
+
+    while (true) {
+        struct tm timeinfo;
+        if (getLocalTime(&timeinfo, 10)) { // 10ms timeout to read RTC
+            int currentMin = timeinfo.tm_min;
+            if (currentMin != lastFiredMin) { // Only evaluate once per minute
+                int8_t aHr, aMin, dHr, dMin;
+                configGetSchedule(timeinfo.tm_wday, aHr, aMin, dHr, dMin);
+
+                // Auto Arm
+                if (aHr != -1 && aMin != -1 && timeinfo.tm_hour == aHr && currentMin == aMin) {
+                    AlarmState st = alarmGetState();
+                    if (st == ALARM_DISARMED) {
+                        Serial.printf("[SCHEDULER] Auto-Arming triggered at %02d:%02d\n", aHr, aMin);
+                        uint8_t mode = configGetScheduleMode();
+                        if (mode == ALARM_ARMED_HOME) {
+                            alarmArmHome("AUTO");
+                        } else {
+                            alarmArmAway("AUTO");
+                        }
+                        lastFiredMin = currentMin;
+                    }
+                }
+                
+                // Auto Disarm
+                else if (dHr != -1 && dMin != -1 && timeinfo.tm_hour == dHr && currentMin == dMin) {
+                    AlarmState st = alarmGetState();
+                    if (st != ALARM_DISARMED) {
+                        Serial.printf("[SCHEDULER] Auto-Disarming triggered at %02d:%02d\n", dHr, dMin);
+                        alarmDisarm("AUTO");
+                        lastFiredMin = currentMin;
+                    }
+                }
+            }
+        }
+        
+        // Wait ~30 seconds before checking again
+        vTaskDelay(pdMS_TO_TICKS(30000));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Arduino Setup & Loop
 // ---------------------------------------------------------------------------
 
@@ -400,6 +448,10 @@ void setup()
     // --- Start Heartbeat Task ---
     Serial.println("[INIT] Starting Heartbeat Task...");
     xTaskCreatePinnedToCore(heartbeatTask, "Heartbeat", 2048, NULL, 1, NULL, 1); // Pin to Core 1 (App logic)
+
+    // --- Start Scheduler Task ---
+    Serial.println("[INIT] Starting Scheduler Task...");
+    xTaskCreatePinnedToCore(schedulerTask, "Scheduler", 4096, NULL, 1, NULL, 1); // Pin to Core 1
 
     Serial.println("[INIT] Startup complete!");
     Serial.println();

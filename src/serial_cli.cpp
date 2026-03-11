@@ -10,6 +10,7 @@
 #include "whatsapp_client.h"
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -80,6 +81,14 @@ static void printHelp()
     Serial.println("  test output <0-15>       — Toggle an output");
     Serial.println("  test input               — Live input monitor");
     Serial.println();
+    Serial.println("  time                   — Show current NTP time");
+    Serial.println("  schedule show          — Show weekly auto-arm schedule");
+    Serial.println();
+    Serial.println("  tz <posix_tz_string>   — Set local timezone");
+    Serial.println("  schedule mode <away|home> — Set auto-arm mode");
+    Serial.println("  schedule <arm|disarm> <day> <HH:MM|off> — Edit schedule");
+    Serial.println("     <day> can be: 0=Sun..6=Sat, weekdays, weekends, all");
+    Serial.println();
     Serial.println("  heartbeat <on|off>     — Toggle armed heartbeat LED/Buzzer");
     Serial.println();
     Serial.println("  save                   — Save config to NVS");
@@ -94,6 +103,40 @@ static void printHelp()
 // ---------------------------------------------------------------------------
 // Command Dispatcher
 // ---------------------------------------------------------------------------
+
+static bool parseTimeStr(const char* str, int8_t &hr, int8_t &min) {
+    if (strcmp(str, "off") == 0) {
+        hr = -1; min = -1;
+        return true;
+    }
+    if (sscanf(str, "%c%c:%c%c", &hr, &hr, &hr, &hr) != 4) { // Fast check format
+        if (strlen(str) != 5 || str[2] != ':') return false;
+    }
+    int h = atoi(str);
+    int m = atoi(str + 3);
+    if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+        hr = h; min = m;
+        return true;
+    }
+    return false;
+}
+
+static void applySchedule(bool isArm, int dayClass, int8_t hr, int8_t min) {
+    auto applyFn = [&](int d) {
+        int8_t aHr, aMin, dHr, dMin;
+        configGetSchedule(d, aHr, aMin, dHr, dMin);
+        if (isArm) {
+            configSetSchedule(d, hr, min, dHr, dMin);
+        } else {
+            configSetSchedule(d, aHr, aMin, hr, min);
+        }
+    };
+    
+    if (dayClass >= 0 && dayClass <= 6) { applyFn(dayClass); }
+    else if (dayClass == 10) { for(int i=1; i<=5; i++) applyFn(i); } // weekdays
+    else if (dayClass == 11) { applyFn(0); applyFn(6); } // weekends
+    else if (dayClass == 12) { for(int i=0; i<=6; i++) applyFn(i); } // all
+}
 
 static void processLine(const char* line)
 {
@@ -134,6 +177,27 @@ static void processLine(const char* line)
         alarmPrintStatus();
         zonesPrintStatus();
         networkPrintStatus();
+    }
+    else if (strcmp(start, "time") == 0) {
+        struct tm timeinfo;
+        if (!getLocalTime(&timeinfo)) {
+            Serial.println("Time not set! Check Network Connection and NTP.");
+        } else {
+            Serial.println(&timeinfo, "Current Time: %A, %B %d %Y %H:%M:%S");
+        }
+    }
+    else if (strcmp(start, "schedule") == 0 && arg1 && strncmp(arg1, "show", 4) == 0) {
+        Serial.println("=== Weekly Auto-Arm Schedule ===");
+        Serial.printf("Target Mode: %s\n", configGetScheduleMode() == 3 ? "HOME" : "AWAY");
+        const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        for (int i=0; i<7; i++) {
+            int8_t aH, aM, dH, dM;
+            configGetSchedule(i, aH, aM, dH, dM);
+            Serial.printf("  %s: ", days[i]);
+            if (aH == -1) Serial.print("Arm: OFF   |"); else Serial.printf("Arm: %02d:%02d |", aH, aM);
+            if (dH == -1) Serial.println(" Disarm: OFF"); else Serial.printf(" Disarm: %02d:%02d\n", dH, dM);
+        }
+        Serial.println("================================");
     }
     else if (strcmp(start, "zones") == 0) {
         zonesPrintStatus();
@@ -281,6 +345,75 @@ static void processLine(const char* line)
                 configChanged = true;
             } else {
                 Serial.println("Usage: heartbeat <on|off> pin <pin>");
+            }
+        }
+        else if (strcmp(start, "tz") == 0 && arg1) {
+            char* tzStr = arg1;
+            char* endptr = strchr(tzStr, ' '); // Stop at " pin "
+            if (endptr) *endptr = '\0';
+            configSetTimezone(tzStr);
+            setenv("TZ", configGetTimezone(), 1);
+            tzset();
+            Serial.printf("Timezone updated to: %s\n", configGetTimezone());
+            configChanged = true;
+        }
+        else if (strcmp(start, "schedule") == 0 && arg1) {
+            char* subcmd = arg1;
+            char* dayStr = strchr(subcmd, ' ');
+            if (dayStr) {
+                *dayStr = '\0';
+                dayStr++;
+                while (*dayStr && isspace(*dayStr)) dayStr++;
+                
+                if (strcmp(subcmd, "mode") == 0) {
+                    char* endptr = strchr(dayStr, ' ');
+                    if (endptr) *endptr = '\0';
+                    if (strcmp(dayStr, "home") == 0) {
+                        configSetScheduleMode(3); // ALARM_ARMED_HOME
+                        Serial.println("Auto-Arm mode set to HOME");
+                        configChanged = true;
+                    } else if (strcmp(dayStr, "away") == 0) {
+                        configSetScheduleMode(2); // ALARM_ARMED_AWAY
+                        Serial.println("Auto-Arm mode set to AWAY");
+                        configChanged = true;
+                    } else {
+                        Serial.println("Usage: schedule mode <home|away> pin <pin>");
+                    }
+                }
+                else if (strcmp(subcmd, "arm") == 0 || strcmp(subcmd, "disarm") == 0) {
+                    char* timeStr = strchr(dayStr, ' ');
+                    if (timeStr) {
+                        *timeStr = '\0';
+                        timeStr++;
+                        while (*timeStr && isspace(*timeStr)) timeStr++;
+                        char* endptr = strchr(timeStr, ' ');
+                        if (endptr) *endptr = '\0';
+
+                        int dayClass = -1;
+                        if (strcmp(dayStr, "weekdays") == 0) dayClass = 10;
+                        else if (strcmp(dayStr, "weekends") == 0) dayClass = 11;
+                        else if (strcmp(dayStr, "all") == 0) dayClass = 12;
+                        else if (isdigit(dayStr[0])) {
+                            dayClass = atoi(dayStr);
+                            if (dayClass < 0 || dayClass > 6) dayClass = -1;
+                        }
+
+                        int8_t h, m;
+                        if (dayClass != -1 && parseTimeStr(timeStr, h, m)) {
+                            applySchedule(strcmp(subcmd, "arm") == 0, dayClass, h, m);
+                            Serial.println("Schedule updated.");
+                            configChanged = true;
+                        } else {
+                            Serial.println("Invalid day or time. Format: <0-6|weekdays|weekends|all> <HH:MM|off>");
+                        }
+                    } else {
+                        Serial.println("Usage: schedule <arm|disarm> <day> <HH:MM|off> pin <pin>");
+                    }
+                } else {
+                    Serial.println("Unknown schedule command");
+                }
+            } else {
+                Serial.println("Usage: schedule <arm|disarm|mode> ...");
             }
         }
         else {
