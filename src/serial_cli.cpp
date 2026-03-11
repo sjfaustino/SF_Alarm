@@ -219,6 +219,13 @@ static void processLine(const char* line)
         // --- Critical Commands Require PIN Authentication ---
         // Any command not handled above requires an inline PIN check.
         // Format: <command> [args] pin <pin>
+
+        // Restore the null byte we placed when splitting arg1, so that
+        // strstr can see the FULL original command string again.
+        if (arg1 && arg1 > start) {
+            *(arg1 - 1) = ' ';  // undo the '\0' placed at the first space
+        }
+
         char* pinMarker = strstr(start, " pin ");
         if (!pinMarker) {
             Serial.printf("Unknown command or missing PIN. Sensitive commands require 'pin <YOUR_PIN>' at the end.\nType 'help' for options.\n");
@@ -236,6 +243,14 @@ static void processLine(const char* line)
         // Trim the command string again
         len = strlen(start);
         while (len > 0 && isspace(start[len - 1])) { start[len - 1] = '\0'; len--; }
+
+        // Re-tokenize: split start into command + arg1 again
+        arg1 = strchr(start, ' ');
+        if (arg1) {
+            *arg1 = '\0';
+            arg1++;
+            while (*arg1 && isspace(*arg1)) arg1++;
+        }
 
         // Validate PIN
         if (!alarmValidatePin(providedPin)) {
