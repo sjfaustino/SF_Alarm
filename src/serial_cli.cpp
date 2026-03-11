@@ -215,6 +215,25 @@ static void processLine(const char* line)
         uint16_t outputs = ioExpanderGetOutputs();
         Serial.printf("Outputs: 0x%04X\n", outputs);
     }
+    else if (strcmp(start, "network") == 0) {
+        networkPrintStatus();
+    }
+    else if (strcmp(start, "config") == 0) {
+        configPrint();
+    }
+    else if (strcmp(start, "save") == 0) {
+        configSave();
+        Serial.println("[CLI] Configuration saved to NVS");
+    }
+    else if (strcmp(start, "load") == 0) {
+        configLoad();
+        Serial.println("[CLI] Configuration loaded from NVS");
+    }
+    else if (strcmp(start, "reboot") == 0) {
+        Serial.println("[CLI] Rebooting...");
+        delay(500);
+        ESP.restart();
+    }
     else {
         // --- Critical Commands Require PIN Authentication ---
         // Any command not handled above requires an inline PIN check.
@@ -364,6 +383,161 @@ static void processLine(const char* line)
             } else {
                 Serial.println("Usage: router <ip> <user> <pass> pin <pin>");
             }
+        }
+        else if (strcmp(start, "phone") == 0 && arg1) {
+            if (strncmp(arg1, "add ", 4) == 0) {
+                char* num = arg1 + 4;
+                while (*num && isspace(*num)) num++;
+                int idx = smsCmdAddPhone(num);
+                if (idx >= 0) {
+                    Serial.printf("Phone %s added at index %d\n", num, idx);
+                    configChanged = true;
+                } else {
+                    Serial.println("Error: Phone list full or duplicate");
+                }
+            } else if (strncmp(arg1, "remove ", 7) == 0) {
+                char* num = arg1 + 7;
+                while (*num && isspace(*num)) num++;
+                if (smsCmdRemovePhone(num)) {
+                    Serial.printf("Phone %s removed\n", num);
+                    configChanged = true;
+                } else {
+                    Serial.println("Error: Phone not found");
+                }
+            } else if (strcmp(arg1, "list") == 0) {
+                int cnt = smsCmdGetPhoneCount();
+                Serial.printf("Configured phones (%d):\n", cnt);
+                for (int i = 0; i < cnt; i++) {
+                    Serial.printf("  [%d] %s\n", i, smsCmdGetPhone(i));
+                }
+            } else if (strcmp(arg1, "clear") == 0) {
+                smsCmdClearPhones();
+                Serial.println("All phone numbers cleared");
+                configChanged = true;
+            } else {
+                Serial.println("Usage: phone <add|remove|list|clear> [number] pin <pin>");
+            }
+        }
+        else if (strcmp(start, "mode") == 0 && arg1) {
+            int m = atoi(arg1);
+            if (m >= 1 && m <= 3) {
+                smsCmdSetWorkingMode((WorkingMode)m);
+                const char* modeNames[] = {"", "SMS", "Call", "Both"};
+                Serial.printf("Alert mode set to: %s\n", modeNames[m]);
+                configChanged = true;
+            } else {
+                Serial.println("Usage: mode <1=SMS, 2=Call, 3=Both> pin <pin>");
+            }
+        }
+        else if (strcmp(start, "wa") == 0 && arg1) {
+            if (strncmp(arg1, "mode ", 5) == 0) {
+                int m = atoi(arg1 + 5);
+                if (m >= 1 && m <= 3) {
+                    whatsappSetConfig(whatsappGetPhone(), whatsappGetApiKey(), (WhatsAppMode)m);
+                    const char* modeNames[] = {"", "SMS Only", "WhatsApp Only", "Both"};
+                    Serial.printf("WhatsApp mode set to: %s\n", modeNames[m]);
+                    configChanged = true;
+                } else {
+                    Serial.println("Usage: wa mode <1=SMS, 2=WA, 3=Both> pin <pin>");
+                }
+            } else {
+                // wa <phone> <apikey>
+                char* apiKey = strchr(arg1, ' ');
+                if (apiKey) {
+                    *apiKey = '\0';
+                    apiKey++;
+                    whatsappSetConfig(arg1, apiKey, whatsappGetMode());
+                    Serial.printf("WhatsApp credentials set: Phone=%s\n", arg1);
+                    configChanged = true;
+                } else {
+                    Serial.println("Usage: wa <phone> <apikey> pin <pin>");
+                }
+            }
+        }
+        else if (strcmp(start, "delay") == 0 && arg1) {
+            if (strncmp(arg1, "exit ", 5) == 0) {
+                uint16_t sec = atoi(arg1 + 5);
+                alarmSetExitDelay(sec);
+                Serial.printf("Exit delay set to %d seconds\n", sec);
+                configChanged = true;
+            } else if (strncmp(arg1, "entry ", 6) == 0) {
+                uint16_t sec = atoi(arg1 + 6);
+                alarmSetEntryDelay(sec);
+                Serial.printf("Entry delay set to %d seconds\n", sec);
+                configChanged = true;
+            } else {
+                Serial.println("Usage: delay <exit|entry> <seconds> pin <pin>");
+            }
+        }
+        else if (strcmp(start, "siren") == 0 && arg1) {
+            if (strncmp(arg1, "dur ", 4) == 0) {
+                uint16_t sec = atoi(arg1 + 4);
+                alarmSetSirenDuration(sec);
+                Serial.printf("Siren duration set to %d seconds\n", sec);
+                configChanged = true;
+            } else if (strncmp(arg1, "ch ", 3) == 0) {
+                uint8_t ch = atoi(arg1 + 3);
+                if (ch <= 15) {
+                    alarmSetSirenOutput(ch);
+                    Serial.printf("Siren output channel set to %d\n", ch);
+                    configChanged = true;
+                } else {
+                    Serial.println("Invalid channel (0-15)");
+                }
+            } else {
+                Serial.println("Usage: siren <dur|ch> <value> pin <pin>");
+            }
+        }
+        else if (strcmp(start, "test") == 0 && arg1) {
+            if (strncmp(arg1, "sms ", 4) == 0) {
+                char* numStr = arg1 + 4;
+                char* msgStr = strchr(numStr, ' ');
+                if (msgStr) {
+                    *msgStr = '\0';
+                    msgStr++;
+                    Serial.printf("Sending test SMS to %s...\n", numStr);
+                    if (smsGatewaySend(numStr, msgStr)) {
+                        Serial.println("Test SMS sent OK");
+                    } else {
+                        Serial.println("Test SMS FAILED");
+                    }
+                } else {
+                    Serial.println("Usage: test sms <number> <message> pin <pin>");
+                }
+            } else if (strncmp(arg1, "wa ", 3) == 0) {
+                char* msg = arg1 + 3;
+                Serial.println("Sending test WhatsApp...");
+                if (whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), msg)) {
+                    Serial.println("Test WhatsApp sent OK");
+                } else {
+                    Serial.println("Test WhatsApp FAILED");
+                }
+            } else if (strncmp(arg1, "output ", 7) == 0) {
+                int ch = atoi(arg1 + 7);
+                if (ch >= 0 && ch <= 15) {
+                    uint16_t current = ioExpanderGetOutputs();
+                    bool isOn = (current >> ch) & 1;
+                    ioExpanderSetOutput(ch, !isOn);
+                    Serial.printf("Output %d toggled %s\n", ch, !isOn ? "ON" : "OFF");
+                } else {
+                    Serial.println("Invalid output (0-15)");
+                }
+            } else if (strcmp(arg1, "input") == 0) {
+                inputMonitorActive = true;
+                lastMonitorInputs = 0xFFFF;
+                Serial.println("Live input monitor active. Press any key to stop.");
+            } else {
+                Serial.println("Usage: test <sms|wa|output|input> ...");
+            }
+        }
+        else if (strcmp(start, "factory") == 0) {
+            factoryPending = true;
+            factoryStartMs = millis();
+            factoryConfirmPos = 0;
+            memset(factoryConfirm, 0, sizeof(factoryConfirm));
+            Serial.println("\n!!! FACTORY RESET WARNING !!!");
+            Serial.println("This will erase ALL configuration.");
+            Serial.println("Type 'YES' within 10 seconds to confirm:");
         }
         else if (strcmp(start, "pin") == 0 && arg1) {
             alarmSetPin(arg1);
