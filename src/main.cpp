@@ -151,6 +151,7 @@ static void processAlertQueue()
             // Targeted Reply Only
             Serial.printf("[MAIN] Processing queued targeted reply to %s: %s\n", alert.targetPhone, alert.message);
             smsGatewaySend(alert.targetPhone, alert.message);
+            esp_task_wdt_reset(); // Yield to watchdog after potentially blocking SMS send
         } else {
             // Broadcast Delivery
             Serial.printf("[MAIN] Processing queued broadcast alert: %s\n", alert.message);
@@ -159,6 +160,7 @@ static void processAlertQueue()
             WhatsAppMode waM = whatsappGetMode();
             if (waM == WA_MODE_WHATSAPP || waM == WA_MODE_BOTH) {
                 whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), alert.message);
+                esp_task_wdt_reset(); // Yield to watchdog
             }
 
             // 2. SMS/Call Delivery
@@ -170,6 +172,7 @@ static void processAlertQueue()
                 } else {
                     smsCmdSendAlert(alert.message);
                 }
+                esp_task_wdt_reset(); // Yield to watchdog
             }
         }
     }
@@ -184,6 +187,7 @@ static void pollSmsInbox();
 
 static void netWorkerTask(void* pvParameters)
 {
+    esp_task_wdt_add(NULL); // Register shadow core thread to hardware watchdog
     while (true) {
         uint32_t now = millis();
         
@@ -191,10 +195,12 @@ static void netWorkerTask(void* pvParameters)
         if (now - lastSmsPoll >= SMS_POLL_INTERVAL_MS) {
             lastSmsPoll = now;
             pollSmsInbox(); // Can block for 10s if router is down
+            esp_task_wdt_reset();
         }
 
         // 2. Process Outbound Alerts
         processAlertQueue(); // Can block for HTTP POSTs
+        esp_task_wdt_reset();
 
         // 3. Periodic Status Report (GA09)
         uint16_t reportInt = smsCmdGetReportInterval();
@@ -220,6 +226,7 @@ static void netWorkerTask(void* pvParameters)
             lastReportMs = 0;
         }
 
+        esp_task_wdt_reset(); // Final pet for the watchdog
         vTaskDelay(pdMS_TO_TICKS(100)); // Sleep to yield
     }
 }

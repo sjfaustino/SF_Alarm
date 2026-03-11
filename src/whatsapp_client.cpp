@@ -1,6 +1,7 @@
 #include "whatsapp_client.h"
 #include <HTTPClient.h>
 #include "sms_commands.h"
+#include <esp_task_wdt.h>
 
 // Safe URL encoder that prevents negative sign-extension panics on UTF-8 characters
 static String safeUrlEncode(const char *msg) {
@@ -76,7 +77,9 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
     Serial.printf("[WA] Sending alert to %s...\n", phone);
     
     http.begin(url);
-    http.setTimeout(1500); // Fix: Fast-fail limit to prevent netWorkerTask queue throttling
+    http.setTimeout(1500); // Fast-fail limit to prevent netWorkerTask queue throttling
+    
+    esp_task_wdt_reset(); // Prevent watchdog reboot during alert dispatch
     int httpResponseCode = http.GET();
     
     bool success = false;

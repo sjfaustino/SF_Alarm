@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <mbedtls/sha256.h>
+#include <esp_task_wdt.h>
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -292,8 +293,9 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
 
         httpGet.begin(url);
         httpGet.addHeader("Cookie", String("sysauth=") + sysauthCookie);
-        httpGet.setTimeout(10000);
-
+        httpGet.setTimeout(3000); // Fast timeout for local router access
+        
+        esp_task_wdt_reset(); // Reset watchdog before blocking call
         int getCode = httpGet.GET();
         // Accept 200 or 403
         if (getCode != 200 && getCode != 403) {
@@ -341,8 +343,10 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
         httpPost.begin(url);
         httpPost.addHeader("Content-Type", "application/x-www-form-urlencoded");
         httpPost.addHeader("Cookie", String("sysauth=") + sysauthCookie);
-        httpPost.setTimeout(15000);
+        httpPost.setTimeout(5000); // 5s is plenty for a local POST
 
+        esp_task_wdt_reset(); // Reset watchdog before blocking call
+        
         // URL-encode message (form encoding)
         String encodedMsg = "";
         encodedMsg.reserve(strlen(message) * 3); // Prevent C++ String heap fragmentation
