@@ -20,6 +20,7 @@ struct MqttMsg {
 
 static QueueHandle_t mqttMsgQueue = NULL;
 static volatile bool mqttSyncRequested = false;
+static SemaphoreHandle_t mqttConfigMutex = NULL;
 
 static char mqttServer[64] = "";
 static uint16_t mqttPort = 1883;
@@ -95,26 +96,44 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
 }
 
 void mqttInit() {
+    if (mqttConfigMutex == NULL) {
+        mqttConfigMutex = xSemaphoreCreateMutex();
+    }
     mqttMsgQueue = xQueueCreate(10, sizeof(MqttMsg));
     client.setCallback(mqttCallback);
-    Serial.println("[MQTT] MQTT client initialized with RTOS async queue");
+    Serial.println("[MQTT] MQTT client initialized with RTOS async queue and mutex protection");
 }
 
-void mqttSetConfig(const char* server, uint16_t port, const char* user, const char* pass, const char* clientId) {
-    strncpy(mqttServer, server, sizeof(mqttServer)-1);
-    mqttServer[sizeof(mqttServer)-1] = '\0';
+void mqttSetServer(const char* host, uint16_t port) {
+    xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
+    strncpy(mqttServer, host, sizeof(mqttServer) - 1);
+    mqttServer[sizeof(mqttServer) - 1] = '\0';
     mqttPort = port;
-    strncpy(mqttUser, user, sizeof(mqttUser)-1);
-    mqttUser[sizeof(mqttUser)-1] = '\0';
-    strncpy(mqttPass, pass, sizeof(mqttPass)-1);
-    mqttPass[sizeof(mqttPass)-1] = '\0';
-    strncpy(mqttClientId, clientId, sizeof(mqttClientId)-1);
-    mqttClientId[sizeof(mqttClientId)-1] = '\0';
-    
+    xSemaphoreGive(mqttConfigMutex);
     client.setServer(mqttServer, mqttPort);
 }
 
+void mqttSetCredentials(const char* user, const char* pass) {
+    xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
+    strncpy(mqttUser, user, sizeof(mqttUser) - 1);
+    mqttUser[sizeof(mqttUser) - 1] = '\0';
+    strncpy(mqttPass, pass, sizeof(mqttPass) - 1);
+    mqttPass[sizeof(mqttPass) - 1] = '\0';
+    xSemaphoreGive(mqttConfigMutex);
+}
+
+void mqttSetClientId(const char* clientId) {
+    xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
+    strncpy(mqttClientId, clientId, sizeof(mqttClientId) - 1);
+    mqttClientId[sizeof(mqttClientId) - 1] = '\0';
+    xSemaphoreGive(mqttConfigMutex);
+}
+
+// mqttSetConfig is removed as per instruction, replaced by mqttSetServer, mqttSetCredentials, mqttSetClientId
+
 bool mqttReconnect() {
+    // This function is no longer used directly by mqttUpdate, its logic is inlined there.
+    // Keeping it for now in case other parts of the code still call it.
     if (strlen(mqttServer) == 0) return false;
 
     Serial.print("[MQTT] Attempting connection...");
@@ -146,7 +165,26 @@ void mqttUpdate() {
         unsigned long now = millis();
         if (now - lastReconnectAttempt > 5000) {
             lastReconnectAttempt = now;
-            mqttReconnect();
+            
+            xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
+            Serial.printf("[MQTT] Attempting connection to %s:%d...\n", mqttServer, mqttPort);
+            bool connected;
+            if (strlen(mqttUser) > 0) {
+                connected = client.connect(mqttClientId, mqttUser, mqttPass, "SF_Alarm/availability", 0, true, "offline");
+            } else {
+                connected = client.connect(mqttClientId, NULL, NULL, "SF_Alarm/availability", 0, true, "offline");
+            }
+            
+            if (connected) {
+                Serial.println("[MQTT] Connected!");
+                client.publish("SF_Alarm/availability", "online", true);
+                client.subscribe("SF_Alarm/cmd");
+                mqttSyncRequested = true;
+            } else {
+                Serial.print("[MQTT] Connection failed, rc=");
+                Serial.println(client.state());
+            }
+            xSemaphoreGive(mqttConfigMutex);
         }
     } else {
         client.loop();

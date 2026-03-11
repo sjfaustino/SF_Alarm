@@ -9,6 +9,7 @@ static ZoneInfo zones[MAX_ZONES];
 static ZoneEventCallback eventCallback = nullptr;
 static volatile uint16_t virtualInputBitmask = 0;
 static portMUX_TYPE vInputMux = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t zoneMutex = NULL;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -44,12 +45,24 @@ static void setZoneState(uint8_t idx, ZoneState newState)
     }
 }
 
+// Internal helper for mutex-safe reads (caller must hold mutex)
+static const ZoneInfo* getZoneInfoInternal(uint8_t index)
+{
+    if (index >= MAX_ZONES) return nullptr;
+    return &zones[index];
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 void zonesInit()
 {
+    if (zoneMutex == NULL) {
+        zoneMutex = xSemaphoreCreateMutex();
+    }
+
+    xSemaphoreTake(zoneMutex, portMAX_DELAY);
     for (uint8_t i = 0; i < MAX_ZONES; i++) {
         memset(&zones[i], 0, sizeof(ZoneInfo));
         snprintf(zones[i].config.name, MAX_ZONE_NAME_LEN, "Zone %d", i + 1);
@@ -60,18 +73,23 @@ void zonesInit()
         zones[i].rawInput       = false;
         zones[i].debouncing     = false;
     }
+    xSemaphoreGive(zoneMutex);
 
-    Serial.println("[ZONE] Initialized 16 zones (defaults)");
+    Serial.println("[ZONE] Initialized 16 zones (mutex protected)");
 }
 
 void zonesSetCallback(ZoneEventCallback cb)
 {
+    xSemaphoreTake(zoneMutex, portMAX_DELAY);
     eventCallback = cb;
+    xSemaphoreGive(zoneMutex);
 }
 
 void zonesUpdate(uint16_t inputBitmask)
 {
     uint32_t now = millis();
+
+    if (xSemaphoreTake(zoneMutex, 0) != pdTRUE) return; // Skip if busy (scanned 50 times/sec, overlap is fine to skip once)
 
     for (uint8_t i = 0; i < MAX_ZONES; i++) {
         if (!zones[i].config.enabled) continue;
@@ -118,6 +136,7 @@ void zonesUpdate(uint16_t inputBitmask)
             zones[i].debouncing = false;
         }
     }
+    xSemaphoreGive(zoneMutex);
 }
 
 const ZoneInfo* zonesGetInfo(uint8_t zoneIndex)
