@@ -28,7 +28,7 @@ static bool     lastAllClear    = true;
 #include <freertos/queue.h>
 
 struct PendingAlert {
-    char message[160];
+    char message[192];
     char targetPhone[32]; // Empty for broadcast, populated for targeted reply
 };
 static QueueHandle_t rtosAlertQueue = NULL; 
@@ -58,6 +58,9 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
                 }
             }
             snprintf(msg, sizeof(msg), "SF_Alarm ALERT: %s", details);
+            if (strlen("SF_Alarm ALERT: ") + strlen(details) >= sizeof(msg)) {
+                Serial.println("[MAIN] WARNING: Alarm message truncated for queue");
+            }
             alarmBroadcast(msg);
             break;
 

@@ -366,6 +366,12 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
             else encodedMsg += c;
         }
 
+        if (encodedMsg.length() > 1024) {
+            setError("Payload too large after URL encoding (%d bytes)", (int)encodedMsg.length());
+            httpPost.end();
+            return false;
+        }
+
         String postData = String("token=") + sendToken +
                           "&cbid.smsnew.1.phone=" + phoneNumber +
                           "&cbid.smsnew.1.content=" + encodedMsg +

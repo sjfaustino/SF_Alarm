@@ -246,10 +246,15 @@ static bool parseSetAlarmText(const char* body, const char* sender)
     if (body[1] == '0') return false;  // Leading zero = phone number command
 
     const char* text = body + idx;
+    bool truncated = (strlen(text) >= 80);
     smsCmdSetAlarmText(zone - 1, text);
 
-    char reply[80];
-    snprintf(reply, sizeof(reply), "SF_Alarm: Zone %d alarm text updated", zone);
+    char reply[100];
+    if (truncated) {
+        snprintf(reply, sizeof(reply), "SF_Alarm: Zone %d text updated (truncated to 80 chars)", zone);
+    } else {
+        snprintf(reply, sizeof(reply), "SF_Alarm: Zone %d alarm text updated", zone);
+    }
     sendReply(sender, reply);
     return true;
 }
