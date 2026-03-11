@@ -67,6 +67,9 @@ void alarmMuteSiren();
 /// Get the current alarm state.
 AlarmState alarmGetState();
 
+/// Get bitmask of all zones triggered in the current alarm cycle.
+uint16_t   alarmGetActiveAlarmMask();
+
 /// Get a human-readable string for the current state.
 const char* alarmGetStateStr();
 

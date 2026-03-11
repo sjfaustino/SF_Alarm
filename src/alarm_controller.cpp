@@ -16,12 +16,16 @@ static uint16_t entryDelaySec            = DEFAULT_ENTRY_DELAY_S;
 static uint16_t sirenDurationSec         = DEFAULT_SIREN_DURATION_S;
 static uint8_t  sirenOutputChannel       = 0;   // Output channel 0 = siren
 
-static uint32_t delayStartMs             = 0;
-static uint32_t sirenStartMs             = 0;
-static bool     sirenActive              = false;
-static bool     sirenMuted               = false;
+static uint16_t activeAlarmMask  = 0;    // Bitmask of all zones triggered in current cycle
+static uint32_t delayStartMs     = 0;
+static uint32_t sirenStartMs     = 0;
+static uint32_t firstTriggerMs   = 0;    // Strict start for noise ordinance compliance
+static bool     sirenActive      = false;
+static bool     sirenMuted       = false;
 
-static uint8_t  triggeringZone           = 0xFF; // Which zone triggered the alarm
+static uint8_t  triggeringZone   = 0xFF; // First zone that tripped
+
+uint16_t alarmGetActiveAlarmMask() { return activeAlarmMask; }
 
 // Pending arm mode during exit delay (separate from triggeringZone)
 enum PendingArmMode : uint8_t { ARM_PENDING_AWAY = 0, ARM_PENDING_HOME = 1 };
@@ -69,7 +73,12 @@ static void sirenOn()
     if (!sirenActive) {
         sirenActive  = true;
         sirenMuted   = false;
-        sirenStartMs = millis();
+        // Strict Noise Ordinance Compliance: Only set start timer IF this is a new alarm cycle
+        if (firstTriggerMs == 0) {
+            firstTriggerMs = millis();
+            Serial.println("[ALARM] Strict siren duration started (Noise Ordinance compliant)");
+        }
+        sirenStartMs = millis(); // Still track individual start for internal state
         ioExpanderSetOutput(sirenOutputChannel, true);
         Serial.println("[ALARM] Siren ON");
         fireEvent(EVT_SIREN_ON);
@@ -80,6 +89,7 @@ static void sirenOff()
 {
     if (sirenActive) {
         sirenActive = false;
+        firstTriggerMs = 0; // Reset strict timer for next cycle
         ioExpanderSetOutput(sirenOutputChannel, false);
         Serial.println("[ALARM] Siren OFF");
         fireEvent(EVT_SIREN_OFF);
@@ -229,9 +239,10 @@ static void onZoneEvent(uint8_t zoneIndex, ZoneState newState)
 
             case ALARM_TRIGGERED:
                 // Escalation: A NEW zone triggered while the alarm is already sounding
+                activeAlarmMask |= (1 << zoneIndex);
                 if (zoneIndex != triggeringZone) {
-                    triggeringZone = zoneIndex;
-                    sirenOn(); // Reset siren timeout
+                    // DO NOT call sirenOn() here; it would reset the duration timer (Noise exploit)
+                    // Just announce the escalation
                     snprintf(details, sizeof(details),
                              "Escalation: Zone %d (%s) ALARM!", zoneIndex + 1, info->config.name);
                     fireEvent(EVT_ALARM_TRIGGERED, details);
@@ -312,12 +323,13 @@ void alarmUpdate()
         }
 
         case ALARM_TRIGGERED: {
-            // Auto-silence siren and trigger state-recovery after duration
-            if (sirenDurationSec > 0) {
-                uint32_t elapsed = now - sirenStartMs;
+            // Auto-silence siren after strict duration (Noise Ordinance Compliance)
+            if (sirenDurationSec > 0 && firstTriggerMs > 0) {
+                uint32_t elapsed = now - firstTriggerMs;
                 if (elapsed >= (uint32_t)sirenDurationSec * 1000) {
                     sirenOff();
-                    Serial.println("[ALARM] Siren auto-silenced after timeout. Reverting to previous state.");
+                    Serial.println("[ALARM] Siren auto-silenced after strict duration timeout.");
+                    activeAlarmMask = 0;
                     triggeringZone = 0xFF;
                     
                     // The Zombie Alarm Fix: Re-arm system gracefully

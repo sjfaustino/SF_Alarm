@@ -65,7 +65,7 @@
 #define MAX_REPORT_INTERVAL_MIN      9999
 
 // Alert queue
-#define ALERT_QUEUE_SIZE        10
+#define ALERT_QUEUE_SIZE        32
 
 // Input scan interval
 #define INPUT_SCAN_INTERVAL_MS   20     // 50 Hz scan rate

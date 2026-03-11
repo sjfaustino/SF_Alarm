@@ -38,6 +38,7 @@ static const uint32_t ALERT_PROCESS_INTERVAL_MS = 1000; // Small gap between ale
 // ---------------------------------------------------------------------------
 // Alarm Event Handler — sends SMS alerts
 // ---------------------------------------------------------------------------
+static uint32_t lastZoneAlertMs[16] = {0};
 
 static void onAlarmEvent(AlarmEvent event, const char* details)
 {
@@ -45,6 +46,17 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
 
     switch (event) {
         case EVT_ALARM_TRIGGERED:
+            // STORM THROTTLING: Prevent flooding SMS for the same window kick
+            if (strstr(details, "Zone ")) {
+                int zId = atoi(details + 5) - 1;
+                if (zId >= 0 && zId < 16) {
+                    if (millis() - lastZoneAlertMs[zId] < 60000) {
+                        Serial.printf("[MAIN] Suppressing redundant storm alert for Zone %d\n", zId + 1);
+                        return;
+                    }
+                    lastZoneAlertMs[zId] = millis();
+                }
+            }
             snprintf(msg, sizeof(msg), "SF_Alarm ALERT: %s", details);
             alarmBroadcast(msg);
             break;
@@ -216,9 +228,10 @@ static void netWorkerTask(void* pvParameters)
                 }
 
                 snprintf(buf, sizeof(buf),
-                         "SF_Alarm PERIODIC: [%s] Zones:%d triggered | Clear:%s",
+                         "SF_Alarm PERIODIC: [%s] Trig:%d Mask:%04X | Clear:%s",
                          alarmGetStateStr(),
                          trigCount,
+                         alarmGetActiveAlarmMask(),
                          zonesAllClear() ? "YES" : "NO");
                 alarmBroadcast(buf);
             }

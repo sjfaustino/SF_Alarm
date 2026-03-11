@@ -351,9 +351,10 @@ static bool parseStatus(const char* body, const char* sender)
     }
 
     snprintf(buf, sizeof(buf),
-             "SF_Alarm [%s] Zones:%d triggered | Clear:%s | Phones:%d",
+             "SF_Alarm [%s] ZonesTrig:%d | Mask:%04X | Clear:%s | Phones:%d",
              alarmGetStateStr(),
              trigCount,
+             alarmGetActiveAlarmMask(),
              zonesAllClear() ? "YES" : "NO",
              smsCmdGetPhoneCount());
 
