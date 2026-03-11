@@ -203,16 +203,21 @@ static void netWorkerTask(void* pvParameters)
     while (true) {
         uint32_t now = millis();
         
-        // 1. Poll SMS Inbox
-        if (now - lastSmsPoll >= SMS_POLL_INTERVAL_MS) {
-            lastSmsPoll = now;
-            pollSmsInbox(); // Can block for 10s if router is down
-            esp_task_wdt_reset();
-        }
-
-        // 2. Process Outbound Alerts
+        // 1. Process Outbound Alerts (Highest Priority)
         processAlertQueue(); // Can block for HTTP POSTs
         esp_task_wdt_reset();
+
+        // 2. Poll SMS Inbox (Secondary Priority)
+        // SOS Mode: Skip polling entirely if there are pending alerts to send
+        if (now - lastSmsPoll >= SMS_POLL_INTERVAL_MS) {
+            lastSmsPoll = now;
+            if (uxQueueMessagesWaiting(rtosAlertQueue) == 0) {
+                pollSmsInbox(); // Can block for 10s if router is down
+                esp_task_wdt_reset();
+            } else {
+                Serial.println("[MAIN] SOS MODE: Skipping SMS poll to prioritize outgoing alerts");
+            }
+        }
 
         // 3. Periodic Status Report (GA09)
         uint16_t reportInt = smsCmdGetReportInterval();

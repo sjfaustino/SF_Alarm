@@ -1,6 +1,7 @@
 #include "whatsapp_client.h"
 #include <HTTPClient.h>
 #include "sms_commands.h"
+#include "network.h"
 #include <esp_task_wdt.h>
 
 // Safe URL encoder that prevents negative sign-extension panics on UTF-8 characters
@@ -49,13 +50,13 @@ const char* whatsappGetApiKey() { return waApiKey; }
 WhatsAppMode whatsappGetMode() { return waMode; }
 
 bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
-    if (strlen(phone) == 0 || strlen(apiKey) == 0) {
+    if (phone == nullptr || strlen(phone) == 0 || apiKey == nullptr || strlen(apiKey) == 0) {
         Serial.println("[WA] Error: WhatsApp credentials not set");
         return false;
     }
 
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[WA] Error: WiFi not connected");
+    if (!networkIsConnected()) {
+        Serial.println("[WA] Network DOWN. Skipping WhatsApp alert.");
         return false;
     }
 

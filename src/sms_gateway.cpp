@@ -414,8 +414,8 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
 
     http.begin(url);
     http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
-    http.setConnectTimeout(5000);
-    http.setTimeout(10000);
+    http.setConnectTimeout(2000); // Fast-fail if router is completely unresponsive
+    http.setTimeout(3000); // 3s is plenty for a local HTML poll
 
     int httpCode = http.GET();
 
@@ -425,7 +425,8 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
         if (smsGatewayLogin()) {
             http.begin(url);
             http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
-            http.setTimeout(10000); // Ensure timeout is set on retry
+            http.setConnectTimeout(2000);
+            http.setTimeout(3000); 
             httpCode = http.GET();
         }
     }
@@ -445,12 +446,12 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
     String window;
     window.reserve(4096);
     int count = 0;
-    unsigned long timeoutMs = millis();
+    unsigned long streamStartMs = millis();
 
-    while ((http.connected() || stream->available()) && count < maxMessages && (millis() - timeoutMs) < 10000) {
+    while ((http.connected() || stream->available()) && count < maxMessages && (millis() - streamStartMs) < 5000) {
         size_t size = stream->available();
         if (size) {
-            timeoutMs = millis(); // Refresh timeout
+            streamStartMs = millis(); // Refresh timeout
             uint8_t buf[256];
             int c = stream->readBytes(buf, min(size, sizeof(buf)));
             window += String((char*)buf, c);
