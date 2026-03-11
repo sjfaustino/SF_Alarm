@@ -129,7 +129,11 @@ void mqttSetClientId(const char* clientId) {
     xSemaphoreGive(mqttConfigMutex);
 }
 
-// mqttSetConfig is removed as per instruction, replaced by mqttSetServer, mqttSetCredentials, mqttSetClientId
+void mqttSetConfig(const char* server, uint16_t port, const char* user, const char* pass, const char* clientId) {
+    mqttSetServer(server, port);
+    mqttSetCredentials(user, pass);
+    mqttSetClientId(clientId);
+}
 
 bool mqttReconnect() {
     // This function is no longer used directly by mqttUpdate, its logic is inlined there.
