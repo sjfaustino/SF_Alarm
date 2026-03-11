@@ -1,7 +1,6 @@
-# SF_Alarm Custom Partition Table (4MB Flash)
-# Enlarged NVS to 0x7000 (28KB) to support 16 zones + scheduler + MQTT/ONVIF config
+# SF_Alarm Custom Partition Table (4MB Flash, No OTA)
+# NVS enlarged to 0x7000 (28KB) for 16 zones + scheduler + all config
+# App starts at standard 0x10000 to match default upload address
 # Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x7000,
-otadata,  data, ota,     0x10000,  0x2000,
-app0,     app,  ota_0,   0x20000,  0x1D0000,
-spiffs,   data, spiffs,  0x1F0000, 0x10000,
+app0,     app,  factory, 0x10000,  0x1F0000,
