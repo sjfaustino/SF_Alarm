@@ -345,6 +345,26 @@ static void processLine(const char* line)
                 Serial.println("Usage: wifi <ssid> <password> pin <pin>");
             }
         }
+        else if (strcmp(start, "router") == 0 && arg1) {
+            // router <ip> <user> <pass>
+            char* userStr = strchr(arg1, ' ');
+            if (userStr) {
+                *userStr = '\0';
+                userStr++;
+                char* passStr = strchr(userStr, ' ');
+                if (passStr) {
+                    *passStr = '\0';
+                    passStr++;
+                    smsGatewaySetCredentials(arg1, userStr, passStr);
+                    Serial.printf("Router set: IP=%s User=%s\n", arg1, userStr);
+                    configChanged = true;
+                } else {
+                    Serial.println("Usage: router <ip> <user> <pass> pin <pin>");
+                }
+            } else {
+                Serial.println("Usage: router <ip> <user> <pass> pin <pin>");
+            }
+        }
         else if (strcmp(start, "pin") == 0 && arg1) {
             alarmSetPin(arg1);
             configChanged = true;
