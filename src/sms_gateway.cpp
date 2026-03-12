@@ -171,33 +171,38 @@ bool smsGatewayLogin()
     Serial.printf("[SMS] Password hashed OK\n");
 
     // --- Step 3: POST login ---
+    // NOTE: LuCI uses Referer as an additional CSRF check.
+    // A missing or wrong Referer header causes a 403 even with a valid token.
+    String loginUrl = buildUrl("/cgi-bin/luci/");
     HTTPClient http2;
-    http2.begin(buildUrl("/cgi-bin/luci/"));
+    http2.begin(loginUrl);
     http2.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    http2.addHeader("Referer", loginUrl);  // Required by LuCI CSRF guard
+    http2.addHeader("Origin", String("http://") + routerIp);
     http2.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     http2.setTimeout(10000);
 
     const char* headerKeys[] = {"Set-Cookie", "Location"};
     http2.collectHeaders(headerKeys, 2);
 
+    // Minimal POST body — only the fields Cudy LuCI actually requires
     String postData = String("_csrf=") + csrf +
-                      "&token=" + token +
-                      "&salt=" + salt +
                       "&luci_username=" + routerUser +
-                      "&luci_password=" + finalHash +
-                      "&luci_language=auto" +
-                      "&zonename=UTC" +
-                      "&timeclock=" + String(esp_timer_get_time() / 1000000ULL) +
-                      "&cbi.submit=1";
+                      "&luci_password=" + finalHash;
+
+    Serial.printf("[SMS] Login POST to: %s\n", loginUrl.c_str());
+    Serial.printf("[SMS] POST body (len=%d): _csrf=%s...&luci_username=%s&luci_password=%s...\n",
+                  postData.length(), csrf.substring(0,8).c_str(),
+                  routerUser, finalHash.substring(0,8).c_str());
 
     int httpCode = http2.POST(postData);
 
     Serial.printf("[SMS] Login POST response: %d\n", httpCode);
-
     // LuCI responds with 302 redirect on successful login
     if (httpCode == 302 || httpCode == 301 || httpCode == 200) {
         // Extract sysauth cookie
         String cookies = http2.header("Set-Cookie");
+        Serial.printf("[SMS] Set-Cookie: %s\n", cookies.c_str());
         if (cookies.length() > 0) {
             int start = cookies.indexOf("sysauth=");
             if (start >= 0) {
@@ -210,9 +215,10 @@ bool smsGatewayLogin()
             }
         }
 
-        // Also check the Location header for stok-style tokens
+        // Also check the Location header for sysauth tokens
         if (sysauthCookie.length() == 0) {
             String location = http2.header("Location");
+            Serial.printf("[SMS] Location: %s\n", location.c_str());
             if (location.indexOf("sysauth=") >= 0) {
                 int s = location.indexOf("sysauth=") + 8;
                 int e = location.indexOf('&', s);
@@ -220,6 +226,10 @@ bool smsGatewayLogin()
                 sysauthCookie = location.substring(s, e);
             }
         }
+    } else {
+        // Log response body to see what the router actually says
+        String body = http2.getString();
+        Serial.printf("[SMS] POST response body (first 200): %.200s\n", body.c_str());
     }
 
     http2.end();
