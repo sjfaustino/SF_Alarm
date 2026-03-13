@@ -17,6 +17,8 @@ static AlarmState       returnState      = ALARM_DISARMED;
 static SemaphoreHandle_t stateMutex       = NULL;
 static AlarmEventCallback eventCallback  = nullptr;
 
+static const char* alarmGetStateStrInternal();
+
 static char     alarmPin[MAX_PIN_LEN]    = "1234";  // Default PIN
 static uint16_t exitDelaySec             = DEFAULT_EXIT_DELAY_S;
 static uint16_t entryDelaySec            = DEFAULT_ENTRY_DELAY_S;
@@ -94,11 +96,15 @@ static void sirenOn(int8_t zoneId, const char* name)
     if (!sirenActive) {
         sirenActive  = true;
         sirenMuted   = false;
-        // Strict Noise Ordinance Compliance: Only set start timer IF this is a new alarm cycle
+        
+        // Strict Noise Ordinance Compliance: 
+        // firstTriggerMs is set at the start of the TRIGGERED state and 
+        // NEVER reset until DISARMED, ensuring total siren duration doesn't restart.
         if (firstTriggerMs == 0) {
             firstTriggerMs = millis();
-            LOG_INFO(TAG, "Strict siren duration started");
+            LOG_INFO(TAG, "Strict noise ordinance window started");
         }
+        
         sirenStartMs = millis();
         ioExpanderSetOutput(sirenOutputChannel, true);
         LOG_WARN(TAG, "Siren: ON (Zone %d: %s)", zoneId + 1, name);
@@ -110,7 +116,7 @@ static void sirenOff()
 {
     if (sirenActive) {
         sirenActive = false;
-        firstTriggerMs = 0; // Reset strict timer for next cycle
+        // Note: firstTriggerMs is NOT reset here. It persists until Disarm.
         ioExpanderSetOutput(sirenOutputChannel, false);
         LOG_INFO(TAG, "Siren: OFF");
         fireEvent(EVT_SIREN_OFF, -1, "Manual or Timeout");
@@ -160,7 +166,9 @@ static void setState(AlarmState newState)
 {
     if (!stateMutex) return;
     
-    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    // Infallible State Transition: Use a longer timeout or block to ensure DISARM/TRIGGER 
+    // is never ignored due to transient contention with telemetry/MQTT polling.
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         if (currentState != newState) {
             // Capture return state when transitioning out of stable armed/disarmed states
             if (currentState == ALARM_DISARMED ||
@@ -169,14 +177,21 @@ static void setState(AlarmState newState)
                 returnState = currentState;
             }
 
-            const char* oldStr = alarmGetStateStr();
+            const char* oldStr = alarmGetStateStrInternal();
             currentState = newState;
-            LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStr());
+            LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStrInternal());
             
+            // Clean up noise ordinance timer on disarm
+            if (newState == ALARM_DISARMED) {
+                firstTriggerMs = 0;
+            }
+
             // Industrial Hardening: Persist state to survive reboots/power cycles
             configSaveAlarmState(currentState);
         }
         xSemaphoreGive(stateMutex);
+    } else {
+        LOG_ERROR(TAG, "CRITICAL: State transition failed (Mutex DEADLOCK?)");
     }
 }
 
@@ -279,7 +294,9 @@ void alarmInit()
     // Register our zone event handler first so restoration doesn't cause missed transitions if they differ
     zonesSetCallback(onZoneEvent);
 
-    stateMutex = xSemaphoreCreateMutex();
+    if (stateMutex == NULL) {
+        stateMutex = xSemaphoreCreateMutex();
+    }
     
     // Restore persistent state from NVS
     AlarmState savedState = configLoadAlarmState();
@@ -449,7 +466,7 @@ AlarmState alarmGetState()
     return st;
 }
 
-const char* alarmGetStateStr()
+static const char* alarmGetStateStrInternal()
 {
     switch (currentState) {
         case ALARM_DISARMED:     return "DISARMED";
@@ -460,6 +477,16 @@ const char* alarmGetStateStr()
         case ALARM_TRIGGERED:    return "TRIGGERED";
         default:                 return "UNKNOWN";
     }
+}
+
+const char* alarmGetStateStr()
+{
+    const char* str = "UNKNOWN";
+    if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        str = alarmGetStateStrInternal();
+        xSemaphoreGive(stateMutex);
+    }
+    return str;
 }
 
 uint16_t alarmGetDelayRemaining()

@@ -650,7 +650,9 @@ void smsCmdProcess(const char* sender, const char* body)
 
 void smsCmdInit()
 {
-    htmlMutex = xSemaphoreCreateMutex();
+    if (htmlMutex == NULL) {
+        htmlMutex = xSemaphoreCreateMutex();
+    }
     phoneCount = 0;
     memset(phoneNumbers, 0, sizeof(phoneNumbers));
 

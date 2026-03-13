@@ -37,8 +37,28 @@ bool ioExpanderInit()
 
     if (xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT) != pdTRUE) return false;
 
+    // --- PHYSICAL BUS RECOVERY (Obsidian Sledgehammer) ---
+    // If SDA is held low by a hung slave, we need to toggle SCL until it's released.
+    pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+    pinMode(I2C_SCL_PIN, OUTPUT);
+    digitalWrite(I2C_SCL_PIN, HIGH);
+
+    if (digitalRead(I2C_SDA_PIN) == LOW) {
+        LOG_WARN(TAG, "I2C SDA stuck LOW. Attempting bus recovery...");
+        for (int i = 0; i < 16; i++) {
+            digitalWrite(I2C_SCL_PIN, LOW);
+            delayMicroseconds(5);
+            digitalWrite(I2C_SCL_PIN, HIGH);
+            delayMicroseconds(5);
+            if (digitalRead(I2C_SDA_PIN) == HIGH) {
+                LOG_INFO(TAG, "I2C bus recovered after %d pulses", i+1);
+                break;
+            }
+        }
+    }
+
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_CLOCK_HZ);
-    Wire.setTimeOut(100); // Prevent infinite while() loops if the I2C bus is physically jammed/shorted
+    Wire.setTimeOut(100); 
 
     // Initialize input chips — set all pins as inputs (write 0xFF)
     chipOk[0] = pcfIn1.begin();
