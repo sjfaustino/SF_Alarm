@@ -86,6 +86,7 @@ void networkSetWifi(const char* ssid, const char* password)
     // Disconnect and reconnect
     WiFi.disconnect();
     delay(100);
+    WiFi.setHostname("sf-alarm");
     WiFi.begin(wifiSsid, wifiPass);
     connecting = true;
     lastReconnectAttempt = millis();

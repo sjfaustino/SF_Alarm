@@ -22,6 +22,24 @@ static String sysauthCookie = "";   // LuCI sysauth cookie
 static String csrfToken     = "";   // LuCI CSRF token (from HTML pages)
 static bool   loggedIn      = false;
 
+static size_t urlEncodeTo(const char* src, char* dest, size_t destSize) {
+    static const char *hexChars = "0123456789ABCDEF";
+    size_t d = 0;
+    while (*src && (d < destSize - 1)) {
+        uint8_t c = (uint8_t)*src++;
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            dest[d++] = (char)c;
+        } else {
+            if (d + 3 >= destSize) break;
+            dest[d++] = '%';
+            dest[d++] = hexChars[c >> 4];
+            dest[d++] = hexChars[c & 0x0F];
+        }
+    }
+    dest[d] = '\0';
+    return d;
+}
+
 static char lastError[128] = "";
 
 // Retry configuration
@@ -66,8 +84,10 @@ static String extractHiddenField(const String& page, const char* fieldName)
     if (pos < 0) return "";
 
     // Strictly locate the start and end of the containing <input tag
-    int tagStart = page.lastIndexOf("<input", pos);
-    int tagEnd = page.indexOf(">", pos);
+    String lowerPage = page;
+    lowerPage.toLowerCase();
+    int tagStart = lowerPage.lastIndexOf("<input", pos);
+    int tagEnd = lowerPage.indexOf(">", pos);
     
     // Boundary check: ensure the search name is actually inside THIS input tag
     if (tagStart < 0 || tagEnd < 0 || pos < tagStart || pos > tagEnd) return "";
@@ -225,8 +245,11 @@ bool smsGatewayLogin()
     const char* headerKeys[] = {"Set-Cookie", "Location"};
     http2.collectHeaders(headerKeys, 2);
 
+    char encCsrf[512] = "";
+    urlEncodeTo(_csrf.c_str(), encCsrf, sizeof(encCsrf));
+    
     // Minimal POST body — only the fields Cudy LuCI actually requires
-    String postData = String("_csrf=") + _csrf +
+    String postData = String("_csrf=") + encCsrf +
                       "&luci_username=" + routerUser +
                       "&luci_password=" + finalHash;
 

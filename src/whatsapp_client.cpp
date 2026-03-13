@@ -61,8 +61,8 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
     }
 
     // Stack-allocated buffers (Zero-Heap architecture)
-    char url[512];
-    char encodedMsg[384];
+    char url[768];
+    char encodedMsg[512];
     
     urlEncodeTo(message, encodedMsg, sizeof(encodedMsg));
     
