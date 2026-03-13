@@ -8,7 +8,7 @@ This document provides a detailed technical guide for interacting with the SF_Al
 
 ### Serial CLI Security
 To prevent unauthorized access via physical console, all "destructive" or "config-altering" commands require a trailing PIN signature.
-* **Syntax**: `<command> [args] pin <YOUR_PIN>`
+* **Syntax**: `<command> [args] -pin <YOUR_PIN>`
 * **Default PIN**: `1234`
 * **Lockout**: 3 failed attempts will lock the CLI for 5 minutes.
 
@@ -35,13 +35,13 @@ To prevent unauthorized access via physical console, all "destructive" or "confi
 ### 2. Control Commands (Requires `pin <pin>`)
 | Command | Syntax | Example | Result |
 | :--- | :--- | :--- | :--- |
-| **Arm Away** | `arm pin <pin>` | `arm pin 1234` | Transitions to `ARMED_AWAY`. 30s exit delay starts. |
-| **Arm Home** | `arm home pin <pin>` | `arm home pin 1234` | Transitions to `ARMED_HOME`. Interior zones bypassed. |
-| **Disarm** | `disarm pin <pin>` | `disarm pin 1234` | Resets system to `DISARMED`. Stops siren. |
-| **Mute** | `mute pin <pin>` | `mute pin 1234` | Instantly silences siren. State remains `TRIGGERED`. |
+| **Arm Away** | `arm -pin <pin>` | `arm -pin 1234` | Transitions to `ARMED_AWAY`. 30s exit delay starts. |
+| **Arm Home** | `arm -home -pin <pin>` | `arm -home -pin 1234` | Transitions to `ARMED_HOME`. Interior zones bypassed. |
+| **Disarm** | `disarm -pin <pin>` | `disarm -pin 1234` | Resets system to `DISARMED`. Stops siren. |
+| **Mute** | `mute -pin <pin>` | `mute -pin 1234` | Instantly silences siren. State remains `TRIGGERED`. |
 
 ### 3. Zone Configuration (Requires `pin <pin>`)
-*Syntax: `zone <1-16> <subcommand> <value> pin <pin>`*
+*Syntax: `zone -id <1-16> -<subcommand> <value> -pin <pin>`*
 
 | Subcommand | Value | Effect |
 | :--- | :--- | :--- |
@@ -126,9 +126,9 @@ Run `test input` to enter real-time diagnostics mode. The CLI will print a bitma
 * *Exit by pressing any key.*
 
 ### Factory Reset
-Command: `factory pin <pin>`
+Command: `factory -pin <pin>`
 * The system will ask for confirmation. Type `YES` and press Enter within 10 seconds to wipe NVS memory.
 
 ### Reboot
-Command: `reboot pin <pin>`
+Command: `reboot -pin <pin>`
 * Performs a software restart of the ESP32. Useful after network configuration changes.

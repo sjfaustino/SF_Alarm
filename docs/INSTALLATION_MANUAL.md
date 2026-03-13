@@ -68,67 +68,67 @@ The `sf_alarm>` prompt is your command-line interface (CLI).
 
 > [!IMPORTANT]
 > **The PIN Security System**
-> To prevent an intruder from plugging a laptop into the board to disable it, all configuration commands require you to append `pin <your_pin>` to the end of the command. 
+> To prevent an intruder from plugging a laptop into the board to disable it, all configuration commands require you to append `-pin <your_pin>` to the end of the command. 
 > The factory default PIN is **`1234`**.
 
 Type the following commands into the terminal, pressing `Enter` after each one.
 
 ### Step 1: Secure the System
 Change the default master PIN to your own 4-digit code (e.g., `9999`).
-*   **Command:** `pin 9999 pin 1234`
+*   **Command:** `pin 9999 -pin 1234`
 *   *(Expected: `[CLI] Configuration saved to NVS`)*
 *   **Note:** Keep your new PIN safe. All future commands in this guide will use `9999` as the example PIN.
 
 ### Step 2: Connect to the Network
 To send WhatsApp messages or MQTT data, connect the board to your local Wi-Fi.
-*   **Command:** `wifi MyNetwork MyPassword pin 9999`
+*   **Command:** `wifi -ssid MyNetwork -pass MyPassword -pin 9999`
 *   *(Expected: `Wi-Fi set: SSID=MyNetwork`)*
 *   Wait 5-10 seconds. Type `status` to ensure you got an IP address.
 
 ### Step 3: Setup the SMS Cudy Router (Life-Safety Alerts)
 If you have a Cudy Router on your network handling SMS, point the alarm board to it.
-*   **Command:** `router 192.168.10.1 admin YourRouterPass pin 9999`
+*   **Command:** `router -ip 192.168.10.1 -user admin -pass YourRouterPass -pin 9999`
 
 ### Step 4: Add Authorized Phone Numbers
 Only numbers explicitly added to the system can text it commands. Add your mobile number (include country code, e.g., `+44...` or `+1...`).
-*   **Command:** `phone add +15551234567 pin 9999`
+*   **Command:** `phone -action add -number +15551234567 -pin 9999`
 *   *(Expected: `Phone +15551234567 added at index 0`)*
 
 ### Step 5: Configure Your Zones
 Let's assume `Zone 1` is your Front Door, and `Zone 2` is your Living Room Motion Sensor.
 
 1.  **Name the Front Door:**
-    *   `zone 1 name Front_Door pin 9999`
+    *   `zone -id 1 -name Front_Door -pin 9999`
 2.  **Make the Front Door a "Delayed" zone** (gives you time to enter the PIN when you get home):
-    *   `zone 1 type dly pin 9999`
+    *   `zone -id 1 -type dly -pin 9999`
 3.  **Name the Motion Sensor:**
-    *   `zone 2 name Living_Room_PIR pin 9999`
+    *   `zone -id 2 -name Living_Room_PIR -pin 9999`
 4.  **Make the Motion Sensor a "Follower"** (it won't trigger immediately if you walked through the front door first to get to the keypad):
-    *   `zone 2 type flw pin 9999`
+    *   `zone -id 2 -type flw -pin 9999`
 5.  **Set custom SMS Alert Text:**
-    *   `zone 1 text Front Door opened while armed! pin 9999`
+    *   `zone -id 1 -text "Front Door opened while armed!" -pin 9999`
 
 *   *(To view your setup, simply type: `zones` and hit enter)*
 
 ### Step 6: Adjust Timers
 By default, you have 30 seconds to leave the house, and 15 seconds to enter the PIN when returning. Sirens ring for 3 minutes (180s). To change this:
-*   Set Exit delay to 60s: `delay exit 60 pin 9999`
-*   Set Entry delay to 45s: `delay entry 45 pin 9999`
+*   Set Exit delay to 60s: `delay -exit 60 -pin 9999`
+*   Set Entry delay to 45s: `delay -entry 45 -pin 9999`
 
 ### Step 7: Turn on the Heartbeat
 If you wired the LED and Buzzer in Part 1 to see system status.
-*   **Command:** `heartbeat on pin 9999`
+*   **Command:** `heartbeat -on -pin 9999`
 *   *(It will now tick/flash every 2 seconds ONLY when the system is actually Armed).*
 
 ### Step 8: Set Your Timezone
 To allow the system to accurately sync its clock with the internet and handle Daylight Saving Time, tell it your local timezone using a POSIX string.
-*   **Command:** `tz EST5EDT,M3.2.0,M11.1.0 pin 9999` *(Example for New York)*
+*   **Command:** `tz EST5EDT,M3.2.0,M11.1.0 -pin 9999` *(Example for New York)*
 *   *(Expected: `Timezone updated to: EST5EDT...`)*
 *   Verify it worked by typing `time`.
 
 ### Step 9: Save to Hardware
 While some commands auto-save, it is best practice to force a memory write before disconnecting the USB cable:
-*   **Command:** `save pin 9999`
+*   **Command:** `save -pin 9999`
 *   *(Expected: `[CFG] Full configuration saved`)*
 
 ---
@@ -206,5 +206,5 @@ Send these from your registered mobile phone.
 ## Advanced Reset
 If you lose your PIN and cannot use the Serial CLI or SMS:
 1. Connect via USB.
-2. Type: `factory pin <the_lost_pin>` (This will fail).
+2. Type: `factory -pin <the_lost_pin>` (This will fail).
 3. If you do not have the PIN, there is no backdoor. You must forcefully re-flash the ESP32 microchip via PlatformIO to clear the NVS partition. This ensures thieves cannot steal the unit and easily bypass the security.
