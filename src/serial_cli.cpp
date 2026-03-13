@@ -11,12 +11,12 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <SimpleCLI.h>
 
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
-static char lineBuffer[CLI_MAX_LINE_LEN];
-static int  linePos = 0;
+static SimpleCLI cli;
 
 // Non-blocking state for test input monitor
 static bool inputMonitorActive = false;
@@ -33,674 +33,400 @@ static int factoryConfirmPos = 0;
 // Helpers
 // ---------------------------------------------------------------------------
 
-static void printPrompt()
-{
+static void printPrompt() {
     Serial.print("sf_alarm> ");
 }
 
-static void printHelp()
-{
+// Global Auth Check Helper
+static bool requirePin(cmd* c) {
+    Command cmd(c);
+    Argument argPin = cmd.getArgument("pin");
+    if (!argPin.isSet()) {
+        Serial.println("[CLI] ERROR: Sensitive command requires -pin <YOUR_PIN>");
+        return false;
+    }
+    if (!alarmValidatePin(argPin.getValue().c_str())) {
+        Serial.println("[CLI] ACCESS DENIED: Invalid PIN");
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// CLI Callbacks - Public Commands
+// ---------------------------------------------------------------------------
+
+static void cmdHelpCallback(cmd* c) {
     Serial.println();
     Serial.println("=== SF_Alarm CLI Commands ===");
-    Serial.println("  status           — System status overview");
-    Serial.println("  zones            — Show all zone states");
-    Serial.println("  inputs           — Show raw input bitmask");
-    Serial.println("  outputs          — Show output bitmask");
-    Serial.println("  arm <pin>        — Arm system (away)");
-    Serial.println("  arm home <pin>   — Arm system (home)");
-    Serial.println("  disarm <pin>     — Disarm system");
-    Serial.println("  mute             — Mute siren");
-    Serial.println();
-    Serial.println("  zone <n> name <text>   — Set zone name");
-    Serial.println("  zone <n> type <inst|dly|24h|flw>  — Set zone type");
-    Serial.println("  zone <n> nc|no         — Set zone wiring");
-    Serial.println("  zone <n> enable|disable — Enable/disable zone");
-    Serial.println("  zone <n> bypass|unbypass — Bypass/restore zone");
-    Serial.println("  zone <n> text <msg>    — Set alarm SMS text");
-    Serial.println();
-    Serial.println("  phone add <number>     — Add alert phone number");
-    Serial.println("  phone remove <number>  — Remove phone number");
-    Serial.println("  phone list             — List phone numbers");
-    Serial.println("  phone clear            — Clear all phone numbers");
-    Serial.println();
-    Serial.println("  wifi <ssid> <pass>     — Set Wi-Fi credentials");
-    Serial.println("  router <ip> <user> <pass> — Set Cudy LT500D creds");
-    Serial.println("  network                — Show network status");
-    Serial.println();
-    Serial.println("  pin <newpin>           — Set alarm PIN");
-    Serial.println("  mode <1-3>             — Set alert mode (1:SMS, 2:Call, 3:Both)");
-    Serial.println("  wa <phone> <apikey>    — Set WhatsApp credentials");
-    Serial.println("  wa mode <1-3>          — Set WA mode (1:SMS, 2:WA, 3:Both)");
-    Serial.println("  delay exit <sec>       — Set exit delay");
-    Serial.println("  delay entry <sec>      — Set entry delay");
-    Serial.println("  siren dur <sec>        — Set siren duration");
-    Serial.println("  siren ch <0-15>        — Set siren output channel");
-    Serial.println();
-    Serial.println("  test sms <number> <msg> — Send test SMS");
-    Serial.println("  test wa <msg>            — Send test WhatsApp");
-    Serial.println("  test output <0-15>       — Toggle an output");
-    Serial.println("  test input               — Live input monitor");
-    Serial.println();
-    Serial.println("  sms inbox                — Show messages in router inbox");
-    Serial.println("  sms outbox               — Show sent messages on router");
-    Serial.println();
-    Serial.println("  time                   — Show current NTP time");
-    Serial.println("  schedule show          — Show weekly auto-arm schedule");
-    Serial.println();
-    Serial.println("  tz <posix_tz_string>   — Set local timezone");
-    Serial.println("  schedule mode <away|home> — Set auto-arm mode");
-    Serial.println("  schedule <arm|disarm> <day> <HH:MM|off> — Edit schedule");
-    Serial.println("     <day> can be: 0=Sun..6=Sat, weekdays, weekends, all");
-    Serial.println();
-    Serial.println("  heartbeat <on|off>     — Toggle armed heartbeat LED/Buzzer");
-    Serial.println();
-    Serial.println("  save                   — Save config to NVS");
-    Serial.println("  load                   — Load config from NVS");
-    Serial.println("  factory                — Factory reset");
-    Serial.println("  config                 — Show configuration");
-    Serial.println("  reboot                 — Restart ESP32");
-    Serial.println("  help                   — This help text");
+    Serial.println(cli.toString());
     Serial.println("=============================");
 }
 
-// ---------------------------------------------------------------------------
-// Command Dispatcher
-// ---------------------------------------------------------------------------
-
-static bool parseTimeStr(const char* str, int8_t &hr, int8_t &min) {
-    if (strcmp(str, "off") == 0) {
-        hr = -1; min = -1;
-        return true;
-    }
-    if (sscanf(str, "%c%c:%c%c", &hr, &hr, &hr, &hr) != 4) { // Fast check format
-        if (strlen(str) != 5 || str[2] != ':') return false;
-    }
-    int h = atoi(str);
-    int m = atoi(str + 3);
-    if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
-        hr = h; min = m;
-        return true;
-    }
-    return false;
+static void cmdStatusCallback(cmd* c) {
+    alarmPrintStatus();
+    zonesPrintStatus();
+    networkPrintStatus();
 }
 
-static void applySchedule(bool isArm, int dayClass, int8_t hr, int8_t min) {
-    auto applyFn = [&](int d) {
-        int8_t aHr, aMin, dHr, dMin;
-        configGetSchedule(d, aHr, aMin, dHr, dMin);
-        if (isArm) {
-            configSetSchedule(d, hr, min, dHr, dMin);
-        } else {
-            configSetSchedule(d, aHr, aMin, hr, min);
-        }
-    };
+static void cmdZonesCallback(cmd* c) {
+    zonesPrintStatus();
+}
+
+static void cmdInputsCallback(cmd* c) {
+    uint16_t inputs = ioExpanderReadInputs();
+    Serial.printf("Inputs: 0x%04X (", inputs);
+    for (int i = 15; i >= 0; i--) {
+        Serial.print((inputs >> i) & 1);
+        if (i % 4 == 0 && i > 0) Serial.print(' ');
+    }
+    Serial.println(")");
+}
+
+static void cmdOutputsCallback(cmd* c) {
+    uint16_t outputs = ioExpanderGetOutputs();
+    Serial.printf("Outputs: 0x%04X\n", outputs);
+}
+
+static void cmdNetworkCallback(cmd* c) {
+    networkPrintStatus();
+}
+
+static void cmdTimeCallback(cmd* c) {
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+        Serial.println("Time not set! Check Network Connection and NTP.");
+    } else {
+        Serial.println(&timeinfo, "Current Time: %A, %B %d %Y %H:%M:%S");
+    }
+}
+
+static void cmdConfigCallback(cmd* c) {
+    configPrint();
+}
+
+// ---------------------------------------------------------------------------
+// CLI Callbacks - Authenticated Commands
+// ---------------------------------------------------------------------------
+
+static void cmdArmCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Command cmd(c);
+    if (cmd.getArgument("home").isSet()) {
+        alarmArmHome(cmd.getArgument("pin").getValue().c_str());
+    } else {
+        alarmArmAway(cmd.getArgument("pin").getValue().c_str());
+    }
+}
+
+static void cmdDisarmCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Command cmd(c);
+    alarmDisarm(cmd.getArgument("pin").getValue().c_str());
+}
+
+static void cmdMuteCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    alarmMuteSiren();
+}
+
+static void cmdRebootCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Serial.println("[CLI] Rebooting...");
+    delay(500);
+    ESP.restart();
+}
+
+static void cmdFactoryCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    factoryPending = true;
+    factoryStartMs = millis();
+    factoryConfirmPos = 0;
+    memset(factoryConfirm, 0, sizeof(factoryConfirm));
+    Serial.println("\n!!! FACTORY RESET WARNING !!!");
+    Serial.println("This will erase ALL configuration.");
+    Serial.println("Type 'YES' within 10 seconds to confirm:");
+}
+
+static void cmdZoneUpdateCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Command cmd(c);
     
-    if (dayClass >= 0 && dayClass <= 6) { applyFn(dayClass); }
-    else if (dayClass == 10) { for(int i=1; i<=5; i++) applyFn(i); } // weekdays
-    else if (dayClass == 11) { applyFn(0); applyFn(6); } // weekends
-    else if (dayClass == 12) { for(int i=0; i<=6; i++) applyFn(i); } // all
-}
-
-static void processLine(const char* line)
-{
-    // Skip empty lines
-    if (strlen(line) == 0) {
-        printPrompt();
+    int zoneNum = cmd.getArgument("id").getValue().toInt();
+    if (zoneNum < 1 || zoneNum > MAX_ZONES) {
+        Serial.println("Invalid zone number (1-16)");
         return;
     }
+    ZoneConfig* cfg = zonesGetConfig(zoneNum - 1);
+    if (!cfg) return;
 
-    // Make a mutable copy
-    char cmd[CLI_MAX_LINE_LEN];
-    strncpy(cmd, line, CLI_MAX_LINE_LEN - 1);
-    cmd[CLI_MAX_LINE_LEN - 1] = '\0';
+    bool changed = false;
 
-    // Trim
-    char* start = cmd;
-    while (*start && isspace(*start)) start++;
-    int len = strlen(start);
-    while (len > 0 && isspace(start[len - 1])) { start[len - 1] = '\0'; len--; }
-
-    // Tokenize first word
-    char* arg1 = strchr(start, ' ');
-    if (arg1) {
-        *arg1 = '\0';
-        arg1++;
-        while (*arg1 && isspace(*arg1)) arg1++;
+    if (cmd.getArgument("name").isSet()) {
+        String name = cmd.getArgument("name").getValue();
+        strncpy(cfg->name, name.c_str(), MAX_ZONE_NAME_LEN - 1);
+        cfg->name[MAX_ZONE_NAME_LEN - 1] = '\0';
+        Serial.printf("Zone %d name: %s\n", zoneNum, cfg->name);
+        changed = true;
+    }
+    if (cmd.getArgument("type").isSet()) {
+        String type = cmd.getArgument("type").getValue();
+        if (type == "inst") { cfg->type = ZONE_INSTANT; changed = true; }
+        else if (type == "dly") { cfg->type = ZONE_DELAYED; changed = true; }
+        else if (type == "24h") { cfg->type = ZONE_24H; changed = true; }
+        else if (type == "flw") { cfg->type = ZONE_FOLLOWER; changed = true; }
+        else Serial.println("Unknown type: inst|dly|24h|flw");
+    }
+    if (cmd.getArgument("wiring").isSet()) {
+        String w = cmd.getArgument("wiring").getValue();
+        if (w == "nc") { cfg->wiring = ZONE_NC; changed = true; }
+        else if (w == "no") { cfg->wiring = ZONE_NO; changed = true; }
+    }
+    if (cmd.getArgument("state").isSet()) {
+        String s = cmd.getArgument("state").getValue();
+        if (s == "enable") { cfg->enabled = true; changed = true; }
+        else if (s == "disable") { cfg->enabled = false; changed = true; }
+    }
+    if (cmd.getArgument("mode").isSet()) {
+        String m = cmd.getArgument("mode").getValue();
+        if (m == "bypass") zonesSetBypassed(zoneNum - 1, true);
+        else if (m == "unbypass") zonesSetBypassed(zoneNum - 1, false);
+    }
+    if (cmd.getArgument("text").isSet()) {
+        smsCmdSetAlarmText(zoneNum - 1, cmd.getArgument("text").getValue().c_str());
+        changed = true;
     }
 
-    // Convert command to lowercase
-    for (int i = 0; start[i]; i++) start[i] = tolower(start[i]);
-
-    // --- Dispatch ---
-
-    if (strcmp(start, "help") == 0 || strcmp(start, "?") == 0) {
-        printHelp();
-    }
-    else if (strcmp(start, "status") == 0) {
-        alarmPrintStatus();
-        zonesPrintStatus();
-        networkPrintStatus();
-    }
-    else if (strcmp(start, "time") == 0) {
-        struct tm timeinfo;
-        if (!getLocalTime(&timeinfo)) {
-            Serial.println("Time not set! Check Network Connection and NTP.");
-        } else {
-            Serial.println(&timeinfo, "Current Time: %A, %B %d %Y %H:%M:%S");
-        }
-    }
-    else if (strcmp(start, "schedule") == 0 && arg1 && strncmp(arg1, "show", 4) == 0) {
-        Serial.println("=== Weekly Auto-Arm Schedule ===");
-        Serial.printf("Target Mode: %s\n", configGetScheduleMode() == 3 ? "HOME" : "AWAY");
-        const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-        for (int i=0; i<7; i++) {
-            int8_t aH, aM, dH, dM;
-            configGetSchedule(i, aH, aM, dH, dM);
-            Serial.printf("  %s: ", days[i]);
-            if (aH == -1) Serial.print("Arm: OFF   |"); else Serial.printf("Arm: %02d:%02d |", aH, aM);
-            if (dH == -1) Serial.println(" Disarm: OFF"); else Serial.printf(" Disarm: %02d:%02d\n", dH, dM);
-        }
-        Serial.println("================================");
-    }
-    else if (strcmp(start, "zones") == 0) {
-        zonesPrintStatus();
-    }
-    else if (strcmp(start, "inputs") == 0) {
-        uint16_t inputs = ioExpanderReadInputs();
-        Serial.printf("Inputs: 0x%04X (", inputs);
-        for (int i = 15; i >= 0; i--) {
-            Serial.print((inputs >> i) & 1);
-            if (i % 4 == 0 && i > 0) Serial.print(' ');
-        }
-        Serial.println(")");
-    }
-    else if (strcmp(start, "outputs") == 0) {
-        uint16_t outputs = ioExpanderGetOutputs();
-        Serial.printf("Outputs: 0x%04X\n", outputs);
-    }
-    else if (strcmp(start, "network") == 0) {
-        networkPrintStatus();
-    }
-    else if (strcmp(start, "sms") == 0 && arg1) {
-        if (strcmp(arg1, "inbox") == 0) {
-            Serial.println("Fetching router inbox...");
-            SmsMessage msgs[10];
-            int count = smsGatewayPollInbox(msgs, 10);
-            if (count == 0) {
-                Serial.println("  (inbox empty or not reachable)");
-            } else {
-                Serial.printf("=== Router Inbox (%d message%s) ===\n", count, count > 1 ? "s" : "");
-                for (int i = 0; i < count; i++) {
-                    Serial.printf("  [%d] %-16s  %s  \"%s\"\n", i + 1, msgs[i].sender, msgs[i].timestamp, msgs[i].body);
-                }
-                Serial.println("================================");
-            }
-        } else if (strcmp(arg1, "outbox") == 0) {
-            Serial.println("Fetching router outbox...");
-            SmsMessage msgs[10];
-            int count = smsGatewayPollOutbox(msgs, 10);
-            if (count == 0) {
-                Serial.println("  (outbox empty or not reachable)");
-            } else {
-                Serial.printf("=== Router Outbox (%d message%s) ===\n", count, count > 1 ? "s" : "");
-                for (int i = 0; i < count; i++) {
-                    Serial.printf("  [%d] %-16s  %s  \"%s\"\n", i + 1, msgs[i].sender, msgs[i].timestamp, msgs[i].body);
-                }
-                Serial.println("=================================");
-            }
-        } else {
-            Serial.println("Usage: sms <inbox|outbox>");
-        }
-    }
-    else if (strcmp(start, "config") == 0) {
-        configPrint();
-    }
-    else if (strcmp(start, "save") == 0) {
+    if (changed) {
         configSave();
-        Serial.println("[CLI] Configuration saved to NVS");
+        Serial.printf("Zone %d updated.\n", zoneNum);
     }
-    else if (strcmp(start, "load") == 0) {
-        configLoad();
-        Serial.println("[CLI] Configuration loaded from NVS");
+}
+
+static void cmdPhoneCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Command cmd(c);
+    
+    String action = cmd.getArgument("action").getValue();
+    if (action == "list") {
+        int cnt = smsCmdGetPhoneCount();
+        Serial.printf("Configured phones (%d):\n", cnt);
+        for (int i = 0; i < cnt; i++) {
+             Serial.printf("  [%d] %s\n", i, smsCmdGetPhone(i));
+        }
+    } else if (action == "clear") {
+        smsCmdClearPhones();
+        configSave();
+        Serial.println("All phone numbers cleared");
+    } else {
+        String num = cmd.getArgument("number").getValue();
+        if (action == "add" && num.length() > 0) {
+            int idx = smsCmdAddPhone(num.c_str());
+            if (idx >= 0) {
+                 configSave();
+                 Serial.printf("Phone %s added at index %d\n", num.c_str(), idx);
+            }
+            else Serial.println("Error: Phone list full or duplicate");
+        } else if (action == "remove" && num.length() > 0) {
+            if (smsCmdRemovePhone(num.c_str())) {
+                 configSave();
+                 Serial.printf("Phone %s removed\n", num.c_str());
+            }
+            else Serial.println("Error: Phone not found");
+        } else {
+            Serial.println("Usage: phone -action <add|remove|list|clear> [-number <num>] -pin <pin>");
+        }
     }
-    else if (strcmp(start, "reboot") == 0) {
-        Serial.println("[CLI] Rebooting...");
-        delay(500);
-        ESP.restart();
+}
+
+static void cmdTestCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Command cmd(c);
+    String type = cmd.getArgument("type").getValue();
+    
+    if (type == "sms") {
+        String num = cmd.getArgument("target").getValue();
+        String msg = cmd.getArgument("msg").getValue();
+        Serial.printf("Sending test SMS to %s...\n", num.c_str());
+        if (smsGatewaySend(num.c_str(), msg.c_str())) Serial.println("Test SMS sent OK");
+        else Serial.println("Test SMS FAILED");
+    } else if (type == "wa") {
+        String msg = cmd.getArgument("msg").getValue();
+        Serial.println("Sending test WhatsApp...");
+        if (whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), msg.c_str())) Serial.println("Test WhatsApp sent OK");
+        else Serial.println("Test WhatsApp FAILED");
+    } else if (type == "output") {
+        int ch = cmd.getArgument("target").getValue().toInt();
+        if (ch >= 0 && ch <= 15) {
+            uint16_t current = ioExpanderGetOutputs();
+            bool isOn = (current >> ch) & 1;
+            ioExpanderSetOutput(ch, !isOn);
+            Serial.printf("Output %d toggled %s\n", ch, !isOn ? "ON" : "OFF");
+        } else {
+            Serial.println("Invalid output (0-15)");
+        }
+    } else if (type == "input") {
+        inputMonitorActive = true;
+        lastMonitorInputs = 0xFFFF;
+        Serial.println("Live input monitor active. Press any key to stop.");
+    } else {
+        Serial.println("Unknown test type.");
     }
-    else {
-        // --- Critical Commands Require PIN Authentication ---
-        // Any command not handled above requires an inline PIN check.
-        // Format: <command> [args] pin <pin>
+}
 
-        // Restore the null byte we placed when splitting arg1, so that
-        // strstr can see the FULL original command string again.
-        if (arg1 && arg1 > start) {
-            *(arg1 - 1) = ' ';  // undo the '\0' placed at the first space
-        }
-
-        char* pinMarker = strstr(start, " pin ");
-        if (!pinMarker) {
-            Serial.printf("Unknown command or missing PIN. Sensitive commands require 'pin <YOUR_PIN>' at the end.\nType 'help' for options.\n");
-            printPrompt();
-            return;
-        }
-
-        // Extract PIN
-        char* providedPin = pinMarker + 5;
-        while (*providedPin && isspace(*providedPin)) providedPin++;
-        
-        // Truncate the original command string at the " pin " marker
-        *pinMarker = '\0';
-        
-        // Trim the command string again
-        len = strlen(start);
-        while (len > 0 && isspace(start[len - 1])) { start[len - 1] = '\0'; len--; }
-
-        // Re-tokenize: split start into command + arg1 again
-        arg1 = strchr(start, ' ');
-        if (arg1) {
-            *arg1 = '\0';
-            arg1++;
-            while (*arg1 && isspace(*arg1)) arg1++;
-        }
-
-        // Validate PIN
-        if (!alarmValidatePin(providedPin)) {
-            Serial.println("[CLI] ACCESS DENIED: Invalid PIN");
-            printPrompt();
-            return;
-        }
-
-        // --- Authenticated Command Dispatch ---
-        bool configChanged = false;
-
-        if (strcmp(start, "arm") == 0) {
-            if (arg1 && strncmp(arg1, "home", 4) == 0) {
-                alarmArmHome(providedPin); // Validated above, but pass for logging
-            } else {
-                alarmArmAway(providedPin);
-            }
-        }
-        else if (strcmp(start, "disarm") == 0) {
-            alarmDisarm(providedPin);
-        }
-        else if (strcmp(start, "mute") == 0) {
-            alarmMuteSiren();
-        }
-        else if (strcmp(start, "zone") == 0 && arg1) {
-            int zoneNum = atoi(arg1);
-            if (zoneNum < 1 || zoneNum > MAX_ZONES) {
-                Serial.println("Invalid zone number (1-16)");
-            } else {
-                char* subcmd = strchr(arg1, ' ');
-                if (subcmd) {
-                    subcmd++;
-                    while (*subcmd && isspace(*subcmd)) subcmd++;
-                    ZoneConfig* cfg = zonesGetConfig(zoneNum - 1);
-                    if (cfg) {
-                        if (strncmp(subcmd, "name ", 5) == 0) {
-                            strncpy(cfg->name, subcmd + 5, MAX_ZONE_NAME_LEN - 1);
-                            cfg->name[MAX_ZONE_NAME_LEN - 1] = '\0';
-                            Serial.printf("Zone %d name: %s\n", zoneNum, cfg->name);
-                            configChanged = true;
-                        } else if (strncmp(subcmd, "type ", 5) == 0) {
-                            char* typeStr = subcmd + 5;
-                            char* endptr = strchr(typeStr, ' '); // Stop at " pin " which was cut
-                            if (endptr) *endptr = '\0';
-                            
-                            if (strcmp(typeStr, "inst") == 0) { cfg->type = ZONE_INSTANT; configChanged = true; }
-                            else if (strcmp(typeStr, "dly") == 0) { cfg->type = ZONE_DELAYED; configChanged = true; }
-                            else if (strcmp(typeStr, "24h") == 0) { cfg->type = ZONE_24H; configChanged = true; }
-                            else if (strcmp(typeStr, "flw") == 0) { cfg->type = ZONE_FOLLOWER; configChanged = true; }
-                            else { Serial.println("Unknown type: inst|dly|24h|flw"); }
-                            
-                            if (configChanged) Serial.printf("Zone %d type updated\n", zoneNum);
-                        } else if (strncmp(subcmd, "nc", 2) == 0) {
-                            cfg->wiring = ZONE_NC;
-                            Serial.printf("Zone %d set to NC\n", zoneNum);
-                            configChanged = true;
-                        } else if (strncmp(subcmd, "no", 2) == 0) {
-                            cfg->wiring = ZONE_NO;
-                            Serial.printf("Zone %d set to NO\n", zoneNum);
-                            configChanged = true;
-                        } else if (strncmp(subcmd, "enable", 6) == 0) {
-                            cfg->enabled = true;
-                            Serial.printf("Zone %d enabled\n", zoneNum);
-                            configChanged = true;
-                        } else if (strncmp(subcmd, "disable", 7) == 0) {
-                            cfg->enabled = false;
-                            Serial.printf("Zone %d disabled\n", zoneNum);
-                            configChanged = true;
-                        } else if (strncmp(subcmd, "bypass", 6) == 0) {
-                            zonesSetBypassed(zoneNum - 1, true);
-                        } else if (strncmp(subcmd, "unbypass", 8) == 0) {
-                            zonesSetBypassed(zoneNum - 1, false);
-                        } else if (strncmp(subcmd, "text ", 5) == 0) {
-                            smsCmdSetAlarmText(zoneNum - 1, subcmd + 5);
-                            configChanged = true;
-                        } else {
-                            Serial.println("Unknown zone subcommand");
-                        }
-                    }
-                }
-            }
-        }
-        else if (strcmp(start, "wifi") == 0 && arg1) {
-            char* pass = strchr(arg1, ' ');
-            if (pass) {
-                *pass = '\0';
-                pass++;
-                networkSetWifi(arg1, pass);
-                Serial.printf("Wi-Fi set: SSID=%s\n", arg1);
-                configChanged = true;
-            } else {
-                Serial.println("Usage: wifi <ssid> <password> pin <pin>");
-            }
-        }
-        else if (strcmp(start, "router") == 0 && arg1) {
-            // router <ip> <user> <pass>
-            char* userStr = strchr(arg1, ' ');
-            if (userStr) {
-                *userStr = '\0';
-                userStr++;
-                char* passStr = strchr(userStr, ' ');
-                if (passStr) {
-                    *passStr = '\0';
-                    passStr++;
-                    smsGatewaySetCredentials(arg1, userStr, passStr);
-                    Serial.printf("Router set: IP=%s User=%s\n", arg1, userStr);
-                    configChanged = true;
-                } else {
-                    Serial.println("Usage: router <ip> <user> <pass> pin <pin>");
-                }
-            } else {
-                Serial.println("Usage: router <ip> <user> <pass> pin <pin>");
-            }
-        }
-        else if (strcmp(start, "phone") == 0 && arg1) {
-            if (strncmp(arg1, "add ", 4) == 0) {
-                char* num = arg1 + 4;
-                while (*num && isspace(*num)) num++;
-                int idx = smsCmdAddPhone(num);
-                if (idx >= 0) {
-                    Serial.printf("Phone %s added at index %d\n", num, idx);
-                    configChanged = true;
-                } else {
-                    Serial.println("Error: Phone list full or duplicate");
-                }
-            } else if (strncmp(arg1, "remove ", 7) == 0) {
-                char* num = arg1 + 7;
-                while (*num && isspace(*num)) num++;
-                if (smsCmdRemovePhone(num)) {
-                    Serial.printf("Phone %s removed\n", num);
-                    configChanged = true;
-                } else {
-                    Serial.println("Error: Phone not found");
-                }
-            } else if (strcmp(arg1, "list") == 0) {
-                int cnt = smsCmdGetPhoneCount();
-                Serial.printf("Configured phones (%d):\n", cnt);
-                for (int i = 0; i < cnt; i++) {
-                    Serial.printf("  [%d] %s\n", i, smsCmdGetPhone(i));
-                }
-            } else if (strcmp(arg1, "clear") == 0) {
-                smsCmdClearPhones();
-                Serial.println("All phone numbers cleared");
-                configChanged = true;
-            } else {
-                Serial.println("Usage: phone <add|remove|list|clear> [number] pin <pin>");
-            }
-        }
-        else if (strcmp(start, "mode") == 0 && arg1) {
-            int m = atoi(arg1);
-            if (m >= 1 && m <= 3) {
-                smsCmdSetWorkingMode((WorkingMode)m);
-                const char* modeNames[] = {"", "SMS", "Call", "Both"};
-                Serial.printf("Alert mode set to: %s\n", modeNames[m]);
-                configChanged = true;
-            } else {
-                Serial.println("Usage: mode <1=SMS, 2=Call, 3=Both> pin <pin>");
-            }
-        }
-        else if (strcmp(start, "wa") == 0 && arg1) {
-            if (strncmp(arg1, "mode ", 5) == 0) {
-                int m = atoi(arg1 + 5);
-                if (m >= 1 && m <= 3) {
-                    whatsappSetConfig(whatsappGetPhone(), whatsappGetApiKey(), (WhatsAppMode)m);
-                    const char* modeNames[] = {"", "SMS Only", "WhatsApp Only", "Both"};
-                    Serial.printf("WhatsApp mode set to: %s\n", modeNames[m]);
-                    configChanged = true;
-                } else {
-                    Serial.println("Usage: wa mode <1=SMS, 2=WA, 3=Both> pin <pin>");
-                }
-            } else {
-                // wa <phone> <apikey>
-                char* apiKey = strchr(arg1, ' ');
-                if (apiKey) {
-                    *apiKey = '\0';
-                    apiKey++;
-                    whatsappSetConfig(arg1, apiKey, whatsappGetMode());
-                    Serial.printf("WhatsApp credentials set: Phone=%s\n", arg1);
-                    configChanged = true;
-                } else {
-                    Serial.println("Usage: wa <phone> <apikey> pin <pin>");
-                }
-            }
-        }
-        else if (strcmp(start, "delay") == 0 && arg1) {
-            if (strncmp(arg1, "exit ", 5) == 0) {
-                uint16_t sec = atoi(arg1 + 5);
-                alarmSetExitDelay(sec);
-                Serial.printf("Exit delay set to %d seconds\n", sec);
-                configChanged = true;
-            } else if (strncmp(arg1, "entry ", 6) == 0) {
-                uint16_t sec = atoi(arg1 + 6);
-                alarmSetEntryDelay(sec);
-                Serial.printf("Entry delay set to %d seconds\n", sec);
-                configChanged = true;
-            } else {
-                Serial.println("Usage: delay <exit|entry> <seconds> pin <pin>");
-            }
-        }
-        else if (strcmp(start, "siren") == 0 && arg1) {
-            if (strncmp(arg1, "dur ", 4) == 0) {
-                uint16_t sec = atoi(arg1 + 4);
-                alarmSetSirenDuration(sec);
-                Serial.printf("Siren duration set to %d seconds\n", sec);
-                configChanged = true;
-            } else if (strncmp(arg1, "ch ", 3) == 0) {
-                uint8_t ch = atoi(arg1 + 3);
-                if (ch <= 15) {
-                    alarmSetSirenOutput(ch);
-                    Serial.printf("Siren output channel set to %d\n", ch);
-                    configChanged = true;
-                } else {
-                    Serial.println("Invalid channel (0-15)");
-                }
-            } else {
-                Serial.println("Usage: siren <dur|ch> <value> pin <pin>");
-            }
-        }
-        else if (strcmp(start, "test") == 0 && arg1) {
-            if (strncmp(arg1, "sms ", 4) == 0) {
-                char* numStr = arg1 + 4;
-                char* msgStr = strchr(numStr, ' ');
-                if (msgStr) {
-                    *msgStr = '\0';
-                    msgStr++;
-                    Serial.printf("Sending test SMS to %s...\n", numStr);
-                    if (smsGatewaySend(numStr, msgStr)) {
-                        Serial.println("Test SMS sent OK");
-                    } else {
-                        Serial.println("Test SMS FAILED");
-                    }
-                } else {
-                    Serial.println("Usage: test sms <number> <message> pin <pin>");
-                }
-            } else if (strncmp(arg1, "wa ", 3) == 0) {
-                char* msg = arg1 + 3;
-                Serial.println("Sending test WhatsApp...");
-                if (whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), msg)) {
-                    Serial.println("Test WhatsApp sent OK");
-                } else {
-                    Serial.println("Test WhatsApp FAILED");
-                }
-            } else if (strncmp(arg1, "output ", 7) == 0) {
-                int ch = atoi(arg1 + 7);
-                if (ch >= 0 && ch <= 15) {
-                    uint16_t current = ioExpanderGetOutputs();
-                    bool isOn = (current >> ch) & 1;
-                    ioExpanderSetOutput(ch, !isOn);
-                    Serial.printf("Output %d toggled %s\n", ch, !isOn ? "ON" : "OFF");
-                } else {
-                    Serial.println("Invalid output (0-15)");
-                }
-            } else if (strcmp(arg1, "input") == 0) {
-                inputMonitorActive = true;
-                lastMonitorInputs = 0xFFFF;
-                Serial.println("Live input monitor active. Press any key to stop.");
-            } else {
-                Serial.println("Usage: test <sms|wa|output|input> ...");
-            }
-        }
-        else if (strcmp(start, "factory") == 0) {
-            factoryPending = true;
-            factoryStartMs = millis();
-            factoryConfirmPos = 0;
-            memset(factoryConfirm, 0, sizeof(factoryConfirm));
-            Serial.println("\n!!! FACTORY RESET WARNING !!!");
-            Serial.println("This will erase ALL configuration.");
-            Serial.println("Type 'YES' within 10 seconds to confirm:");
-        }
-        else if (strcmp(start, "pin") == 0 && arg1) {
-            alarmSetPin(arg1);
-            configChanged = true;
-        }
-        else if (strcmp(start, "heartbeat") == 0 && arg1) {
-            if (strcmp(arg1, "on") == 0) {
-                configSetHeartbeatEnabled(true);
-                Serial.println("Heartbeat ENABLED. (Pulses only when ARMED)");
-                configChanged = true;
-            } else if (strcmp(arg1, "off") == 0) {
-                configSetHeartbeatEnabled(false);
-                Serial.println("Heartbeat DISABLED.");
-                configChanged = true;
-            } else {
-                Serial.println("Usage: heartbeat <on|off> pin <pin>");
-            }
-        }
-        else if (strcmp(start, "tz") == 0 && arg1) {
-            char* tzStr = arg1;
-            char* endptr = strchr(tzStr, ' '); // Stop at " pin "
-            if (endptr) *endptr = '\0';
-            configSetTimezone(tzStr);
-            setenv("TZ", configGetTimezone(), 1);
-            tzset();
-            Serial.printf("Timezone updated to: %s\n", configGetTimezone());
-            configChanged = true;
-        }
-        else if (strcmp(start, "schedule") == 0 && arg1) {
-            char* subcmd = arg1;
-            char* dayStr = strchr(subcmd, ' ');
-            if (dayStr) {
-                *dayStr = '\0';
-                dayStr++;
-                while (*dayStr && isspace(*dayStr)) dayStr++;
-                
-                if (strcmp(subcmd, "mode") == 0) {
-                    char* endptr = strchr(dayStr, ' ');
-                    if (endptr) *endptr = '\0';
-                    if (strcmp(dayStr, "home") == 0) {
-                        configSetScheduleMode(3); // ALARM_ARMED_HOME
-                        Serial.println("Auto-Arm mode set to HOME");
-                        configChanged = true;
-                    } else if (strcmp(dayStr, "away") == 0) {
-                        configSetScheduleMode(2); // ALARM_ARMED_AWAY
-                        Serial.println("Auto-Arm mode set to AWAY");
-                        configChanged = true;
-                    } else {
-                        Serial.println("Usage: schedule mode <home|away> pin <pin>");
-                    }
-                }
-                else if (strcmp(subcmd, "arm") == 0 || strcmp(subcmd, "disarm") == 0) {
-                    char* timeStr = strchr(dayStr, ' ');
-                    if (timeStr) {
-                        *timeStr = '\0';
-                        timeStr++;
-                        while (*timeStr && isspace(*timeStr)) timeStr++;
-                        char* endptr = strchr(timeStr, ' ');
-                        if (endptr) *endptr = '\0';
-
-                        int dayClass = -1;
-                        if (strcmp(dayStr, "weekdays") == 0) dayClass = 10;
-                        else if (strcmp(dayStr, "weekends") == 0) dayClass = 11;
-                        else if (strcmp(dayStr, "all") == 0) dayClass = 12;
-                        else if (isdigit(dayStr[0])) {
-                            dayClass = atoi(dayStr);
-                            if (dayClass < 0 || dayClass > 6) dayClass = -1;
-                        }
-
-                        int8_t h, m;
-                        if (dayClass != -1 && parseTimeStr(timeStr, h, m)) {
-                            applySchedule(strcmp(subcmd, "arm") == 0, dayClass, h, m);
-                            Serial.println("Schedule updated.");
-                            configChanged = true;
-                        } else {
-                            Serial.println("Invalid day or time. Format: <0-6|weekdays|weekends|all> <HH:MM|off>");
-                        }
-                    } else {
-                        Serial.println("Usage: schedule <arm|disarm> <day> <HH:MM|off> pin <pin>");
-                    }
-                } else {
-                    Serial.println("Unknown schedule command");
-                }
-            } else {
-                Serial.println("Usage: schedule <arm|disarm|mode> ...");
-            }
-        }
+static void cmdSmsCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Command cmd(c);
+    String action = cmd.getArgument("box").getValue();
+    
+    if (action == "inbox") {
+        Serial.println("Fetching router inbox...");
+        SmsMessage msgs[10];
+        int count = smsGatewayPollInbox(msgs, 10);
+        if (count == 0) Serial.println("  (inbox empty or not reachable)");
         else {
-            Serial.printf("Unknown command: '%s'. Type 'help' for options.\n", start);
+             Serial.printf("=== Router Inbox (%d message%s) ===\n", count, count > 1 ? "s" : "");
+             for (int i = 0; i < count; i++) {
+                 Serial.printf("  [%d] %-16s  %s  \"%s\"\n", i + 1, msgs[i].sender, msgs[i].timestamp, msgs[i].body);
+             }
+             Serial.println("================================");
         }
-
-        if (configChanged) {
-            configSave();
-            Serial.println("[CLI] Configuration saved to NVS");
+    } else if (action == "outbox") {
+        Serial.println("Fetching router outbox...");
+        SmsMessage msgs[10];
+        int count = smsGatewayPollOutbox(msgs, 10);
+        if (count == 0) Serial.println("  (outbox empty or not reachable)");
+        else {
+             Serial.printf("=== Router Outbox (%d message%s) ===\n", count, count > 1 ? "s" : "");
+             for (int i = 0; i < count; i++) {
+                 Serial.printf("  [%d] %-16s  %s  \"%s\"\n", i + 1, msgs[i].sender, msgs[i].timestamp, msgs[i].body);
+             }
+             Serial.println("=================================");
         }
+    } else {
+        Serial.println("Unknown sms box. Use inbox or outbox.");
     }
+}
 
-    printPrompt();
+static void cmdWifiCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Command cmd(c);
+    networkSetWifi(cmd.getArgument("ssid").getValue().c_str(), cmd.getArgument("pass").getValue().c_str());
+    configSave();
+    Serial.printf("Wi-Fi set: SSID=%s\n", cmd.getArgument("ssid").getValue().c_str());
+}
+
+static void cmdRouterCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Command cmd(c);
+    smsGatewaySetCredentials(cmd.getArgument("ip").getValue().c_str(), cmd.getArgument("user").getValue().c_str(), cmd.getArgument("pass").getValue().c_str());
+    configSave();
+    Serial.printf("Router set: IP=%s User=%s\n", cmd.getArgument("ip").getValue().c_str(), cmd.getArgument("user").getValue().c_str());
+}
+
+// Global generic error callback for SimpleCLI
+static void errorCallback(cmd_error* e) {
+    CommandError cmdError(e);
+    Serial.print("ERROR: ");
+    Serial.println(cmdError.toString());
+    if (cmdError.hasCommand()) {
+        Serial.print("Did you mean \"");
+        Serial.print(cmdError.getCommand().toString());
+        Serial.println("\"?");
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Initialization
 // ---------------------------------------------------------------------------
 
-void cliInit()
-{
-    linePos = 0;
-    memset(lineBuffer, 0, sizeof(lineBuffer));
+void cliInit() {
+    cli.setOnError(errorCallback);
+
+    // Public Commands
+    cli.addCommand("help", cmdHelpCallback);
+    cli.addCommand("status", cmdStatusCallback);
+    cli.addCommand("zones", cmdZonesCallback);
+    cli.addCommand("inputs", cmdInputsCallback);
+    cli.addCommand("outputs", cmdOutputsCallback);
+    cli.addCommand("network", cmdNetworkCallback);
+    cli.addCommand("time", cmdTimeCallback);
+    cli.addCommand("config", cmdConfigCallback);
+
+    // Authenticated Commands (Require -pin)
+    Command cmdArm = cli.addCommand("arm", cmdArmCallback);
+    cmdArm.addArgument("pin", "");
+    cmdArm.addFlagArgument("home");
+
+    Command cmdDisarm = cli.addCommand("disarm", cmdDisarmCallback);
+    cmdDisarm.addArgument("pin", "");
+
+    Command cmdMute = cli.addCommand("mute", cmdMuteCallback);
+    cmdMute.addArgument("pin", "");
+
+    Command cmdReboot = cli.addCommand("reboot", cmdRebootCallback);
+    cmdReboot.addArgument("pin", "");
+
+    Command cmdFactory = cli.addCommand("factory", cmdFactoryCallback);
+    cmdFactory.addArgument("pin", "");
+
+    Command cmdZone = cli.addCommand("zone", cmdZoneUpdateCallback);
+    cmdZone.addArgument("id", "");
+    cmdZone.addArgument("name", "");
+    cmdZone.addArgument("type", "");
+    cmdZone.addArgument("wiring", "");
+    cmdZone.addArgument("state", "");
+    cmdZone.addArgument("mode", "");
+    cmdZone.addArgument("text", "");
+    cmdZone.addArgument("pin", "");
+
+    Command cmdPhone = cli.addCommand("phone", cmdPhoneCallback);
+    cmdPhone.addArgument("action", "");
+    cmdPhone.addArgument("number", "");
+    cmdPhone.addArgument("pin", "");
+
+    Command cmdTest = cli.addCommand("test", cmdTestCallback);
+    cmdTest.addArgument("type", "");   // sms, wa, output, input
+    cmdTest.addArgument("target", ""); // number or ch
+    cmdTest.addArgument("msg", "");
+    cmdTest.addArgument("pin", "");
+
+    Command cmdSms = cli.addCommand("sms", cmdSmsCallback);
+    cmdSms.addArgument("box", "");
+    cmdSms.addArgument("pin", "");
+    
+    Command cmdWifi = cli.addCommand("wifi", cmdWifiCallback);
+    cmdWifi.addArgument("ssid", "");
+    cmdWifi.addArgument("pass", "");
+    cmdWifi.addArgument("pin", "");
+
+    Command cmdRouter = cli.addCommand("router", cmdRouterCallback);
+    cmdRouter.addArgument("ip", "");
+    cmdRouter.addArgument("user", "");
+    cmdRouter.addArgument("pass", "");
+    cmdRouter.addArgument("pin", "");
+
     Serial.println();
-    Serial.println("================================");
-    Serial.printf("  SF_Alarm v%s\n", FW_VERSION_STR);
-    Serial.println("  KC868-A16 v1.6 Alarm Controller");
-    Serial.println("  Type 'help' for commands");
-    Serial.println("================================");
+    Serial.println("SF_Alarm Serial Interface Initialized");
+    Serial.println("Type 'help' for command list.");
     printPrompt();
 }
 
-void cliUpdate()
-{
-    // --- Non-blocking input monitor ---
+// ---------------------------------------------------------------------------
+// Task Loop
+// ---------------------------------------------------------------------------
+
+void cliUpdate() {
+    // --- Non-blocking Live Input Monitor ---
     if (inputMonitorActive) {
         if (Serial.available()) {
-            while (Serial.available()) Serial.read(); // Flush
+            Serial.read(); // Consume keypress
+            while(Serial.available()) Serial.read(); // clear buffer
             inputMonitorActive = false;
-            Serial.println("Monitor stopped");
+            Serial.println("\nLive input monitor stopped.");
             printPrompt();
             return;
         }
-        // Sample inputs (called from main loop, so doesn't block)
         uint16_t inputs = ioExpanderReadInputs();
         if (inputs != lastMonitorInputs) {
             Serial.printf("  Inputs: 0x%04X |", inputs);
@@ -710,7 +436,7 @@ void cliUpdate()
             Serial.println();
             lastMonitorInputs = inputs;
         }
-        return; // Don't process normal CLI while monitoring
+        return; 
     }
 
     // --- Non-blocking factory reset confirmation ---
@@ -735,38 +461,31 @@ void cliUpdate()
                 Serial.print(c);
             }
         }
-        return; // Don't process normal CLI while confirming
+        return; 
     }
 
     // --- Normal CLI processing ---
+    static String inputStr = "";
     while (Serial.available()) {
-        char c = Serial.read();
-
-        if (c == '\r') continue;  // Ignore CR
+        char c = (char)Serial.read();
+        
+        if (c == '\r') continue;
 
         if (c == '\n') {
-            Serial.println();  // Echo newline
-            lineBuffer[linePos] = '\0';
-            processLine(lineBuffer);
-            linePos = 0;
-            memset(lineBuffer, 0, sizeof(lineBuffer));
-            continue;
-        }
-
-        // Handle backspace
-        if (c == '\b' || c == 127) {
-            if (linePos > 0) {
-                linePos--;
-                lineBuffer[linePos] = '\0';
-                Serial.print("\b \b");
+            Serial.println();
+            if (inputStr.length() > 0) {
+                cli.parse(inputStr); // Pass to SimpleCLI
+                inputStr = "";
             }
-            continue;
-        }
-
-        // Echo and buffer printable characters
-        if (linePos < CLI_MAX_LINE_LEN - 1 && isPrintable(c)) {
-            lineBuffer[linePos++] = c;
-            Serial.print(c);
+            printPrompt();
+        } else if (c == '\b' || c == 127) {
+             if (inputStr.length() > 0) {
+                  inputStr.remove(inputStr.length() - 1);
+                  Serial.print("\b \b");
+             }
+        } else if (isPrintable(c)) {
+             inputStr += c;
+             Serial.print(c);
         }
     }
 }
