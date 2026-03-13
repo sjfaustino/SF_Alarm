@@ -39,6 +39,7 @@ static char recoveryText[80] = "SF_Alarm: All zones restored to normal.";
 //
 // Recovery Text (GA09):
 static WorkingMode currentMode = MODE_SMS;
+static uint32_t lastReportMs = 0;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -898,4 +899,30 @@ void smsCmdSetWorkingMode(WorkingMode mode)
 {
     currentMode = mode;
     Serial.printf("[CMD] Working mode: %d\n", (int)mode);
+}
+void smsCmdUpdate()
+{
+    uint32_t now = millis();
+    if (reportIntervalMin > 0) {
+        if (lastReportMs == 0) lastReportMs = now;
+        if (now - lastReportMs >= (uint32_t)reportIntervalMin * 60 * 1000) {
+            lastReportMs = now;
+            char buf[160];
+            uint16_t triggered = zonesGetTriggeredMask();
+            int trigCount = 0;
+            for (int j = 0; j < 16; j++) {
+                if (triggered & (1 << j)) trigCount++;
+            }
+
+            snprintf(buf, sizeof(buf),
+                     "SF_Alarm PERIODIC: [%s] Trig:%d Mask:%04X | Clear:%s",
+                     alarmGetStateStr(),
+                     trigCount,
+                     alarmGetActiveAlarmMask(),
+                     zonesAllClear() ? "YES" : "NO");
+            alarmBroadcast(buf);
+        }
+    } else {
+        lastReportMs = 0;
+    }
 }

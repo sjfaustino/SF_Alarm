@@ -5,6 +5,8 @@
 #include <WiFi.h>
 #include <mbedtls/sha256.h>
 #include <esp_task_wdt.h>
+#include "sms_commands.h"
+#include "network.h"
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -634,6 +636,31 @@ bool smsGatewayDeleteMessage(int messageId)
 
     setError("Delete HTTP error: %d", httpCode);
     return false;
+}
+
+void smsGatewayUpdate()
+{
+    if (!networkIsConnected()) return;
+    
+    // Auto-login logic
+    if (!loggedIn) {
+        smsGatewayLogin();
+        return;
+    }
+
+    // Poll for new messages
+    SmsMessage msgs[5];
+    int count = smsGatewayPollMessages(msgs, 5, "rec");
+
+    for (int i = 0; i < count; i++) {
+        // Process the command via the command module
+        smsCmdProcess(msgs[i].sender, msgs[i].body);
+
+        // Delete from router to keep inbox clean
+        smsGatewayDeleteMessage(msgs[i].id);
+        
+        esp_task_wdt_reset(); // Yield to watchdog after potentially slow delete
+    }
 }
 
 // ---------------------------------------------------------------------------

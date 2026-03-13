@@ -35,9 +35,18 @@ enum AlarmEvent : uint8_t {
 };
 
 // ---------------------------------------------------------------------------
+// Alarm Event Data
+// ---------------------------------------------------------------------------
+struct AlarmEventInfo {
+    AlarmEvent  event;
+    int8_t      zoneId;  // 0-15, or -1 if not applicable
+    const char* details; // Context string (e.g. zone name)
+};
+
+// ---------------------------------------------------------------------------
 // Callback for alarm events (used by SMS notifier)
 // ---------------------------------------------------------------------------
-typedef void (*AlarmEventCallback)(AlarmEvent event, const char* details);
+typedef void (*AlarmEventCallback)(const AlarmEventInfo& info);
 
 // ---------------------------------------------------------------------------
 // Public API

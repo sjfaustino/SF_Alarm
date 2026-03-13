@@ -7,7 +7,7 @@
 // Module State
 // ---------------------------------------------------------------------------
 static AlarmState       currentState     = ALARM_DISARMED;
-static AlarmState       previousArmedState = ALARM_DISARMED;
+static AlarmState       returnState      = ALARM_DISARMED; // State to return to after alarm timeout
 static AlarmEventCallback eventCallback  = nullptr;
 
 static char     alarmPin[MAX_PIN_LEN]    = "1234";  // Default PIN
@@ -42,10 +42,14 @@ static const uint32_t LOCKOUT_DURATION_MS = 300000; // 5 minutes
 // Helpers
 // ---------------------------------------------------------------------------
 
-static void fireEvent(AlarmEvent event, const char* details = "")
+static void fireEvent(AlarmEvent event, int8_t zoneId = -1, const char* details = "")
 {
     if (eventCallback) {
-        eventCallback(event, details);
+        AlarmEventInfo info;
+        info.event = event;
+        info.zoneId = zoneId;
+        info.details = details;
+        eventCallback(info);
     }
 }
 
@@ -68,20 +72,23 @@ static bool pinEquals(const char* a, const char* b)
     return diff == 0;
 }
 
-static void sirenOn()
+static void sirenOn(int8_t zoneId, const char* name)
 {
+    char details[64];
+    snprintf(details, sizeof(details), "Zone %d (%s)", zoneId + 1, name);
+
     if (!sirenActive) {
         sirenActive  = true;
         sirenMuted   = false;
         // Strict Noise Ordinance Compliance: Only set start timer IF this is a new alarm cycle
         if (firstTriggerMs == 0) {
             firstTriggerMs = millis();
-            Serial.println("[ALARM] Strict siren duration started (Noise Ordinance compliant)");
+            Serial.println("[ALARM] Strict siren duration started");
         }
-        sirenStartMs = millis(); // Still track individual start for internal state
+        sirenStartMs = millis(); 
         ioExpanderSetOutput(sirenOutputChannel, true);
         Serial.println("[ALARM] Siren ON");
-        fireEvent(EVT_SIREN_ON);
+        fireEvent(EVT_SIREN_ON, zoneId, details);
     }
 }
 
@@ -92,7 +99,7 @@ static void sirenOff()
         firstTriggerMs = 0; // Reset strict timer for next cycle
         ioExpanderSetOutput(sirenOutputChannel, false);
         Serial.println("[ALARM] Siren OFF");
-        fireEvent(EVT_SIREN_OFF);
+        fireEvent(EVT_SIREN_OFF, -1, "Manual or Timeout");
     }
 }
 
@@ -139,11 +146,11 @@ static void setState(AlarmState newState)
 {
     if (currentState == newState) return;
 
-    // The Zombie Alarm Fix: Capture steady states so we can return to them
+    // Capture return state when transitioning out of stable armed/disarmed states
     if (currentState == ALARM_DISARMED || 
         currentState == ALARM_ARMED_AWAY || 
         currentState == ALARM_ARMED_HOME) {
-        previousArmedState = currentState;
+        returnState = currentState;
     }
 
     const char* oldStr = alarmGetStateStr();
@@ -165,17 +172,15 @@ static void onZoneEvent(uint8_t zoneIndex, ZoneState newState)
 
     if (newState == ZONE_TRIGGERED || newState == ZONE_TAMPER) {
         if (newState == ZONE_TAMPER) {
-            fireEvent(EVT_TAMPER, details);
-            // Escalate immediately to alarm regardless of armed state
+            fireEvent(EVT_TAMPER, zoneIndex, details);
             triggeringZone = zoneIndex;
             setState(ALARM_TRIGGERED);
-            sirenOn();
-            snprintf(details, sizeof(details), "TAMPER DETECTED: Zone %d (%s)", zoneIndex + 1, info->config.name);
-            fireEvent(EVT_ALARM_TRIGGERED, details);
+            sirenOn(zoneIndex, info->config.name);
+            fireEvent(EVT_ALARM_TRIGGERED, zoneIndex, "Tamper Escallation");
             return;
         }
 
-        fireEvent(EVT_ZONE_TRIGGERED, details);
+        fireEvent(EVT_ZONE_TRIGGERED, zoneIndex, details);
 
         switch (currentState) {
             case ALARM_DISARMED:
@@ -194,13 +199,10 @@ static void onZoneEvent(uint8_t zoneIndex, ZoneState newState)
             case ALARM_ARMED_HOME:
                 // Check zone type
                 if (info->config.type == ZONE_DELAYED) {
-                    // Start entry delay
                     delayStartMs   = millis();
                     triggeringZone = zoneIndex;
                     setState(ALARM_ENTRY_DELAY);
-                    snprintf(details, sizeof(details),
-                             "Entry delay — Zone %d (%s)", zoneIndex + 1, info->config.name);
-                    fireEvent(EVT_ENTRY_DELAY, details);
+                    fireEvent(EVT_ENTRY_DELAY, zoneIndex, "Entry delay started");
                 } else if (info->config.type == ZONE_FOLLOWER) {
                     // Follower: instant unless entry delay already running
                     if (currentState == ALARM_ENTRY_DELAY) {
@@ -208,32 +210,25 @@ static void onZoneEvent(uint8_t zoneIndex, ZoneState newState)
                     } else {
                         triggeringZone = zoneIndex;
                         setState(ALARM_TRIGGERED);
-                        sirenOn();
-                        snprintf(details, sizeof(details),
-                                 "Zone %d (%s) ALARM!", zoneIndex + 1, info->config.name);
-                        fireEvent(EVT_ALARM_TRIGGERED, details);
+                        sirenOn(zoneIndex, info->config.name);
+                        fireEvent(EVT_ALARM_TRIGGERED, zoneIndex, "Follower Alarm");
                     }
                 } else {
                     // Instant or 24H — immediate alarm
                     triggeringZone = zoneIndex;
                     setState(ALARM_TRIGGERED);
-                    sirenOn();
-                    snprintf(details, sizeof(details),
-                             "Zone %d (%s) ALARM!", zoneIndex + 1, info->config.name);
-                    fireEvent(EVT_ALARM_TRIGGERED, details);
+                    sirenOn(zoneIndex, info->config.name);
+                    fireEvent(EVT_ALARM_TRIGGERED, zoneIndex, "Instant Alarm");
                 }
                 break;
 
             case ALARM_ENTRY_DELAY:
                 // Additional zone triggered during entry delay
                 if (info->config.type == ZONE_INSTANT || info->config.type == ZONE_24H) {
-                    // Instant zone overrides entry delay
                     triggeringZone = zoneIndex;
                     setState(ALARM_TRIGGERED);
-                    sirenOn();
-                    snprintf(details, sizeof(details),
-                             "Zone %d (%s) ALARM! (during entry delay)", zoneIndex + 1, info->config.name);
-                    fireEvent(EVT_ALARM_TRIGGERED, details);
+                    sirenOn(zoneIndex, info->config.name);
+                    fireEvent(EVT_ALARM_TRIGGERED, zoneIndex, "Instant Alarm during delay");
                 }
                 break;
 
@@ -241,11 +236,7 @@ static void onZoneEvent(uint8_t zoneIndex, ZoneState newState)
                 // Escalation: A NEW zone triggered while the alarm is already sounding
                 activeAlarmMask |= (1 << zoneIndex);
                 if (zoneIndex != triggeringZone) {
-                    // DO NOT call sirenOn() here; it would reset the duration timer (Noise exploit)
-                    // Just announce the escalation
-                    snprintf(details, sizeof(details),
-                             "Escalation: Zone %d (%s) ALARM!", zoneIndex + 1, info->config.name);
-                    fireEvent(EVT_ALARM_TRIGGERED, details);
+                    fireEvent(EVT_ALARM_TRIGGERED, zoneIndex, "Escalation");
                 }
                 break;
 
@@ -289,21 +280,18 @@ void alarmUpdate()
             if (elapsed >= (uint32_t)exitDelaySec * 1000) {
                 // Exit delay complete — verify doors actually closed before arming
                 if (!zonesAllClear()) {
-                    // Update the steady-state tracker so the siren fallback doesn't escalate to AWAY mode
-                    previousArmedState = (pendingArmMode == ARM_PENDING_HOME) ? ALARM_ARMED_HOME : ALARM_ARMED_AWAY;
-                    
                     setState(ALARM_TRIGGERED);
-                    sirenOn();
-                    fireEvent(EVT_ALARM_TRIGGERED, "Exit delay expired with zones open — ALARM!");
+                    sirenOn(-1, "Exit Failure");
+                    fireEvent(EVT_ALARM_TRIGGERED, -1, "Zones open at arming");
                     triggeringZone = 0xFF; 
                 } else {
                     // System is armed normally
                     if (pendingArmMode == ARM_PENDING_HOME) {
                         setState(ALARM_ARMED_HOME);
-                        fireEvent(EVT_ARMED_HOME, "System armed (HOME)");
+                        fireEvent(EVT_ARMED_HOME, -1, "Success");
                     } else {
                         setState(ALARM_ARMED_AWAY);
-                        fireEvent(EVT_ARMED_AWAY, "System armed (AWAY)");
+                        fireEvent(EVT_ARMED_AWAY, -1, "Success");
                     }
                     triggeringZone = 0xFF;
                 }
@@ -316,8 +304,8 @@ void alarmUpdate()
             if (elapsed >= (uint32_t)entryDelaySec * 1000) {
                 // Entry delay expired — trigger alarm
                 setState(ALARM_TRIGGERED);
-                sirenOn();
-                fireEvent(EVT_ALARM_TRIGGERED, "Entry delay expired — ALARM!");
+                sirenOn(-1, "Delay Timeout");
+                fireEvent(EVT_ALARM_TRIGGERED, -1, "Entry delay expired");
             }
             break;
         }
@@ -332,15 +320,15 @@ void alarmUpdate()
                     activeAlarmMask = 0;
                     triggeringZone = 0xFF;
                     
-                    // The Zombie Alarm Fix: Re-arm system gracefully
-                    setState(previousArmedState);
+                    // Re-arm system gracefully
+                    setState(returnState);
                     
-                    if (previousArmedState == ALARM_ARMED_AWAY) {
-                        fireEvent(EVT_ARMED_AWAY, "System re-armed (AWAY) after alarm timeout");
-                    } else if (previousArmedState == ALARM_ARMED_HOME) {
-                        fireEvent(EVT_ARMED_HOME, "System re-armed (HOME) after alarm timeout");
+                    if (returnState == ALARM_ARMED_AWAY) {
+                        fireEvent(EVT_ARMED_AWAY, -1, "Auto-Restore");
+                    } else if (returnState == ALARM_ARMED_HOME) {
+                        fireEvent(EVT_ARMED_HOME, -1, "Auto-Restore");
                     } else {
-                        fireEvent(EVT_DISARMED, "System disarmed after alarm timeout");
+                        fireEvent(EVT_DISARMED, -1, "Auto-Restore");
                     }
                 }
             }
@@ -369,7 +357,7 @@ bool alarmArmAway(const char* pin)
     delayStartMs    = millis();
     pendingArmMode  = ARM_PENDING_AWAY;
     setState(ALARM_EXIT_DELAY);
-    fireEvent(EVT_EXIT_DELAY, "Arming AWAY — exit delay started");
+    fireEvent(EVT_EXIT_DELAY, -1, "Arming AWAY");
     Serial.printf("[ALARM] Exit delay: %d seconds\n", exitDelaySec);
     return true;
 }
@@ -390,7 +378,7 @@ bool alarmArmHome(const char* pin)
     delayStartMs    = millis();
     pendingArmMode  = ARM_PENDING_HOME;
     setState(ALARM_EXIT_DELAY);
-    fireEvent(EVT_EXIT_DELAY, "Arming HOME — exit delay started");
+    fireEvent(EVT_EXIT_DELAY, -1, "Arming HOME");
     Serial.printf("[ALARM] Exit delay: %d seconds\n", exitDelaySec);
     return true;
 }
@@ -405,7 +393,7 @@ bool alarmDisarm(const char* pin)
     sirenOff();
     setState(ALARM_DISARMED);
     triggeringZone = 0xFF;
-    fireEvent(EVT_DISARMED, "System disarmed");
+    fireEvent(EVT_DISARMED, -1, "Manual Disarm");
     return true;
 }
 
@@ -415,7 +403,7 @@ void alarmMuteSiren()
         sirenMuted = true;
         ioExpanderSetOutput(sirenOutputChannel, false);
         Serial.println("[ALARM] Siren MUTED (alarm still active)");
-        fireEvent(EVT_SIREN_OFF, "Siren muted");
+        fireEvent(EVT_SIREN_OFF, -1, "Manual Mute");
     }
 }
 

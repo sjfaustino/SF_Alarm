@@ -47,37 +47,22 @@ static void onvifTask(void* pvParameters);
 // ---------------------------------------------------------------------------
 
 static String getTimestamp() {
-    // Use 64-bit hardware timer to prevent 49.7-day rollover cryptographic replay attack lockouts
-    // Base: 2026-03-08T00:00:00Z epoch = 1772956800
-    uint64_t uptimeSec = esp_timer_get_time() / 1000000ULL;
-    uint64_t epoch = 1772956800ULL + uptimeSec;
+    // We use the ESP32 internal SNTP/RTC time if synchronized, 
+    // otherwise we fallback to the hardcoded base + uptime logic for a valid ISO string.
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    gmtime_r(&now, &timeinfo);
     
-    // Convert epoch to ISO 8601 (simplified — good enough for digest nonce)
-    uint64_t days = epoch / 86400ULL;
-    uint64_t rem  = epoch % 86400ULL;
-    int hours = rem / 3600ULL;
-    int mins  = (rem % 3600ULL) / 60ULL;
-    int secs  = rem % 60ULL;
-    
-    // Approximate year/month/day from days since epoch 1970
-    int year = 1970;
-    while (true) {
-        int daysInYear = (year % 4 == 0) ? 366 : 365;
-        if ((int)days < daysInYear) break;
-        days -= daysInYear;
-        year++;
+    // If the year is very low (e.g. 1970), it means NTP hasn't synced yet.
+    // We apply our offset 1772956800ULL (2026-03-08) to make it "legal" for camera digest auth.
+    if (timeinfo.tm_year < (2020 - 1900)) {
+        now += 1772956800ULL;
+        gmtime_r(&now, &timeinfo);
     }
-    int monthDays[] = {31,28+(year%4==0?1:0),31,30,31,30,31,31,30,31,30,31};
-    int month = 1;
-    for (int i = 0; i < 12; i++) {
-        if ((int)days < monthDays[i]) break;
-        days -= monthDays[i];
-        month++;
-    }
-    int day = days + 1;
-    
+
     char buf[32];
-    snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ", year, month, day, hours, mins, secs);
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
     return String(buf);
 }
 

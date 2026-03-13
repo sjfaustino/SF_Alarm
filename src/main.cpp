@@ -15,12 +15,11 @@
 #include <esp_task_wdt.h>
 
 // ---------------------------------------------------------------------------
-// Timing
+// Module State
 // ---------------------------------------------------------------------------
-static uint32_t lastInputScan   = 0;
-static uint32_t lastSmsPoll     = 0;
-static uint32_t lastReportMs    = 0;
-static uint32_t lastMqttSync    = 0;
+static uint32_t lastI2cPoll  = 0;
+static uint32_t lastMqttStateSync = 0;
+// lastSmsPoll and lastReportMs were moved to their respective modules
 static bool     lastAllClear    = true;
 
 // Alert Queue for non-blocking broadcasts
@@ -39,28 +38,22 @@ static const uint32_t ALERT_PROCESS_INTERVAL_MS = 1000; // Small gap between ale
 // Alarm Event Handler — sends SMS alerts
 // ---------------------------------------------------------------------------
 static uint32_t lastZoneAlertMs[16] = {0};
-
-static void onAlarmEvent(AlarmEvent event, const char* details)
+static void onAlarmEvent(const AlarmEventInfo& info)
 {
     char msg[160];
+    const char* details = info.details ? info.details : "";
 
-    switch (event) {
+    switch (info.event) {
         case EVT_ALARM_TRIGGERED:
-            // STORM THROTTLING: Prevent flooding SMS for the same window kick
-            if (strstr(details, "Zone ")) {
-                int zId = atoi(details + 5) - 1;
-                if (zId >= 0 && zId < 16) {
-                    if (millis() - lastZoneAlertMs[zId] < 60000) {
-                        Serial.printf("[MAIN] Suppressing redundant storm alert for Zone %d\n", zId + 1);
-                        return;
-                    }
-                    lastZoneAlertMs[zId] = millis();
+            // STORM THROTTLING: Use structured Zone ID for robust rate-limiting
+            if (info.zoneId >= 0 && info.zoneId < 16) {
+                if (millis() - lastZoneAlertMs[info.zoneId] < 60000) {
+                    Serial.printf("[MAIN] Suppressing redundant storm alert for Zone %d\n", info.zoneId + 1);
+                    return;
                 }
+                lastZoneAlertMs[info.zoneId] = millis();
             }
             snprintf(msg, sizeof(msg), "SF_Alarm ALERT: %s", details);
-            if (strlen("SF_Alarm ALERT: ") + strlen(details) >= sizeof(msg)) {
-                Serial.println("[MAIN] WARNING: Alarm message truncated for queue");
-            }
             alarmBroadcast(msg);
             break;
 
@@ -101,14 +94,15 @@ static void onAlarmEvent(AlarmEvent event, const char* details)
         case EVT_SIREN_OFF:
             Serial.printf("[MAIN] Siren: %s\n", details);
             break;
+        
+        default: break;
     }
 
-    // Sync state to MQTT for any alarm event
+    // Task-specific syncs
     mqttSyncState();
     
-    // Publish specific event to a human-readable topic
     char eventMsg[128];
-    snprintf(eventMsg, sizeof(eventMsg), "EVENT: %d | %s", (int)event, details ? details : "");
+    snprintf(eventMsg, sizeof(eventMsg), "EVENT:%d Z:%d | %s", (int)info.event, info.zoneId, details);
     mqttPublish("SF_Alarm/events", eventMsg);
 }
 
@@ -197,82 +191,28 @@ static void processAlertQueue()
 // Background Network Worker Task (SMS Polling & Sending)
 // ---------------------------------------------------------------------------
 
-// Forward declaration
-static void pollSmsInbox();
-
 static void netWorkerTask(void* pvParameters)
 {
     esp_task_wdt_add(NULL); // Register shadow core thread to hardware watchdog
     while (true) {
-        uint32_t now = millis();
-        
         // 1. Process Outbound Alerts (Highest Priority)
         processAlertQueue(); // Can block for HTTP POSTs
         esp_task_wdt_reset();
 
         // 2. Poll SMS Inbox (Secondary Priority)
         // SOS Mode: Skip polling entirely if there are pending alerts to send
-        if (now - lastSmsPoll >= SMS_POLL_INTERVAL_MS) {
-            lastSmsPoll = now;
-            if (uxQueueMessagesWaiting(rtosAlertQueue) == 0) {
-                pollSmsInbox(); // Can block for 10s if router is down
-                esp_task_wdt_reset();
-            } else {
-                Serial.println("[MAIN] SOS MODE: Skipping SMS poll to prioritize outgoing alerts");
-            }
+        if (uxQueueMessagesWaiting(rtosAlertQueue) == 0) {
+            smsGatewayUpdate(); // Inside: network checks, login, polling, cmd execution, deletion
+            esp_task_wdt_reset();
+        } else {
+            Serial.println("[MAIN] SOS MODE: Skipping network poll to prioritize outgoing alerts");
         }
 
         // 3. Periodic Status Report (GA09)
-        uint16_t reportInt = smsCmdGetReportInterval();
-        if (reportInt > 0) {
-            if (lastReportMs == 0) lastReportMs = now;
-            if (now - lastReportMs >= (uint32_t)reportInt * 60 * 1000) {
-                lastReportMs = now;
-                char buf[160];
-                uint16_t triggered = zonesGetTriggeredMask();
-                int trigCount = 0;
-                for (int j = 0; j < 16; j++) {
-                    if (triggered & (1 << j)) trigCount++;
-                }
-
-                snprintf(buf, sizeof(buf),
-                         "SF_Alarm PERIODIC: [%s] Trig:%d Mask:%04X | Clear:%s",
-                         alarmGetStateStr(),
-                         trigCount,
-                         alarmGetActiveAlarmMask(),
-                         zonesAllClear() ? "YES" : "NO");
-                alarmBroadcast(buf);
-            }
-        } else {
-            lastReportMs = 0;
-        }
-
+        smsCmdUpdate();
+        
         esp_task_wdt_reset(); // Final pet for the watchdog
-        vTaskDelay(pdMS_TO_TICKS(100)); // Sleep to yield
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SMS Inbox Processing
-// ---------------------------------------------------------------------------
-
-static void pollSmsInbox()
-{
-    if (!networkIsConnected()) return;
-    if (!smsGatewayIsLoggedIn()) {
-        smsGatewayLogin();
-        return;  // Wait for next cycle
-    }
-
-    SmsMessage msgs[5];
-    int count = smsGatewayPollInbox(msgs, 5);
-
-    for (int i = 0; i < count; i++) {
-        // Process the SMS command
-        smsCmdProcess(msgs[i].sender, msgs[i].body);
-
-        // Delete from router inbox after processing
-        smsGatewayDeleteMessage(msgs[i].id);
+        vTaskDelay(pdMS_TO_TICKS(NET_WORKER_YIELD_MS)); // Sleep to yield
     }
 }
 

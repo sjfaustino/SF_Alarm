@@ -59,11 +59,14 @@
 #define DEFAULT_ENTRY_DELAY_S   15
 #define DEFAULT_SIREN_DURATION_S 180    // 3 minutes
 
-// SMS polling interval
-#define SMS_POLL_INTERVAL_MS     5000   // 5 seconds
+// Network and Polling Intervals
+#define SMS_POLL_INTERVAL_MS        10000
+#define MQTT_SYNC_INTERVAL_MS       30000
+#define NET_WORKER_YIELD_MS         100
+#define I2C_POLL_INTERVAL_MS        20
 
-// Periodic status report (GA09: %#Txx)
-#define DEFAULT_REPORT_INTERVAL_MIN  0       // 0 = disabled
+// State recovery
+#define DEFAULT_REPORT_INTERVAL_MIN 0    // 0 = disabled
 #define MAX_REPORT_INTERVAL_MIN      9999
 
 // Alert queue

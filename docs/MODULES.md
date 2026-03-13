@@ -64,8 +64,10 @@ parameters, and compile-time limits.
 | `DEFAULT_EXIT_DELAY_S`    | 30        | Default exit delay (seconds)          |
 | `DEFAULT_ENTRY_DELAY_S`   | 15        | Default entry delay (seconds)         |
 | `DEFAULT_SIREN_DURATION_S`| 180       | Default siren auto-off (seconds)      |
-| `SMS_POLL_INTERVAL_MS`    | 5000      | SMS inbox poll interval (ms)          |
+| `SMS_POLL_INTERVAL_MS`    | 10000     | SMS inbox poll interval (ms)          |
+| `MQTT_SYNC_INTERVAL_MS`   | 30000     | MQTT state sync frequency (ms)        |
 | `INPUT_SCAN_INTERVAL_MS`  | 20        | Input scan rate (ms) = 50 Hz          |
+| `NET_WORKER_YIELD_MS`     | 100       | Background task yield delay (ms)      |
 | `CLI_BAUD_RATE`           | 115200    | Serial baud rate                      |
 | `CLI_MAX_LINE_LEN`        | 128       | Max characters per CLI command        |
 | `WATCHDOG_TIMEOUT_S`      | 30        | Watchdog timer (seconds)              |
@@ -257,7 +259,22 @@ timing, and fires event callbacks for SMS notification.
 | Entry Delay    | `ALARM_ENTRY_DELAY` | 4     | Countdown after delayed zone triggered  |
 | Triggered      | `ALARM_TRIGGERED`   | 5     | Alarm active, siren on, SMS sent        |
 
-### Events
+### Events & Callbacks
+
+SF_Alarm uses a structured event system to notify external modules (SMS, MQTT)
+about state changes. Unlike simple string-based systems, SF_Alarm passes
+an `AlarmEventInfo` struct containing the Event Type, the triggering Zone ID,
+and a details string.
+
+```cpp
+struct AlarmEventInfo {
+    AlarmEvent  event;
+    int8_t      zoneId;  // 0-15, or -1 if not applicable
+    const char* details; // Context string (e.g. zone name)
+};
+
+typedef void (*AlarmEventCallback)(const AlarmEventInfo& info);
+```
 
 | Event                 | Enum                  | When Fired                              |
 |----------------------|----------------------|-----------------------------------------|
@@ -430,6 +447,7 @@ struct SmsMessage {
 | `smsGatewaySend(phone, message)`    | `bool`  | Send SMS via HTTP POST (with retry)       |
 | `smsGatewayPollInbox(msgs, max)`    | `int`   | Poll inbox, return message count          |
 | `smsGatewayDeleteMessage(id)`       | `bool`  | Delete message from inbox                 |
+| `smsGatewayUpdate()`                | `void`  | Handle background polling and auto-login  |
 | `smsGatewayIsLoggedIn()`            | `bool`  | Check if session is active                |
 | `smsGatewayGetLastError()`          | `const char*` | Get last error message for debugging |
 
@@ -522,6 +540,7 @@ formatting (e.g., Portugal uses +351 followed by 9 digits):
 | `smsCmdSendAlert(msg)`     | `void`       | Send SMS to all configured phones           |
 | `smsCmdGetAlarmText(index)`| `const char*`| Get alarm text for zone (0-based)           |
 | `smsCmdSetAlarmText(i,txt)`| `void`       | Set alarm text for zone (0-based)           |
+| `smsCmdUpdate()`           | `void`       | Handle periodic status reports (GA09)       |
 
 ---
 
@@ -855,18 +874,27 @@ The main Arduino sketch that ties all modules together.
 
 ### Event Handler
 
-The `onAlarmEvent()` function in `main.cpp` bridges alarm events to SMS alerts:
+The `onAlarmEvent()` function in `main.cpp` bridges alarm events to alert channels.
+It now uses structured data for better rate-limiting ("Storm Throttling").
 
+```cpp
+void onAlarmEvent(const AlarmEventInfo& info) {
+    // 1. Log to Serial
+    // 2. Perform Storm Throttling (using info.zoneId)
+    // 3. Broadcast to all channels (WhatsApp, SMS, Call)
+    // 4. Send to MQTT
+}
 ```
-  onAlarmEvent(event, details)
-       │
-       ├── EVT_ALARM_TRIGGERED ──── smsCmdSendAlert("SF_Alarm ALERT: ...")
-       ├── EVT_ARMED_AWAY     ──── smsCmdSendAlert("System ARMED (Away)")
-       ├── EVT_ARMED_HOME     ──── smsCmdSendAlert("System ARMED (Home)")
-       ├── EVT_DISARMED        ──── smsCmdSendAlert("System DISARMED")
-       ├── EVT_TAMPER          ──── smsCmdSendAlert("SF_Alarm TAMPER: ...")
-       └── others              ──── Serial.printf() only (no SMS)
-```
+
+| Event Type (info.event) | Notification Action                        |
+|-------------------------|--------------------------------------------|
+| `EVT_ALARM_TRIGGERED`   | Broadcast ALERT: details (throttled)      |
+| `EVT_ARMED_AWAY`        | Broadcast: System ARMED (Away)             |
+| `EVT_ARMED_HOME`        | Broadcast: System ARMED (Home)             |
+| `EVT_DISARMED`          | Broadcast: System DISARMED                |
+| `EVT_TAMPER`            | Broadcast TAMPER: details                 |
+| `EVT_SIREN_ON/OFF`      | Serial Log + MQTT Update                  |
+| `EVT_ZONE_TRIGGERED`    | Serial Log + MQTT Update                  |
 
 ---
 
@@ -892,11 +920,10 @@ The `onAlarmEvent()` function in `main.cpp` bridges alarm events to SMS alerts:
   │ TOTAL (with SMS)     │ ~100–2000 ms (blocks during HTTP)   │
   └──────────────────────┴──────────────────────────────────────┘
   
-  Note: SMS HTTP operations are blocking. During an SMS send/poll,
-  input scanning is paused. The 50ms debounce ensures no false
-  triggers are missed during brief pauses. For critical 24H zones
-  (fire/panic), consider future enhancement with interrupt-driven
-  input monitoring.
+  Note: SMS HTTP operations are blocking. However, since they run inside the
+`netWorkerTask` on a separate core/context, the main `loop()` remains
+highly responsive (20ms) for critical sensor monitoring and local siren
+control. The 50ms debounce ensures no false triggers are missed.
 ```
 
 ### Event Propagation

@@ -59,6 +59,9 @@
 /// Initialize the SMS command processor.
 void smsCmdInit();
 
+/// Main update loop for periodic reports. Call from background task.
+void smsCmdUpdate();
+
 /// Queue an asynchronous targeted SMS reply
 void alarmQueueReply(const char* phone, const char* message);
 

@@ -40,6 +40,10 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages);
 /// For sent messages, the 'sender' field contains the destination number.
 int smsGatewayPollOutbox(SmsMessage* msgs, int maxMessages);
 
+/// Main update loop for background tasks (polling). 
+/// Call from a background task at regular intervals.
+void smsGatewayUpdate();
+
 /// Delete a message from the inbox by its ID.
 bool smsGatewayDeleteMessage(int messageId);
 
