@@ -43,6 +43,15 @@ static void setDirty(bool &flag) {
     }
 }
 
+// Helper to scrub format string vulnerability symbols
+static void scrubFmt(char* str) {
+    if (!str) return;
+    while (*str) {
+        if (*str == '%') *str = '_';
+        str++;
+    }
+}
+
 // Keys for NVS storage
 static const char* KEY_PIN           = "pin";
 static const char* KEY_EXIT_DELAY    = "exitDelay";
@@ -437,7 +446,12 @@ void configSaveWifi() {
     if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
     Preferences p;
     if (p.begin(NVS_NAMESPACE, false)) {
-        p.putString(KEY_WIFI_SSID, networkGetSsid());
+        char safeSsid[33];
+        strncpy(safeSsid, networkGetSsid(), sizeof(safeSsid) - 1);
+        safeSsid[sizeof(safeSsid) - 1] = '\0';
+        scrubFmt(safeSsid);
+
+        p.putString(KEY_WIFI_SSID, safeSsid);
         p.putString(KEY_WIFI_PASS, networkGetPass());
         p.end();
     }
@@ -483,9 +497,14 @@ void configSaveZones() {
             const ZoneInfo* info = zonesGetInfo(i);
             if (!info) continue;
 
+            char safeName[MAX_ZONE_NAME_LEN];
+            strncpy(safeName, info->config.name, sizeof(safeName) - 1);
+            safeName[sizeof(safeName) - 1] = '\0';
+            scrubFmt(safeName);
+
             char key[16];
             snprintf(key, sizeof(key), "zName%d", i);
-            p.putString(key, info->config.name);
+            p.putString(key, safeName);
 
             snprintf(key, sizeof(key), "zType%d", i);
             p.putUChar(key, (uint8_t)info->config.type);

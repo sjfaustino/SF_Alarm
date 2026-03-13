@@ -25,13 +25,6 @@ static SimpleCLI cli;
 static bool inputMonitorActive = false;
 static uint16_t lastMonitorInputs = 0xFFFF;
 
-// Non-blocking state for factory reset confirmation
-static bool factoryPending = false;
-static uint32_t factoryStartMs = 0;
-static const uint32_t FACTORY_TIMEOUT_MS = 10000;
-static char factoryConfirm[8] = "";
-static int factoryConfirmPos = 0;
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -143,13 +136,19 @@ static void cmdRebootCallback(cmd* c) {
 
 static void cmdFactoryCallback(cmd* c) {
     if (!requirePin(c)) return;
-    factoryPending = true;
-    factoryStartMs = millis();
-    factoryConfirmPos = 0;
-    memset(factoryConfirm, 0, sizeof(factoryConfirm));
+    Command cmd(c);
+    Argument confirmArg = cmd.getArgument("confirm");
+    if (!confirmArg.isSet() || confirmArg.getValue() != "YES") {
+        Serial.println("Error: Must provide -confirm YES. e.g.: factory -pin <PIN> -confirm YES");
+        return;
+    }
+
     Serial.println("\n!!! FACTORY RESET WARNING !!!");
-    Serial.println("This will erase ALL configuration.");
-    Serial.println("Type 'YES' within 10 seconds to confirm:");
+    Serial.println("Erasing config...");
+    configFactoryReset();
+    Serial.println("DONE. Rebooting in 3s.");
+    delay(3000);
+    ESP.restart();
 }
 
 static void cmdZoneUpdateCallback(cmd* c) {
@@ -373,6 +372,7 @@ void cliInit() {
 
     Command cmdFactory = cli.addCommand("factory", cmdFactoryCallback);
     cmdFactory.addArgument("pin", "");
+    cmdFactory.addArgument("confirm", "");
 
     Command cmdZone = cli.addCommand("zone", cmdZoneUpdateCallback);
     cmdZone.addArgument("id", "");
@@ -441,30 +441,7 @@ void cliUpdate() {
         return; 
     }
 
-    // --- Non-blocking factory reset confirmation ---
-    if (factoryPending) {
-        if (millis() - factoryStartMs > FACTORY_TIMEOUT_MS) {
-            factoryPending = false;
-            Serial.println("\n[CLI] Factory reset timed out");
-            printPrompt();
-        } else if (Serial.available()) {
-            char c = Serial.read();
-            if (c == '\n' || c == '\r') {
-                factoryPending = false;
-                if (strcmp(factoryConfirm, "YES") == 0) {
-                    configFactoryReset();
-                } else {
-                    Serial.println("\n[CLI] Factory reset cancelled");
-                }
-                printPrompt();
-            } else if (factoryConfirmPos < 7) {
-                factoryConfirm[factoryConfirmPos++] = c;
-                factoryConfirm[factoryConfirmPos] = '\0';
-                Serial.print(c);
-            }
-        }
-        return; 
-    }
+    // --- Standard CLI Input Loop ---
 
     // --- Normal CLI processing ---
     static String inputStr = "";

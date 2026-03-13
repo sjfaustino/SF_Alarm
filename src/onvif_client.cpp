@@ -214,7 +214,7 @@ static void pollMessages() {
                 // This ensures we never miss a keyword split across the 512-byte boundary.
                 if (bufferPos >= (int)sizeof(buffer) - 1) {
                     const int OVERLAP = 128;
-                    memmove(buffer, buffer + (sizeof(buffer) - OVERLAP - 1), OVERLAP);
+                    memmove(buffer, buffer + bufferPos - OVERLAP, OVERLAP);
                     bufferPos = OVERLAP;
                     buffer[bufferPos] = '\0';
                 }

@@ -327,6 +327,10 @@ static esp_err_t handlePostOnvif(PsychicRequest* request, PsychicResponse* respo
 // ---------------------------------------------------------------------------
 static esp_err_t handleApiArm(PsychicRequest* request, PsychicResponse* response)
 {
+    if (request->body().length() > 512) {
+        return response->send(413, "application/json", "{\"ok\":false,\"msg\":\"Payload too large\"}");
+    }
+
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, request->body());
     if (err) {
@@ -336,12 +340,20 @@ static esp_err_t handleApiArm(PsychicRequest* request, PsychicResponse* response
     const char* pin  = doc["pin"] | "";
     const char* mode = doc["mode"] | "away";
 
-    bool ok;
+    bool ok = false;
+    uint32_t remoteIp = request->client()->remoteIP();
+
+    if (!checkRateLimit(remoteIp)) {
+        return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts.\"}");
+    }
+
     if (strcmp(mode, "home") == 0) {
         ok = alarmArmHome(pin);
     } else {
         ok = alarmArmAway(pin);
     }
+
+    recordAttempt(remoteIp, ok);
 
     if (ok) {
         return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"System arming\"}");
@@ -356,6 +368,10 @@ static esp_err_t handleApiArm(PsychicRequest* request, PsychicResponse* response
 // ---------------------------------------------------------------------------
 static esp_err_t handleApiDisarm(PsychicRequest* request, PsychicResponse* response)
 {
+    if (request->body().length() > 512) {
+        return response->send(413, "application/json", "{\"ok\":false,\"msg\":\"Payload too large\"}");
+    }
+
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, request->body());
     if (err) {
@@ -384,6 +400,10 @@ static esp_err_t handleApiDisarm(PsychicRequest* request, PsychicResponse* respo
 // ---------------------------------------------------------------------------
 static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* response)
 {
+    if (request->body().length() > 512) {
+        return response->send(413, "application/json", "{\"ok\":false,\"msg\":\"Payload too large\"}");
+    }
+
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, request->body());
     if (err) {
@@ -391,7 +411,16 @@ static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* respons
     }
 
     const char* pin = doc["pin"] | "";
-    if (alarmMuteSiren(pin)) {
+    uint32_t remoteIp = request->client()->remoteIP();
+
+    if (!checkRateLimit(remoteIp)) {
+        return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts.\"}");
+    }
+
+    bool ok = alarmMuteSiren(pin);
+    recordAttempt(remoteIp, ok);
+
+    if (ok) {
         return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Siren muted\"}");
     } else {
         return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"ACCESS DENIED: PIN required\"}");
@@ -404,6 +433,10 @@ static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* respons
 // ---------------------------------------------------------------------------
 static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* response)
 {
+    if (request->body().length() > 512) {
+        return response->send(413, "application/json", "{\"ok\":false,\"msg\":\"Payload too large\"}");
+    }
+
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, request->body());
     if (err) {
@@ -412,7 +445,16 @@ static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* respo
 
     // Require PIN for zone bypass/unbypass
     const char* pin = doc["pin"] | "";
-    if (strlen(pin) == 0 || !alarmValidatePin(pin)) {
+    uint32_t remoteIp = request->client()->remoteIP();
+    
+    if (!checkRateLimit(remoteIp)) {
+        return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts.\"}");
+    }
+
+    bool pinOk = (strlen(pin) > 0 && alarmValidatePin(pin));
+    recordAttempt(remoteIp, pinOk);
+
+    if (!pinOk) {
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
 
