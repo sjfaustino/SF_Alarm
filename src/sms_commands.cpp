@@ -56,9 +56,10 @@ static bool isAuthorized(const char* sender)
         if (strcmp(sender, phoneNumbers[i]) == 0) {
             return true;
         }
-        // Compare last 11 digits for flexibility with country code formatting
+        // Compare last 9 digits for flexibility with country code formatting
+        // Portugal: +351 country code + 9-digit local number
         int storedLen = strlen(phoneNumbers[i]);
-        const int MATCH_DIGITS = 11;
+        const int MATCH_DIGITS = 9;
 
         if (senderLen >= MATCH_DIGITS && storedLen >= MATCH_DIGITS) {
             if (strcmp(sender + senderLen - MATCH_DIGITS,

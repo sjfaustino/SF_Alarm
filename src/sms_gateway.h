@@ -36,6 +36,10 @@ bool smsGatewaySend(const char* phoneNumber, const char* message);
 /// maxMessages: size of the msgs array.
 int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages);
 
+/// Poll the router outbox (sent messages) for display.
+/// For sent messages, the 'sender' field contains the destination number.
+int smsGatewayPollOutbox(SmsMessage* msgs, int maxMessages);
+
 /// Delete a message from the inbox by its ID.
 bool smsGatewayDeleteMessage(int messageId);
 

@@ -471,15 +471,15 @@ phone number authorization, command dispatch, and alert broadcasting.
 
 ### Phone Number Authorization
 
-Authorization compares the **last 10 digits** of the sender's number
+Authorization compares the **last 9 digits** of the sender's number
 against stored numbers. This provides flexibility with country code
-formatting:
+formatting (e.g., Portugal uses +351 followed by 9 digits):
 
 ```
-  Stored:  +1234567890
-  Sender:  001234567890   ← matches (last 10: 1234567890)
-  Sender:  +1234567890    ← matches (exact)
-  Sender:  1234567890     ← matches (last 10)
+  Stored:  +351912345678
+  Sender:  00351912345678 ← matches (last 9: 912345678)
+  Sender:  +351912345678  ← matches (exact)
+  Sender:  912345678      ← matches (last 9)
   Sender:  +9876543210    ← no match
 ```
 

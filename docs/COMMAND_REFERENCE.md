@@ -29,6 +29,8 @@ To prevent unauthorized access via physical console, all "destructive" or "confi
 | `network` | - | Link layer status. | Shows ETH/WiFi connection, MAC, and Gateway IP. |
 | `inputs` | - | Hardware debug. | Prints a 16-bit binary representation of physical IO state. |
 | `config` | - | Flash dump. | Lists all persistent variables stored in NVS. |
+| `sms inbox` | - | SMS read-only diagnostic. | Shows last 10 received messages in the router inbox. |
+| `sms outbox` | - | SMS read-only diagnostic. | Shows last 10 sent messages in the router outbox. |
 
 ### 2. Control Commands (Requires `pin <pin>`)
 | Command | Syntax | Example | Result |

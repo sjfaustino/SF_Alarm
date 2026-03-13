@@ -81,6 +81,9 @@ static void printHelp()
     Serial.println("  test output <0-15>       — Toggle an output");
     Serial.println("  test input               — Live input monitor");
     Serial.println();
+    Serial.println("  sms inbox                — Show messages in router inbox");
+    Serial.println("  sms outbox               — Show sent messages on router");
+    Serial.println();
     Serial.println("  time                   — Show current NTP time");
     Serial.println("  schedule show          — Show weekly auto-arm schedule");
     Serial.println();
@@ -217,6 +220,37 @@ static void processLine(const char* line)
     }
     else if (strcmp(start, "network") == 0) {
         networkPrintStatus();
+    }
+    else if (strcmp(start, "sms") == 0 && arg1) {
+        if (strcmp(arg1, "inbox") == 0) {
+            Serial.println("Fetching router inbox...");
+            SmsMessage msgs[10];
+            int count = smsGatewayPollInbox(msgs, 10);
+            if (count == 0) {
+                Serial.println("  (inbox empty or not reachable)");
+            } else {
+                Serial.printf("=== Router Inbox (%d message%s) ===\n", count, count > 1 ? "s" : "");
+                for (int i = 0; i < count; i++) {
+                    Serial.printf("  [%d] %-16s  %s  \"%s\"\n", i + 1, msgs[i].sender, msgs[i].timestamp, msgs[i].body);
+                }
+                Serial.println("================================");
+            }
+        } else if (strcmp(arg1, "outbox") == 0) {
+            Serial.println("Fetching router outbox...");
+            SmsMessage msgs[10];
+            int count = smsGatewayPollOutbox(msgs, 10);
+            if (count == 0) {
+                Serial.println("  (outbox empty or not reachable)");
+            } else {
+                Serial.printf("=== Router Outbox (%d message%s) ===\n", count, count > 1 ? "s" : "");
+                for (int i = 0; i < count; i++) {
+                    Serial.printf("  [%d] %-16s  %s  \"%s\"\n", i + 1, msgs[i].sender, msgs[i].timestamp, msgs[i].body);
+                }
+                Serial.println("=================================");
+            }
+        } else {
+            Serial.println("Usage: sms <inbox|outbox>");
+        }
     }
     else if (strcmp(start, "config") == 0) {
         configPrint();

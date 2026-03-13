@@ -798,6 +798,8 @@ Connect via USB at **115200 baud**. The CLI provides a `sf_alarm>` prompt.
   ├──────────────────────┼───────────────────────────────────────┤
   │ inputs               │ Show raw input bitmask                │
   │ outputs              │ Show output bitmask                   │
+  │ sms inbox            │ Show router inbox (last 10 messages)  │
+  │ sms outbox           │ Show router outbox (last 10 messages) │
   │ test sms <num> <msg> │ Send a test SMS                       │
   │ test output <0-15>   │ Toggle an output channel              │
   │ test input           │ Live input monitor (key to stop)      │
