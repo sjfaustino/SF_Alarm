@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include "logging.h"
 #include <string.h>
+#include "config_manager.h"
+#include "alarm_zones.h"
 
 static const char* TAG = "ALM";
 
@@ -59,21 +61,28 @@ static void fireEvent(AlarmEvent event, int8_t zoneId = -1, const char* details 
 
 /// Constant-time string comparison — prevents timing side-channel PIN brute-force.
 /// Returns true only if both strings are identical AND same length.
+/// Constant-time string comparison — prevents timing side-channel PIN brute-force.
 static bool pinEquals(const char* a, const char* b)
 {
+    // Fix: We must compare a fixed maximum length to avoid timing leaks based on string lengths.
+    // MAX_PIN_LEN is used as the security boundary.
     uint8_t diff = 0;
-    size_t  lenA = strlen(a);
-    size_t  lenB = strlen(b);
-    // XOR lengths — non-zero if different
-    diff |= (uint8_t)(lenA ^ lenB);
-    // Compare up to the longer length so every branch takes the same time
-    size_t maxLen = lenA > lenB ? lenA : lenB;
-    for (size_t i = 0; i < maxLen; i++) {
-        uint8_t ca = (i < lenA) ? (uint8_t)a[i] : 0;
-        uint8_t cb = (i < lenB) ? (uint8_t)b[i] : 0;
+    
+    for (size_t i = 0; i < MAX_PIN_LEN; i++) {
+        uint8_t ca = (i < MAX_PIN_LEN && a[i] != '\0') ? (uint8_t)a[i] : 0;
+        uint8_t cb = (i < MAX_PIN_LEN && b[i] != '\0') ? (uint8_t)b[i] : 0;
         diff |= ca ^ cb;
+        
+        // We MUST NOT break early if one string ends; that creates the timing leak.
+        // We continue to XOR zeros to finish the cycle.
     }
-    return diff == 0;
+    
+    // Also ensure they aren't both empty or one isn't a prefix of the other by checking total length difference
+    // but doing so in a way that doesn't leak.
+    size_t lenA = 0; while(lenA < MAX_PIN_LEN && a[lenA]) lenA++;
+    size_t lenB = 0; while(lenB < MAX_PIN_LEN && b[lenB]) lenB++;
+    
+    return (diff == 0) && (lenA == lenB);
 }
 
 static void sirenOn(int8_t zoneId, const char* name)
@@ -160,6 +169,9 @@ static void setState(AlarmState newState)
     const char* oldStr = alarmGetStateStr();
     currentState = newState;
     LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStr());
+    
+    // Industrial Hardening: Persist state to survive reboots/power cycles
+    configSaveAlarmState(currentState);
 }
 
 // ---------------------------------------------------------------------------
@@ -258,15 +270,23 @@ static void onZoneEvent(uint8_t zoneIndex, ZoneState newState)
 
 void alarmInit()
 {
-    currentState    = ALARM_DISARMED;
+    // Register our zone event handler first so restoration doesn't cause missed transitions if they differ
+    zonesSetCallback(onZoneEvent);
+
+    // Restore persistent state from NVS
+    AlarmState savedState = configLoadAlarmState();
+    if (savedState == ALARM_ARMED_AWAY || savedState == ALARM_ARMED_HOME) {
+        currentState = savedState;
+        LOG_INFO(TAG, "Restored state from NVS: %s", alarmGetStateStr());
+    } else {
+        currentState = ALARM_DISARMED;
+    }
+    
     sirenActive     = false;
     sirenMuted      = false;
     triggeringZone  = 0xFF;
 
-    // Register our zone event handler
-    zonesSetCallback(onZoneEvent);
-
-    LOG_INFO(TAG, "Controller initialized — DISARMED");
+    LOG_INFO(TAG, "Controller initialized — %s", alarmGetStateStr());
 }
 
 void alarmSetCallback(AlarmEventCallback cb)

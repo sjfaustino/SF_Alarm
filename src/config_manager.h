@@ -2,6 +2,7 @@
 #define SF_ALARM_CONFIG_MANAGER_H
 
 #include <Arduino.h>
+#include "alarm_controller.h"
 
 enum ConfigSection {
     CFG_MAIN,
@@ -62,5 +63,8 @@ void configFactoryReset();
 
 /// Print current configuration to Serial.
 void configPrint();
+
+void configSaveAlarmState(AlarmState state);
+AlarmState configLoadAlarmState();
 
 #endif // SF_ALARM_CONFIG_MANAGER_H

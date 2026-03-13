@@ -74,7 +74,7 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
     
     HTTPClient http;
     http.begin(url);
-    http.setTimeout(5000); // 5s timeout to allow for network jitter
+    http.setTimeout(3000); // Strict 3s timeout to prevent queue starvation
     
     int code = http.GET();
     

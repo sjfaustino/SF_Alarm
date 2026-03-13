@@ -499,6 +499,16 @@ void configSave()
     LOG_INFO(TAG, "Granular save complete");
 }
 
+void configSaveAlarmState(AlarmState state)
+{
+    prefs.putUChar("state", (uint8_t)state);
+}
+
+AlarmState configLoadAlarmState()
+{
+    return (AlarmState)prefs.getUChar("state", (uint8_t)ALARM_DISARMED);
+}
+
 void configFactoryReset()
 {
     LOG_INFO(TAG, "Factory reset — clearing NVS...");

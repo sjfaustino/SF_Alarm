@@ -39,6 +39,11 @@ static const uint8_t ALL_TASKS_HEALTHY = (TASK_HB_ZONE | TASK_HB_NET | TASK_HB_M
 static uint32_t lastGlobalHeartbeatCheck = 0;
 static const uint32_t WATCHDOG_INTEGRITY_WINDOW_MS = 15000; // 15 seconds
 
+static TaskHandle_t taskHandles[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+static uint8_t restartCount[6] = { 0, 0, 0, 0, 0, 0 };
+
+static void restartTask(int index);
+
 // Alert Queue for non-blocking broadcasts
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -385,7 +390,7 @@ void setup()
         }
     }
 
-    zonesInit();
+    // Initialize Alarm Logic (Restores ARM state from NVS)
     alarmInit();
     alarmSetCallback(onAlarmEvent);
 
@@ -398,15 +403,35 @@ void setup()
     mqttInit();
     onvifInit();
 
-    xTaskCreatePinnedToCore(cliWorkerTask, "CLITask", 4096, NULL, 1, NULL, 1);
-    xTaskCreatePinnedToCore(mqttWorkerTask, "MQTTWorker", 4096, NULL, 1, NULL, 0);
-    xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 8192, NULL, 1, NULL, 0); 
-    xTaskCreatePinnedToCore(alertWorkerTask, "AlertWorker", 8192, NULL, 1, NULL, 1);
-    xTaskCreatePinnedToCore(zoneTask, "ZoneTask", 4096, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(heartbeatTask, "Heartbeat", 2048, NULL, 1, NULL, 1); 
-    xTaskCreatePinnedToCore(schedulerTask, "Scheduler", 4096, NULL, 1, NULL, 1);
-
     LOG_INFO(TAG, "Startup complete!");
+}
+
+static void restartTask(int index)
+{
+    if (index < 0 || index >= 6) return;
+    
+    const char* names[] = { "ZoneTask", "NetWorker", "MQTTWorker", "Heartbeat", "CLITask", "AlertWorker" };
+    
+    if (restartCount[index] >= 3) {
+        LOG_ERROR(TAG, "Task %s failed too many times. Manual intervention or Global Reboot required.", names[index]);
+        return;
+    }
+
+    LOG_WARN(TAG, "Restarting HUNG task: %s (Count: %d)", names[index], ++restartCount[index]);
+    
+    if (taskHandles[index] != NULL) {
+        vTaskDelete(taskHandles[index]);
+        taskHandles[index] = NULL;
+    }
+
+    switch(index) {
+        case 0: xTaskCreatePinnedToCore(zoneTask, names[index], 4096, NULL, 5, &taskHandles[index], 1); break;
+        case 1: xTaskCreatePinnedToCore(netWorkerTask, names[index], 8192, NULL, 1, &taskHandles[index], 0); break;
+        case 2: xTaskCreatePinnedToCore(mqttWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
+        case 3: xTaskCreatePinnedToCore(heartbeatTask, names[index], 2048, NULL, 1, &taskHandles[index], 1); break;
+        case 4: xTaskCreatePinnedToCore(cliWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 1); break;
+        case 5: xTaskCreatePinnedToCore(alertWorkerTask, names[index], 8192, NULL, 1, &taskHandles[index], 1); break;
+    }
 }
 
 void loop()
@@ -415,7 +440,7 @@ void loop()
     alarmUpdate();
     networkUpdate();
 
-    if (now - lastGlobalHeartbeatCheck >= 2000) {
+    if (now - lastGlobalHeartbeatCheck >= 3000) {
         lastGlobalHeartbeatCheck = now;
         uint8_t currentBits = 0;
         portENTER_CRITICAL(&heartbeatMux);
@@ -425,8 +450,17 @@ void loop()
 
         if (currentBits == ALL_TASKS_HEALTHY) {
             esp_task_wdt_reset();
+            // Reset failure counters on healthy cycle
+            memset(restartCount, 0, sizeof(restartCount));
         } else {
-            LOG_ERROR(TAG, "WATCHDOG: MISSING BITS: 0x%02X", (uint8_t)(ALL_TASKS_HEALTHY ^ currentBits));
+            LOG_ERROR(TAG, "WATCHDOG: HANG DETECTED! Bits missing: 0x%02X", (uint8_t)(ALL_TASKS_HEALTHY ^ currentBits));
+            
+            // Attempt task recovery before giving up
+            for (int i = 0; i < 6; i++) {
+                if (!(currentBits & (1 << i))) {
+                    restartTask(i);
+                }
+            }
         }
     }
     yield();
