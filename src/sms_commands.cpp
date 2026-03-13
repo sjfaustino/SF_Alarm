@@ -17,14 +17,18 @@ static const char* TAG = "SMSC";
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
-static char phoneNumbers[MAX_PHONE_NUMBERS][MAX_PHONE_LEN];
-static int  phoneCount = 0;
+static char     phoneNumbers[MAX_PHONE_NUMBERS][MAX_PHONE_LEN];
+static int      phoneCount = 0;
 
 // Custom alarm text per zone (GA09: #X#text)
-static char alarmTexts[MAX_ZONES][80];
+static char     alarmTexts[MAX_ZONES][80];
 
 // Periodic report interval in minutes (GA09: %#Txx)
 static uint16_t reportIntervalMin = DEFAULT_REPORT_INTERVAL_MIN;
+
+static SemaphoreHandle_t htmlMutex = NULL;
+#define MAX_SMS_TEXT_LEN 160
+static char htmlBuffer[MAX_SMS_TEXT_LEN * 6 + 1];
 
 // Custom recovery text (GA09: #0#text)
 static char recoveryText[80] = "SF_Alarm: All zones restored to normal.";
@@ -90,31 +94,33 @@ static void trimStr(char* str)
 /// Encodes unsafe HTML characters to prevent XSS without losing data
 static void encodeHtml(char* str, size_t maxLen)
 {
-    if (str == nullptr || maxLen == 0) return;
+    if (str == nullptr || maxLen == 0 || htmlMutex == NULL) return;
     
-    // Worst case: every character is a double quote (&quot; = 6 chars).
-    // Plus null terminator. 160 * 6 + 1 = 961.
-    char tmp[MAX_SMS_TEXT_LEN * 6 + 1]; 
-    char* src = str;
-    char* dst = tmp;
-    
-    // Safety check: ensure we don't overflow tmp even if input is larger than MAX_SMS_TEXT_LEN
-    size_t srcLen = strlen(str);
-    if (srcLen > MAX_SMS_TEXT_LEN) srcLen = MAX_SMS_TEXT_LEN;
+    if (xSemaphoreTake(htmlMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        char* src = str;
+        char* dst = htmlBuffer;
+        
+        size_t srcLen = strlen(str);
+        if (srcLen > MAX_SMS_TEXT_LEN) srcLen = MAX_SMS_TEXT_LEN;
 
-    for (size_t i = 0; i < srcLen; i++) {
-        char c = *src++;
-        if (c == '<')      { strcpy(dst, "&lt;"); dst += 4; }
-        else if (c == '>') { strcpy(dst, "&gt;"); dst += 4; }
-        else if (c == '"') { strcpy(dst, "&quot;"); dst += 6; }
-        else if (c == '\''){ strcpy(dst, "&apos;"); dst += 6; }
-        else if (c == '&') { strcpy(dst, "&amp;"); dst += 5; }
-        else { *dst++ = c; }
+        for (size_t i = 0; i < srcLen; i++) {
+            char c = *src++;
+            if (c == '<')      { strcpy(dst, "&lt;"); dst += 4; }
+            else if (c == '>') { strcpy(dst, "&gt;"); dst += 4; }
+            else if (c == '"') { strcpy(dst, "&quot;"); dst += 6; }
+            else if (c == '\''){ strcpy(dst, "&apos;"); dst += 6; }
+            else if (c == '&') { strcpy(dst, "&amp;"); dst += 5; }
+            else { *dst++ = c; }
+        }
+        *dst = '\0';
+        
+        strncpy(str, htmlBuffer, maxLen - 1);
+        str[maxLen - 1] = '\0';
+        
+        xSemaphoreGive(htmlMutex);
+    } else {
+        LOG_WARN(TAG, "HTML encoder busy, skipping sanitization");
     }
-    *dst = '\0';
-    
-    strncpy(str, tmp, maxLen - 1);
-    str[maxLen - 1] = '\0';
 }
 
 // ---------------------------------------------------------------------------
@@ -644,6 +650,7 @@ void smsCmdProcess(const char* sender, const char* body)
 
 void smsCmdInit()
 {
+    htmlMutex = xSemaphoreCreateMutex();
     phoneCount = 0;
     memset(phoneNumbers, 0, sizeof(phoneNumbers));
 

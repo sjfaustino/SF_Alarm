@@ -44,7 +44,7 @@ static uint8_t restartCount[6] = { 0, 0, 0, 0, 0, 0 };
 
 // Boot Loop Protection (RTC memory persists through soft/WDT reset)
 RTC_NOINIT_ATTR uint32_t bootCount;
-RTC_NOINIT_ATTR uint32_t lastBootTime;
+RTC_NOINIT_ATTR uint32_t lastKnownSystemTime; // Persistent system time (seconds since 1970 if synced, else uptime)
 static bool recoveryMode = false;
 
 static void restartTask(int index);
@@ -252,9 +252,14 @@ static void netWorkerTask(void* pvParameters)
 
         smsGatewayUpdate(); 
         smsCmdUpdate();
+        // Safe reset: if we've been stable for 10 minutes, clear boot counter
+        if (millis() > 600000 && bootCount > 0) {
+            bootCount = 0;
+            LOG_INFO(TAG, "System stable. Boot counter reset.");
+        }
         
-        esp_task_wdt_reset(); 
-        vTaskDelay(pdMS_TO_TICKS(NET_WORKER_YIELD_MS)); 
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -371,18 +376,16 @@ void setup()
     LOG_INFO(TAG, "SF_Alarm Booting (v%s)...", FW_VERSION_STR);
 
     // Boot Loop Protection Logic
-    uint32_t now = millis();
-    // If we've been running for > 10 min, reset the cycle count
-    if (now - lastBootTime > 600000) {
-        bootCount = 0;
-    }
+    // millis() resets to 0 on every boot. 
+    // We only reset bootCount if the system has been stable for > 10 minutes.
+    // If we're here, and bootCount hasn't been reset by the loop yet, we increment.
     bootCount++;
-    lastBootTime = now;
 
     if (bootCount > 5) {
         LOG_ERROR(TAG, "FATAL: Recursive boot loop detected! Entering RECOVERY MODE.");
         recoveryMode = true;
-        // In recovery mode, we skip heavy workers and just run CLI/Diagnostics
+        // In recovery mode, we MUST still init I/O for CLI to work safely
+        ioExpanderInit();
         configInit();
         cliInit();
         while(true) {

@@ -12,8 +12,9 @@ static const char* TAG = "ALM";
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
-static volatile AlarmState currentState = ALARM_DISARMED;
-static AlarmState       returnState      = ALARM_DISARMED; // State to return to after alarm timeout
+static AlarmState       currentState     = ALARM_DISARMED;
+static AlarmState       returnState      = ALARM_DISARMED; 
+static SemaphoreHandle_t stateMutex       = NULL;
 static AlarmEventCallback eventCallback  = nullptr;
 
 static char     alarmPin[MAX_PIN_LEN]    = "1234";  // Default PIN
@@ -157,21 +158,26 @@ bool alarmValidatePin(const char* pin)
 
 static void setState(AlarmState newState)
 {
-    if (currentState == newState) return;
-
-    // Capture return state when transitioning out of stable armed/disarmed states
-    if (currentState == ALARM_DISARMED ||
-        currentState == ALARM_ARMED_AWAY ||
-        currentState == ALARM_ARMED_HOME) {
-        returnState = currentState;
-    }
-
-    const char* oldStr = alarmGetStateStr();
-    currentState = newState;
-    LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStr());
+    if (!stateMutex) return;
     
-    // Industrial Hardening: Persist state to survive reboots/power cycles
-    configSaveAlarmState(currentState);
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (currentState != newState) {
+            // Capture return state when transitioning out of stable armed/disarmed states
+            if (currentState == ALARM_DISARMED ||
+                currentState == ALARM_ARMED_AWAY ||
+                currentState == ALARM_ARMED_HOME) {
+                returnState = currentState;
+            }
+
+            const char* oldStr = alarmGetStateStr();
+            currentState = newState;
+            LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStr());
+            
+            // Industrial Hardening: Persist state to survive reboots/power cycles
+            configSaveAlarmState(currentState);
+        }
+        xSemaphoreGive(stateMutex);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +279,8 @@ void alarmInit()
     // Register our zone event handler first so restoration doesn't cause missed transitions if they differ
     zonesSetCallback(onZoneEvent);
 
+    stateMutex = xSemaphoreCreateMutex();
+    
     // Restore persistent state from NVS
     AlarmState savedState = configLoadAlarmState();
     if (savedState == ALARM_ARMED_AWAY || savedState == ALARM_ARMED_HOME) {
@@ -433,7 +441,12 @@ void alarmMuteSiren()
 
 AlarmState alarmGetState()
 {
-    return currentState;
+    AlarmState st = ALARM_DISARMED;
+    if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        st = currentState;
+        xSemaphoreGive(stateMutex);
+    }
+    return st;
 }
 
 const char* alarmGetStateStr()

@@ -171,17 +171,19 @@ bool smsGatewayLogin()
             buffer[bufPos] = '\0';
             
             // Search for tokens in isolated input tags
-            if (c == '>') {
-                if (strcasestr(buffer, "name=\"_csrf\"")) _csrf = extractBetween(buffer, "value=\"", "\"");
-                if (strcasestr(buffer, "name=\"salt\"")) salt = extractBetween(buffer, "value=\"", "\"");
-                if (strcasestr(buffer, "name=\"token\"")) token = extractBetween(buffer, "value=\"", "\"");
-                
-                // Clear buffer for next tag
-                bufPos = 0;
-            } else if (bufPos >= (int)sizeof(buffer) - 1) {
-                // Shift buffer
-                memmove(buffer, buffer + 256, 256);
-                bufPos = 256;
+            // We search for tokens in the sliding window. 
+            // Clearing bufPos on every '>' is too aggressive if tokens cross boundaries.
+            // Instead, we just let the overlapping window handle it.
+            if (_csrf == "" && strcasestr(buffer, "name=\"_csrf\"")) _csrf = extractBetween(buffer, "value=\"", "\"");
+            if (salt == "" && strcasestr(buffer, "name=\"salt\""))  salt  = extractBetween(buffer, "value=\"", "\"");
+            if (token == "" && strcasestr(buffer, "name=\"token\"")) token = extractBetween(buffer, "value=\"", "\"");
+
+            // If buffer is full, shift it to keep the last 128 bytes (overlapping window)
+            if (bufPos >= (int)sizeof(buffer) - 1) {
+                const int OVERLAP = 128;
+                memmove(buffer, buffer + (sizeof(buffer) - OVERLAP - 1), OVERLAP);
+                bufPos = OVERLAP;
+                buffer[bufPos] = '\0';
             }
         } else {
             vTaskDelay(10);
