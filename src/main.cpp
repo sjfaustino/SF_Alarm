@@ -13,14 +13,31 @@
 #include "mqtt_client.h"
 #include "onvif_client.h"
 #include <esp_task_wdt.h>
+#include "logging.h"
+
+static const char* TAG = "MAIN";
 
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
 static uint32_t lastI2cPoll  = 0;
 static uint32_t lastMqttStateSync = 0;
-// lastSmsPoll and lastReportMs were moved to their respective modules
 static bool     lastAllClear    = true;
+
+// Task Heartbeat Registry (Tungsten Aegis)
+static volatile uint8_t taskHeartbeatBits = 0;
+static portMUX_TYPE heartbeatMux = portMUX_INITIALIZER_UNLOCKED;
+
+static const uint8_t TASK_HB_ZONE = (1 << 0);
+static const uint8_t TASK_HB_NET  = (1 << 1);
+static const uint8_t TASK_HB_MQTT = (1 << 2);
+static const uint8_t TASK_HB_VIBE = (1 << 3);
+static const uint8_t TASK_HB_CLI  = (1 << 4);
+static const uint8_t TASK_HB_ALERT = (1 << 5);
+static const uint8_t ALL_TASKS_HEALTHY = (TASK_HB_ZONE | TASK_HB_NET | TASK_HB_MQTT | TASK_HB_VIBE | TASK_HB_CLI | TASK_HB_ALERT);
+
+static uint32_t lastGlobalHeartbeatCheck = 0;
+static const uint32_t WATCHDOG_INTEGRITY_WINDOW_MS = 15000; // 15 seconds
 
 // Alert Queue for non-blocking broadcasts
 #include <freertos/FreeRTOS.h>
@@ -45,10 +62,9 @@ static void onAlarmEvent(const AlarmEventInfo& info)
 
     switch (info.event) {
         case EVT_ALARM_TRIGGERED:
-            // STORM THROTTLING: Use structured Zone ID for robust rate-limiting
             if (info.zoneId >= 0 && info.zoneId < 16) {
                 if (millis() - lastZoneAlertMs[info.zoneId] < 60000) {
-                    Serial.printf("[MAIN] Suppressing redundant storm alert for Zone %d\n", info.zoneId + 1);
+                    LOG_INFO(TAG, "Throttling redundant alert for Zone %d", info.zoneId + 1);
                     return;
                 }
                 lastZoneAlertMs[info.zoneId] = millis();
@@ -75,35 +91,43 @@ static void onAlarmEvent(const AlarmEventInfo& info)
             break;
 
         case EVT_ENTRY_DELAY:
-            Serial.printf("[MAIN] Entry delay: %s\n", details);
+            LOG_INFO(TAG, "Entry delay: %s", details);
             break;
 
         case EVT_EXIT_DELAY:
-            Serial.printf("[MAIN] Exit delay: %s\n", details);
+            LOG_INFO(TAG, "Exit delay: %s", details);
             break;
 
         case EVT_ZONE_TRIGGERED:
-            Serial.printf("[MAIN] Zone triggered: %s\n", details);
+            LOG_INFO(TAG, "Zone triggered: %s", details);
             break;
 
         case EVT_ZONE_RESTORED:
-            Serial.printf("[MAIN] Zone restored: %s\n", details);
+            LOG_INFO(TAG, "Zone restored: %s", details);
             break;
 
         case EVT_SIREN_ON:
         case EVT_SIREN_OFF:
-            Serial.printf("[MAIN] Siren: %s\n", details);
+            LOG_INFO(TAG, "Siren: %s", details);
             break;
         
         default: break;
     }
 
-    // Task-specific syncs
-    mqttSyncState();
-    
-    char eventMsg[128];
-    snprintf(eventMsg, sizeof(eventMsg), "EVENT:%d Z:%d | %s", (int)info.event, info.zoneId, details);
-    mqttPublish("SF_Alarm/events", eventMsg);
+    // High-latency MQTT events handled asynchronosly via worker thread
+    switch (info.event) {
+        case EVT_ALARM_TRIGGERED:
+        case EVT_TAMPER:
+        case EVT_ARMED_AWAY:
+        case EVT_ARMED_HOME:
+        case EVT_DISARMED: {
+            char logMsg[128];
+            snprintf(logMsg, sizeof(logMsg), "EVENT:%d Z:%d | %s", (int)info.event, info.zoneId, details);
+            mqttPublish("SF_Alarm/events", logMsg); 
+            break;
+        }
+        default: break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -114,16 +138,16 @@ void alarmBroadcast(const char* message)
 {
     if (!rtosAlertQueue) return;
     PendingAlert alert;
-    memset(&alert, 0, sizeof(PendingAlert)); // Zero-out to prevent RTOS stack memory leak
+    memset(&alert, 0, sizeof(PendingAlert)); 
     
     strncpy(alert.message, message, sizeof(alert.message) - 1);
     alert.message[sizeof(alert.message) - 1] = '\0';
-    alert.targetPhone[0] = '\0'; // Empty for broadcast
+    alert.targetPhone[0] = '\0'; 
     
     if (xQueueSend(rtosAlertQueue, &alert, 0) == pdTRUE) {
-        Serial.println("[MAIN] Alert queued into RTOS IPC");
+        LOG_INFO(TAG, "Alert queued");
     } else {
-        Serial.println("[MAIN] ERROR: RTOS Alert queue full!");
+        LOG_ERROR(TAG, "Alert queue full!");
     }
 }
 
@@ -131,7 +155,7 @@ void alarmQueueReply(const char* phone, const char* message)
 {
     if (!rtosAlertQueue) return;
     PendingAlert alert;
-    memset(&alert, 0, sizeof(PendingAlert)); // Zero-out to prevent RTOS stack memory leak
+    memset(&alert, 0, sizeof(PendingAlert)); 
     
     strncpy(alert.message, message, sizeof(alert.message) - 1);
     alert.message[sizeof(alert.message) - 1] = '\0';
@@ -139,9 +163,9 @@ void alarmQueueReply(const char* phone, const char* message)
     alert.targetPhone[sizeof(alert.targetPhone) - 1] = '\0';
 
     if (xQueueSend(rtosAlertQueue, &alert, 0) == pdTRUE) {
-        Serial.println("[MAIN] Targeted reply queued into RTOS IPC");
+        LOG_INFO(TAG, "Targeted reply queued");
     } else {
-        Serial.println("[MAIN] ERROR: RTOS Alert queue full! (Reply dropped)");
+        LOG_ERROR(TAG, "Alert queue full!");
     }
 }
 
@@ -157,22 +181,14 @@ static void processAlertQueue()
         lastAlertProcessedMs = now;
         
         if (strlen(alert.targetPhone) > 0) {
-            // Targeted Reply Only
-            Serial.printf("[MAIN] Processing queued targeted reply to %s: %s\n", alert.targetPhone, alert.message);
+            LOG_INFO(TAG, "Targeted reply to %s: %s", alert.targetPhone, alert.message);
             smsGatewaySend(alert.targetPhone, alert.message);
-            esp_task_wdt_reset(); // Yield to watchdog after potentially blocking SMS send
         } else {
-            // Broadcast Delivery
-            Serial.printf("[MAIN] Processing queued broadcast alert: %s\n", alert.message);
-            
-            // 1. WhatsApp Delivery
             WhatsAppMode waM = whatsappGetMode();
             if (waM == WA_MODE_WHATSAPP || waM == WA_MODE_BOTH) {
                 whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), alert.message);
-                esp_task_wdt_reset(); // Yield to watchdog
             }
 
-            // 2. SMS/Call Delivery
             if (waM == WA_MODE_SMS || waM == WA_MODE_BOTH) {
                 if (smsCmdGetWorkingMode() == MODE_CALL) {
                     char voiceMsg[180];
@@ -181,128 +197,151 @@ static void processAlertQueue()
                 } else {
                     smsCmdSendAlert(alert.message);
                 }
-                esp_task_wdt_reset(); // Yield to watchdog
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Background Network Worker Task (SMS Polling & Sending)
+// Worker Tasks
 // ---------------------------------------------------------------------------
 
-static void netWorkerTask(void* pvParameters)
+static void zoneTask(void* pvParameters)
 {
-    esp_task_wdt_add(NULL); // Register shadow core thread to hardware watchdog
+    TickType_t lastWakeTime = xTaskGetTickCount();
+    const TickType_t period = pdMS_TO_TICKS(INPUT_SCAN_INTERVAL_MS);
+
     while (true) {
-        // 1. Process Outbound Alerts (Highest Priority)
-        processAlertQueue(); // Can block for HTTP POSTs
-        esp_task_wdt_reset();
+        portENTER_CRITICAL(&heartbeatMux);
+        taskHeartbeatBits |= TASK_HB_ZONE; 
+        portEXIT_CRITICAL(&heartbeatMux);
 
-        // 2. Poll SMS Inbox (Secondary Priority)
-        // SOS Mode: Skip polling entirely if there are pending alerts to send
-        if (uxQueueMessagesWaiting(rtosAlertQueue) == 0) {
-            smsGatewayUpdate(); // Inside: network checks, login, polling, cmd execution, deletion
-            esp_task_wdt_reset();
-        } else {
-            Serial.println("[MAIN] SOS MODE: Skipping network poll to prioritize outgoing alerts");
+        uint16_t inputs = ioExpanderReadInputs();
+        zonesUpdate(inputs);
+
+        bool currentAllClear = zonesAllClear();
+        AlarmState st = alarmGetState();
+        bool isArmedOrActive = (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME ||
+                                st == ALARM_TRIGGERED  || st == ALARM_ENTRY_DELAY);
+        if (currentAllClear && !lastAllClear && isArmedOrActive) {
+            alarmBroadcast(smsCmdGetRecoveryText());
         }
+        lastAllClear = currentAllClear;
 
-        // 3. Periodic Status Report (GA09)
-        smsCmdUpdate();
-        
-        esp_task_wdt_reset(); // Final pet for the watchdog
-        vTaskDelay(pdMS_TO_TICKS(NET_WORKER_YIELD_MS)); // Sleep to yield
+        vTaskDelayUntil(&lastWakeTime, period); 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Background MQTT Worker Task
-// ---------------------------------------------------------------------------
+static void netWorkerTask(void* pvParameters)
+{
+    esp_task_wdt_add(NULL); 
+    while (true) {
+        portENTER_CRITICAL(&heartbeatMux);
+        taskHeartbeatBits |= TASK_HB_NET; 
+        portEXIT_CRITICAL(&heartbeatMux);
+
+        smsGatewayUpdate(); 
+        smsCmdUpdate();
+        
+        esp_task_wdt_reset(); 
+        vTaskDelay(pdMS_TO_TICKS(NET_WORKER_YIELD_MS)); 
+    }
+}
 
 static void mqttWorkerTask(void* pvParameters)
 {
     while (true) {
-        uint32_t now = millis();
+        portENTER_CRITICAL(&heartbeatMux);
+        taskHeartbeatBits |= TASK_HB_MQTT; 
+        portEXIT_CRITICAL(&heartbeatMux);
 
+        uint32_t now = millis();
         mqttUpdate();
 
-        if (now - lastMqttSync >= 5000) {
-            lastMqttSync = now;
+        if (now - lastMqttStateSync >= 5000) {
+            lastMqttStateSync = now;
             mqttSyncState();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50)); // Yield
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
-// ---------------------------------------------------------------------------
-// Background Heartbeat Task (Visual & Audio Status)
-// ---------------------------------------------------------------------------
+static void cliWorkerTask(void* pvParameters)
+{
+    while (true) {
+        portENTER_CRITICAL(&heartbeatMux);
+        taskHeartbeatBits |= TASK_HB_CLI; 
+        portEXIT_CRITICAL(&heartbeatMux);
+
+        cliUpdate();
+        vTaskDelay(pdMS_TO_TICKS(10)); 
+    }
+}
+
+static void alertWorkerTask(void* pvParameters)
+{
+    while (true) {
+        portENTER_CRITICAL(&heartbeatMux);
+        taskHeartbeatBits |= TASK_HB_ALERT;
+        portEXIT_CRITICAL(&heartbeatMux);
+
+        processAlertQueue(); 
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
 
 static void heartbeatTask(void* pvParameters)
 {
     while (true) {
+        portENTER_CRITICAL(&heartbeatMux);
+        taskHeartbeatBits |= TASK_HB_VIBE; 
+        portEXIT_CRITICAL(&heartbeatMux);
+
         if (configGetHeartbeatEnabled()) {
             AlarmState st = alarmGetState();
-            // Only pulse if armed (Away or Home)
             if (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME) {
                 digitalWrite(HEARTBEAT_LED_PIN, HIGH);
                 digitalWrite(HEARTBEAT_BUZZER_PIN, HIGH);
-                vTaskDelay(pdMS_TO_TICKS(50)); // Tiny 50ms blip
+                vTaskDelay(pdMS_TO_TICKS(50)); 
                 digitalWrite(HEARTBEAT_LED_PIN, LOW);
                 digitalWrite(HEARTBEAT_BUZZER_PIN, LOW);
             }
         }
-        // Wait ~2 seconds before next tick
         vTaskDelay(pdMS_TO_TICKS(1950));
     }
 }
 
-// ---------------------------------------------------------------------------
-// Background Scheduler Task (Auto-Arm/Disarm)
-// ---------------------------------------------------------------------------
-
 static void schedulerTask(void* pvParameters)
 {
     int lastFiredMin = -1;
-
     while (true) {
         struct tm timeinfo;
-        if (getLocalTime(&timeinfo, 10)) { // 10ms timeout to read RTC
+        if (getLocalTime(&timeinfo, 10)) {
             int currentMin = timeinfo.tm_min;
-            if (currentMin != lastFiredMin) { // Only evaluate once per minute
+            if (currentMin != lastFiredMin) {
                 int8_t aHr, aMin, dHr, dMin;
                 configGetSchedule(timeinfo.tm_wday, aHr, aMin, dHr, dMin);
 
-                // Auto Arm
                 if (aHr != -1 && aMin != -1 && timeinfo.tm_hour == aHr && currentMin == aMin) {
                     AlarmState st = alarmGetState();
                     if (st == ALARM_DISARMED) {
-                        Serial.printf("[SCHEDULER] Auto-Arming triggered at %02d:%02d\n", aHr, aMin);
-                        uint8_t mode = configGetScheduleMode();
-                        if (mode == ALARM_ARMED_HOME) {
-                            alarmArmHome("AUTO");
-                        } else {
-                            alarmArmAway("AUTO");
-                        }
+                        LOG_INFO(TAG, "Auto-Arming (%02d:%02d)", aHr, aMin);
+                        if (configGetScheduleMode() == ALARM_ARMED_HOME) alarmArmHome("AUTO");
+                        else alarmArmAway("AUTO");
                         lastFiredMin = currentMin;
                     }
                 }
-                
-                // Auto Disarm
                 else if (dHr != -1 && dMin != -1 && timeinfo.tm_hour == dHr && currentMin == dMin) {
                     AlarmState st = alarmGetState();
                     if (st != ALARM_DISARMED) {
-                        Serial.printf("[SCHEDULER] Auto-Disarming triggered at %02d:%02d\n", dHr, dMin);
+                        LOG_INFO(TAG, "Auto-Disarming (%02d:%02d)", dHr, dMin);
                         alarmDisarm("AUTO");
                         lastFiredMin = currentMin;
                     }
                 }
             }
         }
-        
-        // Wait ~30 seconds before checking again
         vTaskDelay(pdMS_TO_TICKS(30000));
     }
 }
@@ -313,124 +352,82 @@ static void schedulerTask(void* pvParameters)
 
 void setup()
 {
-    // --- Serial ---
+    esp_task_wdt_init(15, true); 
+    esp_task_wdt_add(NULL);      
+
+    logInit();
+
     Serial.begin(CLI_BAUD_RATE);
-    delay(1000);  // Wait for serial monitor
+    delay(1000);  
     Serial.println();
     Serial.println("========================================");
-    Serial.printf("  SF_Alarm v%s — Starting up...\n", FW_VERSION_STR);
-    Serial.println("  KC868-A16 v1.6 Alarm System Controller");
+    Serial.printf("  SF_Alarm v%s — Obsidian Mantle\n", FW_VERSION_STR);
+    Serial.println("  Industrial Security Controller (ESP32)");
     Serial.println("========================================");
 
-    // --- Configuration ---
     configInit();
-
-    // --- Alert Queue ---
     rtosAlertQueue = xQueueCreate(ALERT_QUEUE_SIZE, sizeof(PendingAlert));
 
-    // --- Heartbeat Pins ---
     pinMode(HEARTBEAT_LED_PIN, OUTPUT);
     digitalWrite(HEARTBEAT_LED_PIN, LOW);
     pinMode(HEARTBEAT_BUZZER_PIN, OUTPUT);
     digitalWrite(HEARTBEAT_BUZZER_PIN, LOW);
 
-    // --- I/O Expander ---
-    Serial.println("[INIT] I/O Expander...");
+    LOG_INFO(TAG, "Initializing I/O Expander...");
     if (!ioExpanderInit()) {
-        Serial.println("[INIT] WARNING: Not all I2C chips responded!");
+        LOG_ERROR(TAG, "FATAL: I/O Expander offline. Entering PANIC mode.");
+        while (true) {
+            digitalWrite(HEARTBEAT_LED_PIN, HIGH);
+            esp_task_wdt_reset();
+            delay(100);
+            digitalWrite(HEARTBEAT_LED_PIN, LOW);
+            delay(100);
+        }
     }
 
-    // --- Alarm Zones ---
-    Serial.println("[INIT] Alarm Zones...");
     zonesInit();
-
-    // --- Alarm Controller ---
-    Serial.println("[INIT] Alarm Controller...");
     alarmInit();
     alarmSetCallback(onAlarmEvent);
 
-    // --- SMS ---
-    Serial.println("[INIT] SMS Gateway...");
     smsGatewayInit(DEFAULT_ROUTER_IP, DEFAULT_ROUTER_USER, DEFAULT_ROUTER_PASS);
     smsCmdInit();
-
-    // --- Network ---
-    Serial.println("[INIT] Network...");
     networkInit();
-
-    // --- Load saved config (overrides defaults) ---
     configLoad();
-
-    // --- Web Dashboard ---
-    Serial.println("[INIT] Web Dashboard...");
     webServerInit();
-
-    // --- Watchdog ---
-    esp_task_wdt_init(30, true); // 30s timeout
-    esp_task_wdt_add(NULL);      // Add current thread (loop)
-
-    // --- CLI ---
     cliInit();
-
-    // --- MQTT ---
-    Serial.println("[INIT] MQTT...");
     mqttInit();
-    xTaskCreatePinnedToCore(mqttWorkerTask, "MQTTWorker", 4096, NULL, 1, NULL, 0); // Pin to Core 0 (Network)
-
-    // --- ONVIF ---
-    Serial.println("[INIT] ONVIF...");
     onvifInit();
 
-    // --- Start Network Worker Task ---
-    Serial.println("[INIT] Starting Network Worker Task...");
-    xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 8192, NULL, 1, NULL, 0); // Pin to Core 0 (Network)
+    xTaskCreatePinnedToCore(cliWorkerTask, "CLITask", 4096, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(mqttWorkerTask, "MQTTWorker", 4096, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 8192, NULL, 1, NULL, 0); 
+    xTaskCreatePinnedToCore(alertWorkerTask, "AlertWorker", 8192, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(zoneTask, "ZoneTask", 4096, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(heartbeatTask, "Heartbeat", 2048, NULL, 1, NULL, 1); 
+    xTaskCreatePinnedToCore(schedulerTask, "Scheduler", 4096, NULL, 1, NULL, 1);
 
-    // --- Start Heartbeat Task ---
-    Serial.println("[INIT] Starting Heartbeat Task...");
-    xTaskCreatePinnedToCore(heartbeatTask, "Heartbeat", 2048, NULL, 1, NULL, 1); // Pin to Core 1 (App logic)
-
-    // --- Start Scheduler Task ---
-    Serial.println("[INIT] Starting Scheduler Task...");
-    xTaskCreatePinnedToCore(schedulerTask, "Scheduler", 4096, NULL, 1, NULL, 1); // Pin to Core 1
-
-    Serial.println("[INIT] Startup complete!");
-    Serial.println();
+    LOG_INFO(TAG, "Startup complete!");
 }
 
 void loop()
 {
     uint32_t now = millis();
-
-    // --- 1. Scan Inputs (50 Hz) ---
-    if (now - lastInputScan >= INPUT_SCAN_INTERVAL_MS) {
-        lastInputScan = now;
-
-        uint16_t inputs = ioExpanderReadInputs();
-        zonesUpdate(inputs);
-
-        // --- Recovery alert (GA09: #0#) — only when system was/is armed ---
-        bool currentAllClear = zonesAllClear();
-        AlarmState st = alarmGetState();
-        bool isArmedOrActive = (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME ||
-                                st == ALARM_TRIGGERED  || st == ALARM_ENTRY_DELAY);
-        if (currentAllClear && !lastAllClear && isArmedOrActive) {
-            alarmBroadcast(smsCmdGetRecoveryText());
-        }
-        lastAllClear = currentAllClear;
-    }
-
-    // --- 2. Alarm State Machine ---
     alarmUpdate();
-
-    // --- 3. Network ---
     networkUpdate();
 
-    // --- 4. Serial CLI ---
-    cliUpdate();
+    if (now - lastGlobalHeartbeatCheck >= 2000) {
+        lastGlobalHeartbeatCheck = now;
+        uint8_t currentBits = 0;
+        portENTER_CRITICAL(&heartbeatMux);
+        currentBits = taskHeartbeatBits;
+        taskHeartbeatBits = 0; 
+        portEXIT_CRITICAL(&heartbeatMux);
 
-    // --- 5. Watchdog ---
-    esp_task_wdt_reset();
-
-    // Small yield for WiFi/system tasks
+        if (currentBits == ALL_TASKS_HEALTHY) {
+            esp_task_wdt_reset();
+        } else {
+            LOG_ERROR(TAG, "WATCHDOG: MISSING BITS: 0x%02X", (uint8_t)(ALL_TASKS_HEALTHY ^ currentBits));
+        }
+    }
     yield();
 }

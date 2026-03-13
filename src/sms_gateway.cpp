@@ -4,9 +4,12 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <mbedtls/sha256.h>
-#include <esp_task_wdt.h>
 #include "sms_commands.h"
 #include "network.h"
+#include "logging.h"
+#include <esp_task_wdt.h>
+
+static const char* TAG = "SMS";
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -35,7 +38,7 @@ static void setError(const char* fmt, ...)
     va_start(args, fmt);
     vsnprintf(lastError, sizeof(lastError), fmt, args);
     va_end(args);
-    Serial.printf("[SMS] Error: %s\n", lastError);
+    LOG_ERROR(TAG, "%s", lastError);
 }
 
 static String buildUrl(const char* path)
@@ -43,29 +46,48 @@ static String buildUrl(const char* path)
     return String("http://") + routerIp + path;
 }
 
-/// Extract a substring between two markers from an HTML body.
-static String extractBetween(const String& body, const String& before, const String& after, int startPos = 0)
+/// Extract a substring between two markers from an HTML body safely.
+static String extractBetween(const String& body, const char* before, const char* after, int startPos = 0)
 {
     int s = body.indexOf(before, startPos);
     if (s < 0) return "";
-    s += before.length();
+    s += strlen(before);
     int e = body.indexOf(after, s);
     if (e < 0) return "";
     return body.substring(s, e);
 }
 
+/// Robustly extract a value from a named hidden input tag.
+/// Handles unordered attributes and ensures parsing stays within tag boundaries.
+static String extractHiddenField(const String& page, const char* fieldName)
+{
+    String searchName = String("name=\"") + fieldName + "\"";
+    int pos = page.indexOf(searchName);
+    if (pos < 0) return "";
+
+    // Strictly locate the start and end of the containing <input tag
+    int tagStart = page.lastIndexOf("<input", pos);
+    int tagEnd = page.indexOf(">", pos);
+    
+    // Boundary check: ensure the search name is actually inside THIS input tag
+    if (tagStart < 0 || tagEnd < 0 || pos < tagStart || pos > tagEnd) return "";
+
+    String inputTag = page.substring(tagStart, tagEnd + 1);
+    
+    // Within this specific, isolated tag, find value="..."
+    // Use tag-aware extraction to ensure we don't bleed into next element
+    String val = extractBetween(inputTag, "value=\"", "\"");
+    
+    // Security check: Tokens shouldn't be empty or absurdly long
+    if (val.length() == 0 || val.length() > 256) return "";
+    
+    return val;
+}
+
 /// Extract the CSRF token from a LuCI HTML page.
-/// Searches for <input name="token" ... value="..."> with any attribute order.
 static String extractCsrfToken(const String& body)
 {
-    String searchName = "name=\"token\"";
-    int pos = body.indexOf(searchName);
-    if (pos < 0) return "";
-    int inputStart = body.lastIndexOf("<input", pos);
-    int inputEnd = body.indexOf(">", pos);
-    if (inputStart < 0 || inputEnd < 0) return "";
-    String inputTag = body.substring(inputStart, inputEnd + 1);
-    return extractBetween(inputTag, "value=\"", "\"");
+    return extractHiddenField(body, "token");
 }
 
 /// Compute SHA-256 hash and return as lowercase hex string.
@@ -109,8 +131,8 @@ bool smsGatewayLogin()
     // Note: Cudy LT500D returns the login page with HTTP 403 status.
     // We accept both 200 and 403 as valid responses.
     HTTPClient http;
-    String loginPageUrl = String("http://") + routerIp + "/cgi-bin/luci/";
-    Serial.printf("[SMS] GET login page: %s\n", loginPageUrl.c_str());
+    String loginPageUrl = buildUrl("/cgi-bin/luci/");
+    LOG_INFO(TAG, "Fetching login page: %s", loginPageUrl.c_str());
 
     http.begin(loginPageUrl);
     http.setTimeout(10000);
@@ -118,33 +140,18 @@ bool smsGatewayLogin()
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
     int code = http.GET();
-    Serial.printf("[SMS] Login page response: %d\n", code);
+    LOG_INFO(TAG, "Login page response: %d", code);
 
-    // Accept 200 OK or 403 Forbidden (Cudy sends login form as 403)
+    // Some Cudy router firmwares return the login form with 403 Forbidden 
+    // when unauthenticated. We treat 200/403 as valid for scraping.
     if (code != HTTP_CODE_OK && code != 403) {
-        setError("Login page GET error: %d", code);
+        setError("Network failure accessing router (HTTP %d)", code);
         http.end();
         return false;
     }
 
     String loginPage = http.getString();
     http.end();
-
-    // Extract hidden fields — handle any attribute order
-
-    // Generic helper: find <input with name="X" and extract its value="Y"
-    auto extractHiddenField = [&](const String& page, const String& fieldName) -> String {
-        String searchName = String("name=\"") + fieldName + "\"";
-        int pos = page.indexOf(searchName);
-        if (pos < 0) return "";
-        // Search backward for '<input' and forward for '>'
-        int inputStart = page.lastIndexOf("<input", pos);
-        int inputEnd = page.indexOf(">", pos);
-        if (inputStart < 0 || inputEnd < 0) return "";
-        String inputTag = page.substring(inputStart, inputEnd + 1);
-        // Now extract value="..." from this tag
-        return extractBetween(inputTag, "value=\"", "\"");
-    };
 
     String csrf = extractHiddenField(loginPage, "_csrf");
     String token = extractHiddenField(loginPage, "token");
@@ -156,10 +163,8 @@ bool smsGatewayLogin()
         return false;
     }
 
-    Serial.printf("[SMS] Login fields: csrf=%s... token=%s... salt=%s...\n",
-                  csrf.substring(0, 8).c_str(),
-                  token.substring(0, 8).c_str(),
-                  salt.substring(0, 8).c_str());
+    LOG_INFO(TAG, "Login factors: csrf=%.8s... token=%.8s... salt=%.8s...",
+                   csrf.c_str(), token.c_str(), salt.c_str());
 
     // Store login _csrf as fallback for send operations
     csrfToken = csrf;
@@ -197,11 +202,10 @@ bool smsGatewayLogin()
                   postData.length(), csrf.substring(0,8).c_str(),
                   routerUser, finalHash.substring(0,8).c_str());
 
-    int httpCode = http2.POST(postData);
-
-    Serial.printf("[SMS] Login POST response: %d\n", httpCode);
+    int postCode = http2.POST(postData);
+    LOG_INFO(TAG, "Login POST result: %d", postCode);
     // LuCI responds with 302 redirect on successful login
-    if (httpCode == 302 || httpCode == 301 || httpCode == 200) {
+    if (postCode == 302 || postCode == 301 || postCode == 200) {
         // Extract sysauth cookie
         String cookies = http2.header("Set-Cookie");
         Serial.printf("[SMS] Set-Cookie: %s\n", cookies.c_str());
@@ -237,7 +241,7 @@ bool smsGatewayLogin()
     http2.end();
 
     if (sysauthCookie.length() == 0) {
-        setError("Login failed — no session cookie (HTTP %d)", httpCode);
+        setError("Login failed — no session cookie (HTTP %d)", postCode);
         return false;
     }
 
@@ -359,23 +363,21 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
 
         esp_task_wdt_reset(); // Reset watchdog before blocking call
         
-        // URL-encode message (form encoding)
+        // URL-encode message (form encoding) - Robust Citadel Implementation
         String encodedMsg = "";
-        encodedMsg.reserve(strlen(message) * 3); // Prevent C++ String heap fragmentation
+        encodedMsg.reserve(strlen(message) * 3);
+        const char* hex = "0123456789ABCDEF";
         for (unsigned int i = 0; i < strlen(message); i++) {
-            char c = message[i];
-            if (c == ' ') encodedMsg += '+';
-            else if (c == '%') encodedMsg += "%25";
-            else if (c == '&') encodedMsg += "%26";
-            else if (c == '=') encodedMsg += "%3D";
-            else if (c == '#') encodedMsg += "%23";
-            else if (c == '+') encodedMsg += "%2B";
-            else if (c == '\n') encodedMsg += "%0A";
-            else if (c == '\r') encodedMsg += "%0D";
-            else if (c == '"') encodedMsg += "%22";
-            else if (c == '<') encodedMsg += "%3C";
-            else if (c == '>') encodedMsg += "%3E";
-            else encodedMsg += c;
+            unsigned char c = (unsigned char)message[i];
+            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                encodedMsg += (char)c;
+            } else if (c == ' ') {
+                encodedMsg += '+';
+            } else {
+                encodedMsg += '%';
+                encodedMsg += hex[c >> 4];
+                encodedMsg += hex[c & 0x0F];
+            }
         }
 
         if (encodedMsg.length() > 1024) {
@@ -460,104 +462,86 @@ static int smsGatewayPollMessages(SmsMessage* msgs, int maxMessages, const char*
         return 0;
     }
 
-    String window;
-    window.reserve(4096);
+    char window[1024];
+    int windowPos = 0;
     int count = 0;
     unsigned long streamStartMs = millis();
 
-    while ((http.connected() || stream->available()) && count < maxMessages && (millis() - streamStartMs) < 5000) {
-        size_t size = stream->available();
-        if (size) {
+    while ((http.connected() || stream->available()) && count < maxMessages && (millis() - streamStartMs) < 8000) {
+        if (stream->available()) {
             streamStartMs = millis();
-            uint8_t buf[257];
-            int c = stream->readBytes(buf, min(size, sizeof(buf) - 1));
-            
-            for (int j = 0; j < c; j++) {
-                if (buf[j] == '\0') buf[j] = ' '; 
-            }
-            buf[c] = '\0';
-            
-            // Fix: avoid temporary String allocations that fragment heap
-            window += (const char*)buf;
+            int c = stream->read();
+            if (c < 0) break;
 
-            int searchPos = 0;
-            while (count < maxMessages) {
-                int rowStart = window.indexOf("<tr class=\"cbi-section-table-row", searchPos);
-                if (rowStart < 0) break;
+            if (c == '\0') c = ' ';
+            window[windowPos++] = (char)c;
+            window[windowPos] = '\0';
 
-                int rowEnd = window.indexOf("</tr>", rowStart);
-                if (rowEnd < 0) break;
+            // Look for row end
+            if (strcasestr(window, "</tr>")) {
+                // Parse the completed row in the window
+                char* rowStart = strcasestr(window, "<tr class=\"cbi-section-table-row");
+                if (rowStart) {
+                    SmsMessage msg;
+                    memset(&msg, 0, sizeof(msg));
+                    
+                    int tdIdx = 0;
+                    char* td = strcasestr(rowStart, "<td");
+                    while (td && tdIdx < 6) {
+                        char* contentStart = strchr(td, '>');
+                        if (!contentStart) break;
+                        contentStart++;
+                        
+                        char* contentEnd = strcasestr(contentStart, "</td>");
+                        if (!contentEnd) break;
+                        
+                        int len = contentEnd - contentStart;
+                        char cell[128];
+                        if (len >= (int)sizeof(cell)) len = sizeof(cell) - 1;
+                        strncpy(cell, contentStart, len);
+                        cell[len] = '\0';
+                        
+                        // Trim cell bits
+                        char* trimmed = cell;
+                        while (*trimmed && isspace(*trimmed)) trimmed++;
+                        char* e = trimmed + strlen(trimmed) - 1;
+                        while (e > trimmed && isspace(*e)) *e-- = '\0';
 
-                String row = window.substring(rowStart, rowEnd + 5);
-
-                int tdPos = 0;
-                int tdIdx = 0;
-                String phone = "";
-                String content = "";
-                String timestamp = "";
-                String cfgId = "";
-
-                while (tdIdx < 6) {
-                    int tdStart = row.indexOf("<td", tdPos);
-                    if (tdStart < 0) break;
-                    int tdContentStart = row.indexOf(">", tdStart) + 1;
-                    int tdEnd = row.indexOf("</td>", tdContentStart);
-                    if (tdEnd < 0) break;
-
-                    String cellContent = row.substring(tdContentStart, tdEnd);
-                    cellContent.trim();
-
-                    switch (tdIdx) {
-                        case 1: phone = cellContent; break;
-                        case 2: content = cellContent; break;
-                        case 3: timestamp = cellContent; break;
-                        case 4: {
-                            int cfgStart = cellContent.indexOf("cfg=");
-                            if (cfgStart >= 0) {
-                                cfgStart += 4;
-                                int cfgEnd = cellContent.indexOf("&", cfgStart);
-                                if (cfgEnd < 0) cfgEnd = cellContent.indexOf("\"", cfgStart);
-                                if (cfgEnd < 0) cfgEnd = cellContent.indexOf("'", cfgStart);
-                                if (cfgEnd > cfgStart) cfgId = cellContent.substring(cfgStart, cfgEnd);
+                        switch (tdIdx) {
+                            case 1: strncpy(msg.sender, trimmed, sizeof(msg.sender)-1); break;
+                            case 2: strncpy(msg.body, trimmed, sizeof(msg.body)-1); break;
+                            case 3: strncpy(msg.timestamp, trimmed, sizeof(msg.timestamp)-1); break;
+                            case 4: {
+                                char* cfg = strcasestr(trimmed, "cfg=");
+                                if (cfg) {
+                                    cfg += 4;
+                                    char* endCfg = strpbrk(cfg, " \"'&");
+                                    if (endCfg) *endCfg = '\0';
+                                    msg.id = (int)strtol(cfg + 3, nullptr, 16);
+                                }
+                                break;
                             }
-                            break;
                         }
+                        td = strcasestr(contentEnd, "<td");
+                        tdIdx++;
                     }
-
-                    tdPos = tdEnd + 5;
-                    tdIdx++;
-                }
-
-                if (phone.length() > 0) {
-                    msgs[count].id = count;
-                    strncpy(msgs[count].sender, phone.c_str(), sizeof(msgs[count].sender) - 1);
-                    msgs[count].sender[sizeof(msgs[count].sender) - 1] = '\0';
-                    strncpy(msgs[count].body, content.c_str(), sizeof(msgs[count].body) - 1);
-                    msgs[count].body[sizeof(msgs[count].body) - 1] = '\0';
-                    strncpy(msgs[count].timestamp, timestamp.c_str(), sizeof(msgs[count].timestamp) - 1);
-                    msgs[count].timestamp[sizeof(msgs[count].timestamp) - 1] = '\0';
-
-                    if (cfgId.length() > 0) {
-                        msgs[count].id = (int)strtol(cfgId.c_str() + 3, nullptr, 16);
+                    
+                    if (strlen(msg.sender) > 0) {
+                        memcpy(&msgs[count++], &msg, sizeof(SmsMessage));
                     }
-                    count++;
                 }
-
-                searchPos = rowEnd + 5;
+                // Clear window for next row scan
+                windowPos = 0;
+                window[0] = '\0';
             }
 
-            if (searchPos > 0) {
-                window.remove(0, searchPos);
-            } else if (window.length() > 2048) {
-                int lastPartial = window.lastIndexOf("<tr ");
-                if (lastPartial >= 0) {
-                    window.remove(0, lastPartial);
-                } else {
-                    window.remove(0, 1024);
-                }
+            // Guard: If window is full and no row end found, shift it
+            if (windowPos >= (int)sizeof(window) - 1) {
+                memmove(window, window + 512, 512);
+                windowPos = 512;
             }
         } else {
-            vTaskDelay(pdMS_TO_TICKS(10)); // Cooperative multitasking yield instead of delay(10)
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 

@@ -1,29 +1,27 @@
 #include "whatsapp_client.h"
 #include <HTTPClient.h>
-#include "sms_commands.h"
+#include "logging.h"
 #include "network.h"
-#include <esp_task_wdt.h>
 
-// Safe URL encoder that prevents negative sign-extension panics on UTF-8 characters
-static String safeUrlEncode(const char *msg) {
-    const char *hex = "0123456789ABCDEF";
-    String encodedMsg = "";
-    encodedMsg.reserve(strlen(msg) * 3); // Prevent C++ String heap fragmentation
-    while (*msg != '\0') {
-        if ( ('a' <= *msg && *msg <= 'z') || 
-             ('A' <= *msg && *msg <= 'Z') || 
-             ('0' <= *msg && *msg <= '9') || 
-             *msg == '-' || *msg == '_' || *msg == '.' || *msg == '~' ) {
-            encodedMsg += *msg;
+static const char* TAG = "WA";
+
+// Professional URL encoder — Stack-allocated (Obsidian Mantle)
+static size_t urlEncodeTo(const char* src, char* dest, size_t destSize) {
+    static const char *hexChars = "0123456789ABCDEF";
+    size_t d = 0;
+    while (*src && (d < destSize - 1)) {
+        uint8_t c = (uint8_t)*src++;
+        if (isAlphaNumeric(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            dest[d++] = (char)c;
         } else {
-            encodedMsg += '%';
-            unsigned char c = (unsigned char)*msg;
-            encodedMsg += hex[c >> 4];
-            encodedMsg += hex[c & 0x0F];
+            if (d + 3 >= destSize) break;
+            dest[d++] = '%';
+            dest[d++] = hexChars[c >> 4];
+            dest[d++] = hexChars[c & 0x0F];
         }
-        msg++;
     }
-    return encodedMsg;
+    dest[d] = '\0';
+    return d;
 }
 
 static char waPhone[32] = "";
@@ -31,18 +29,20 @@ static char waApiKey[32] = "";
 static WhatsAppMode waMode = WA_MODE_SMS;
 
 void whatsappInit() {
-    Serial.println("[WA] WhatsApp client initialized");
+    LOG_INFO(TAG, "WhatsApp client initialized");
 }
 
 void whatsappSetConfig(const char* phone, const char* apiKey, WhatsAppMode mode) {
-    strncpy(waPhone, phone, sizeof(waPhone) - 1);
-    waPhone[sizeof(waPhone) - 1] = '\0';
-    
-    strncpy(waApiKey, apiKey, sizeof(waApiKey) - 1);
-    waApiKey[sizeof(waApiKey) - 1] = '\0';
-    
+    if (phone) {
+        strncpy(waPhone, phone, sizeof(waPhone) - 1);
+        waPhone[sizeof(waPhone) - 1] = '\0';
+    }
+    if (apiKey) {
+        strncpy(waApiKey, apiKey, sizeof(waApiKey) - 1);
+        waApiKey[sizeof(waApiKey) - 1] = '\0';
+    }
     waMode = mode;
-    Serial.printf("[WA] Config updated: Phone=%s, Mode=%d\n", waPhone, (int)waMode);
+    LOG_INFO(TAG, "Config updated: Phone=%s, Mode=%d", waPhone, (int)waMode);
 }
 
 const char* whatsappGetPhone() { return waPhone; }
@@ -50,48 +50,43 @@ const char* whatsappGetApiKey() { return waApiKey; }
 WhatsAppMode whatsappGetMode() { return waMode; }
 
 bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
-    if (phone == nullptr || strlen(phone) == 0 || apiKey == nullptr || strlen(apiKey) == 0) {
-        Serial.println("[WA] Error: WhatsApp credentials not set");
+    if (!phone || strlen(phone) == 0 || !apiKey || strlen(apiKey) == 0) {
+        LOG_ERROR(TAG, "Credentials not set");
         return false;
     }
 
     if (!networkIsConnected()) {
-        Serial.println("[WA] Network DOWN. Skipping WhatsApp alert.");
+        LOG_WARN(TAG, "Network DOWN. Skipping alert.");
         return false;
     }
 
-    HTTPClient http;
+    // Stack-allocated buffers (Zero-Heap architecture)
+    char url[512];
+    char encodedMsg[384];
     
-    // Build URL using fixed buffer to avoid String heap fragmentation
-    // CallMeBot API: https://api.callmebot.com/whatsapp.php?phone=X&text=Y&apikey=Z
-    String encodedMsg = safeUrlEncode(message);
-    int urlLen = 60 + strlen(phone) + encodedMsg.length() + strlen(apiKey);
-    char* url = (char*)malloc(urlLen + 1);
-    if (!url) {
-        Serial.println("[WA] Error: URL buffer allocation failed");
-        return false;
-    }
-    snprintf(url, urlLen + 1,
+    urlEncodeTo(message, encodedMsg, sizeof(encodedMsg));
+    
+    snprintf(url, sizeof(url), 
              "https://api.callmebot.com/whatsapp.php?phone=%s&text=%s&apikey=%s",
-             phone, encodedMsg.c_str(), apiKey);
+             phone, encodedMsg, apiKey);
 
-    Serial.printf("[WA] Sending alert to %s...\n", phone);
+    LOG_INFO(TAG, "Dispatching alert to %s...", phone);
     
+    HTTPClient http;
     http.begin(url);
-    http.setTimeout(1500); // Fast-fail limit to prevent netWorkerTask queue throttling
+    http.setTimeout(5000); // 5s timeout to allow for network jitter
     
-    esp_task_wdt_reset(); // Prevent watchdog reboot during alert dispatch
-    int httpResponseCode = http.GET();
+    int code = http.GET();
     
     bool success = false;
-    if (httpResponseCode > 0) {
-        Serial.printf("[WA] HTTP Response code: %d\n", httpResponseCode);
-        if (httpResponseCode == 200) success = true;
+    if (code == 200) {
+        LOG_INFO(TAG, "Alert delivered successfully");
+        success = true;
     } else {
-        Serial.printf("[WA] Error code: %s\n", http.errorToString(httpResponseCode).c_str());
+        LOG_ERROR(TAG, "Failed to send (HTTP %d): %s", code, http.errorToString(code).c_str());
     }
     
     http.end();
-    free(url);
     return success;
 }
+

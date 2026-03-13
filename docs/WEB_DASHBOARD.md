@@ -112,6 +112,17 @@ Every 2 seconds, the JS client hits `/api/status`. The response contains the fol
 ### Local Access Only
 The dashboard is served on port 80 and is intended for **Local Area Network (LAN)** use. It does not implement HTTPS or global basic auth by default to minimize memory overhead, relying instead on network-level security (WPA2/WPA3).
 
+### Mandatory API Authentication (Remediation 9.0)
+Endpoints that were previously unauthenticated for reconnaissance (`/api/status`, `/api/outputs`) now **require a valid PIN**. 
+- **Status/Output Requests**: Must include a `pin` query parameter or be part of an authenticated session.
+- **Fail-Safe**: Requests without a PIN will return a `403 Forbidden` response with a code suggesting the system is "LOCKED".
+
+### Anti-Brute Force Rate Limiting
+To prevent local network attackers from triggering a global alarm lockout, an IP-based tracking system is implemented:
+1.  **Per-IP Tracking**: The system tracks the last 8 unique remote IPs.
+2.  **Cooldown**: A 5-second cooldown is enforced between attempts from the same IP.
+3.  **Local Lockout**: After 5 consecutive failures, a specific IP is blocked for 60 seconds. This prevents automated scripts from hammering the ESP32 while allowing the physical keypad and owner to remain operational.
+
 ### PIN Protection Layer
 Sensitive operations (ARM, DISARM, BYPASS) are protected by a **client-side modal + server-side validation** pattern.
 

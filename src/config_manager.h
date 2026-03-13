@@ -3,6 +3,23 @@
 
 #include <Arduino.h>
 
+enum ConfigSection {
+    CFG_MAIN,
+    CFG_WIFI,
+    CFG_ROUTER,
+    CFG_ZONES,
+    CFG_ALERTS,
+    CFG_MQTT,
+    CFG_ONVIF,
+    CFG_SCHEDULE,
+    CFG_HEARTBEAT,
+    CFG_TIMEZONE,
+    CFG_ALL
+};
+
+/// Mark a configuration section as changed and needing a save.
+void configMarkDirty(ConfigSection section);
+
 /// Initialize the config manager (opens NVS namespace).
 void configInit();
 

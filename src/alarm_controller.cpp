@@ -1,7 +1,11 @@
 #include "alarm_controller.h"
 #include "io_expander.h"
 #include "config.h"
+#include <Arduino.h>
+#include "logging.h"
 #include <string.h>
+
+static const char* TAG = "ALM";
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -83,11 +87,11 @@ static void sirenOn(int8_t zoneId, const char* name)
         // Strict Noise Ordinance Compliance: Only set start timer IF this is a new alarm cycle
         if (firstTriggerMs == 0) {
             firstTriggerMs = millis();
-            Serial.println("[ALARM] Strict siren duration started");
+            LOG_INFO(TAG, "Strict siren duration started");
         }
-        sirenStartMs = millis(); 
+        sirenStartMs = millis();
         ioExpanderSetOutput(sirenOutputChannel, true);
-        Serial.println("[ALARM] Siren ON");
+        LOG_WARN(TAG, "Siren: ON (Zone %d: %s)", zoneId + 1, name);
         fireEvent(EVT_SIREN_ON, zoneId, details);
     }
 }
@@ -98,7 +102,7 @@ static void sirenOff()
         sirenActive = false;
         firstTriggerMs = 0; // Reset strict timer for next cycle
         ioExpanderSetOutput(sirenOutputChannel, false);
-        Serial.println("[ALARM] Siren OFF");
+        LOG_INFO(TAG, "Siren: OFF");
         fireEvent(EVT_SIREN_OFF, -1, "Manual or Timeout");
     }
 }
@@ -109,18 +113,18 @@ static bool validatePin(const char* pin)
     // Overflow-safe lockout check
     if (lockedOut) {
         if ((millis() - lockoutStartMs) < LOCKOUT_DURATION_MS) {
-            Serial.println("[ALARM] SECURITY: PIN entry locked due to multiple failures");
+            LOG_WARN(TAG, "SECURITY: PIN entry locked due to multiple failures");
             return false;
         } else {
             // Lockout expired — MUST reset counter to prevent instant re-lockout on next failure
             lockedOut = false;
             failedAttempts = 0;
-            Serial.println("[ALARM] SECURITY: Lockout expired");
+            LOG_INFO(TAG, "SECURITY: Lockout expired");
         }
     }
 
     if (pin == nullptr || strlen(pin) == 0) return false;
-    
+
     if (pinEquals(pin, alarmPin)) {
         failedAttempts = 0;
         return true;
@@ -129,7 +133,7 @@ static bool validatePin(const char* pin)
         if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
             lockedOut = true;
             lockoutStartMs = millis();
-            Serial.println("[ALARM] SECURITY: Too many failed attempts! Locked out for 5 minutes.");
+            LOG_ERROR(TAG, "SECURITY: Too many failed attempts! Locked out for %lu minutes.", LOCKOUT_DURATION_MS / 60000);
         }
         return false;
     }
@@ -147,15 +151,15 @@ static void setState(AlarmState newState)
     if (currentState == newState) return;
 
     // Capture return state when transitioning out of stable armed/disarmed states
-    if (currentState == ALARM_DISARMED || 
-        currentState == ALARM_ARMED_AWAY || 
+    if (currentState == ALARM_DISARMED ||
+        currentState == ALARM_ARMED_AWAY ||
         currentState == ALARM_ARMED_HOME) {
         returnState = currentState;
     }
 
     const char* oldStr = alarmGetStateStr();
     currentState = newState;
-    Serial.printf("[ALARM] State: %s -> %s\n", oldStr, alarmGetStateStr());
+    LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStr());
 }
 
 // ---------------------------------------------------------------------------
@@ -188,10 +192,10 @@ static void onZoneEvent(uint8_t zoneIndex, ZoneState newState)
                 if (info->config.type == ZONE_24H) {
                     triggeringZone = zoneIndex;
                     setState(ALARM_TRIGGERED);
-                    sirenOn();
+                    sirenOn(zoneIndex, info->config.name);
                     snprintf(details, sizeof(details),
                              "24H Zone %d (%s) ALARM!", zoneIndex + 1, info->config.name);
-                    fireEvent(EVT_ALARM_TRIGGERED, details);
+                    fireEvent(EVT_ALARM_TRIGGERED, zoneIndex, details);
                 }
                 break;
 
@@ -244,7 +248,7 @@ static void onZoneEvent(uint8_t zoneIndex, ZoneState newState)
                 break;
         }
     } else if (newState == ZONE_NORMAL) {
-        fireEvent(EVT_ZONE_RESTORED, details);
+        fireEvent(EVT_ZONE_RESTORED, zoneIndex, details);
     }
 }
 
@@ -262,7 +266,7 @@ void alarmInit()
     // Register our zone event handler
     zonesSetCallback(onZoneEvent);
 
-    Serial.println("[ALARM] Controller initialized — DISARMED");
+    LOG_INFO(TAG, "Controller initialized — DISARMED");
 }
 
 void alarmSetCallback(AlarmEventCallback cb)
@@ -283,7 +287,7 @@ void alarmUpdate()
                     setState(ALARM_TRIGGERED);
                     sirenOn(-1, "Exit Failure");
                     fireEvent(EVT_ALARM_TRIGGERED, -1, "Zones open at arming");
-                    triggeringZone = 0xFF; 
+                    triggeringZone = 0xFF;
                 } else {
                     // System is armed normally
                     if (pendingArmMode == ARM_PENDING_HOME) {
@@ -316,13 +320,13 @@ void alarmUpdate()
                 uint32_t elapsed = now - firstTriggerMs;
                 if (elapsed >= (uint32_t)sirenDurationSec * 1000) {
                     sirenOff();
-                    Serial.println("[ALARM] Siren auto-silenced after strict duration timeout.");
+                    LOG_INFO(TAG, "Siren auto-silenced after strict duration timeout.");
                     activeAlarmMask = 0;
                     triggeringZone = 0xFF;
-                    
+
                     // Re-arm system gracefully
                     setState(returnState);
-                    
+
                     if (returnState == ALARM_ARMED_AWAY) {
                         fireEvent(EVT_ARMED_AWAY, -1, "Auto-Restore");
                     } else if (returnState == ALARM_ARMED_HOME) {
@@ -343,12 +347,12 @@ void alarmUpdate()
 bool alarmArmAway(const char* pin)
 {
     if (!validatePin(pin)) {
-        Serial.println("[ALARM] Arm AWAY failed — invalid PIN");
+        LOG_WARN(TAG, "Arm AWAY failed — invalid PIN");
         return false;
     }
 
     if (!zonesAllClear()) {
-        Serial.println("[ALARM] Arm AWAY failed — zones not clear");
+        LOG_WARN(TAG, "Arm AWAY failed — zones not clear");
         zonesPrintStatus();
         return false;
     }
@@ -358,19 +362,19 @@ bool alarmArmAway(const char* pin)
     pendingArmMode  = ARM_PENDING_AWAY;
     setState(ALARM_EXIT_DELAY);
     fireEvent(EVT_EXIT_DELAY, -1, "Arming AWAY");
-    Serial.printf("[ALARM] Exit delay: %d seconds\n", exitDelaySec);
+    LOG_INFO(TAG, "Exit delay: %d seconds", exitDelaySec);
     return true;
 }
 
 bool alarmArmHome(const char* pin)
 {
     if (!validatePin(pin)) {
-        Serial.println("[ALARM] Arm HOME failed — invalid PIN");
+        LOG_WARN(TAG, "Arm HOME failed — invalid PIN");
         return false;
     }
 
     if (!zonesAllClear()) {
-        Serial.println("[ALARM] Arm HOME failed — zones not clear");
+        LOG_WARN(TAG, "Arm HOME failed — zones not clear");
         zonesPrintStatus();
         return false;
     }
@@ -379,14 +383,14 @@ bool alarmArmHome(const char* pin)
     pendingArmMode  = ARM_PENDING_HOME;
     setState(ALARM_EXIT_DELAY);
     fireEvent(EVT_EXIT_DELAY, -1, "Arming HOME");
-    Serial.printf("[ALARM] Exit delay: %d seconds\n", exitDelaySec);
+    LOG_INFO(TAG, "Exit delay: %d seconds", exitDelaySec);
     return true;
 }
 
 bool alarmDisarm(const char* pin)
 {
     if (!validatePin(pin)) {
-        Serial.println("[ALARM] Disarm failed — invalid PIN");
+        LOG_WARN(TAG, "Disarm failed — invalid PIN");
         return false;
     }
 
@@ -402,7 +406,7 @@ void alarmMuteSiren()
     if (sirenActive) {
         sirenMuted = true;
         ioExpanderSetOutput(sirenOutputChannel, false);
-        Serial.println("[ALARM] Siren MUTED (alarm still active)");
+        LOG_INFO(TAG, "Siren MUTED (alarm still active)");
         fireEvent(EVT_SIREN_OFF, -1, "Manual Mute");
     }
 }
@@ -450,7 +454,7 @@ void alarmSetPin(const char* pin)
 {
     strncpy(alarmPin, pin, MAX_PIN_LEN - 1);
     alarmPin[MAX_PIN_LEN - 1] = '\0';
-    Serial.println("[ALARM] PIN updated");
+    LOG_INFO(TAG, "PIN successfully updated");
 }
 
 const char* alarmGetPin()
@@ -471,7 +475,7 @@ uint32_t alarmGetLockoutRemaining()
 void alarmSetExitDelay(uint16_t seconds)
 {
     exitDelaySec = seconds;
-    Serial.printf("[ALARM] Exit delay set to %d seconds\n", seconds);
+    LOG_INFO(TAG, "Exit delay set to %d seconds", seconds);
 }
 
 uint16_t alarmGetExitDelay() { return exitDelaySec; }
@@ -479,7 +483,7 @@ uint16_t alarmGetExitDelay() { return exitDelaySec; }
 void alarmSetEntryDelay(uint16_t seconds)
 {
     entryDelaySec = seconds;
-    Serial.printf("[ALARM] Entry delay set to %d seconds\n", seconds);
+    LOG_INFO(TAG, "Entry delay set to %d seconds", seconds);
 }
 
 uint16_t alarmGetEntryDelay() { return entryDelaySec; }
@@ -487,7 +491,7 @@ uint16_t alarmGetEntryDelay() { return entryDelaySec; }
 void alarmSetSirenDuration(uint16_t seconds)
 {
     sirenDurationSec = seconds;
-    Serial.printf("[ALARM] Siren duration set to %d seconds\n", seconds);
+    LOG_INFO(TAG, "Siren duration set to %d seconds", seconds);
 }
 
 uint16_t alarmGetSirenDuration() { return sirenDurationSec; }
@@ -507,7 +511,7 @@ void alarmSetSirenOutput(uint8_t channel)
         if (wasActive) {
             ioExpanderSetOutput(sirenOutputChannel, true);
         }
-        Serial.printf("[ALARM] Siren output channel set to %d\n", channel);
+        LOG_INFO(TAG, "Siren output channel set to %d", channel);
     }
 }
 

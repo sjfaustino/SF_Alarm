@@ -2,6 +2,9 @@
 #include "config.h"
 #include <Wire.h>
 #include <PCF8574.h>
+#include "logging.h"
+
+static const char* TAG = "IO";
 
 // ---------------------------------------------------------------------------
 // PCF8574 instances
@@ -19,12 +22,21 @@ static bool chipOk[4] = { false, false, false, false };
 static uint32_t chipRetryMs[4] = { 0, 0, 0, 0 };
 static const uint32_t CHIP_RETRY_INTERVAL_MS = 5000; // Retry once per 5 seconds
 
+static SemaphoreHandle_t i2cMutex = nullptr;
+#define I2C_LOCK_TIMEOUT pdMS_TO_TICKS(100)
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 bool ioExpanderInit()
 {
+    if (i2cMutex == nullptr) {
+        i2cMutex = xSemaphoreCreateMutex();
+    }
+
+    if (xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT) != pdTRUE) return false;
+
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_CLOCK_HZ);
     Wire.setTimeOut(100); // Prevent infinite while() loops if the I2C bus is physically jammed/shorted
 
@@ -43,11 +55,13 @@ bool ioExpanderInit()
         pcfOut2.write8(0x00);
     }
 
+    xSemaphoreGive(i2cMutex);
+
     currentOutputs = 0x0000;
 
     bool allOk = chipOk[0] && chipOk[1] && chipOk[2] && chipOk[3];
 
-    Serial.printf("[IO] Init %s — IN1:%s IN2:%s OUT1:%s OUT2:%s\n",
+    LOG_INFO(TAG, "Init %s — IN1:%s IN2:%s OUT1:%s OUT2:%s",
                   allOk ? "OK" : "PARTIAL",
                   chipOk[0] ? "OK" : "FAIL",
                   chipOk[1] ? "OK" : "FAIL",
@@ -62,13 +76,17 @@ uint16_t ioExpanderReadInputs()
     uint8_t low  = 0xFF;
     uint8_t high = 0xFF;
 
+    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT) != pdTRUE) {
+        return 0; // Skip poll if bus is busy
+    }
+
     // Runtime Health Check: Try a dummy transmission to verify chip presence
     if (chipOk[0]) {
         Wire.beginTransmission(PCF_INPUT_1_ADDR);
         if (Wire.endTransmission() != 0) {
             chipOk[0] = false;
             chipRetryMs[0] = 0;
-            Serial.println("[IO] ERROR: IN1 chip lost!");
+            LOG_ERROR("IO", "IN1 chip lost!");
         } else {
             low = pcfIn1.read8();
         }
@@ -79,7 +97,7 @@ uint16_t ioExpanderReadInputs()
             chipRetryMs[0] = now;
             if (pcfIn1.begin()) {
                 chipOk[0] = true;
-                Serial.println("[IO] INFO: IN1 chip recovered");
+                LOG_INFO(TAG, "IN1 chip recovered");
                 low = pcfIn1.read8();
             }
         }
@@ -90,7 +108,7 @@ uint16_t ioExpanderReadInputs()
         if (Wire.endTransmission() != 0) {
             chipOk[1] = false;
             chipRetryMs[1] = 0;
-            Serial.println("[IO] ERROR: IN2 chip lost!");
+            LOG_ERROR(TAG, "IN2 chip lost!");
         } else {
             high = pcfIn2.read8();
         }
@@ -100,7 +118,7 @@ uint16_t ioExpanderReadInputs()
             chipRetryMs[1] = now;
             if (pcfIn2.begin()) {
                 chipOk[1] = true;
-                Serial.println("[IO] INFO: IN2 chip recovered");
+                LOG_INFO(TAG, "IN2 chip recovered");
                 high = pcfIn2.read8();
             }
         }
@@ -112,7 +130,7 @@ uint16_t ioExpanderReadInputs()
         if (Wire.endTransmission() != 0) {
             chipOk[2] = false;
             chipRetryMs[2] = 0;
-            Serial.println("[IO] ERROR: OUT1 chip lost!");
+            LOG_ERROR(TAG, "OUT1 chip lost!");
         }
     } else {
         uint32_t now = millis();
@@ -121,7 +139,7 @@ uint16_t ioExpanderReadInputs()
             if (pcfOut1.begin()) {
                 chipOk[2] = true;
                 pcfOut1.write8((uint8_t)(currentOutputs & 0xFF));
-                Serial.println("[IO] INFO: OUT1 chip recovered");
+                LOG_INFO(TAG, "OUT1 chip recovered");
             }
         }
     }
@@ -131,7 +149,7 @@ uint16_t ioExpanderReadInputs()
         if (Wire.endTransmission() != 0) {
             chipOk[3] = false;
             chipRetryMs[3] = 0;
-            Serial.println("[IO] ERROR: OUT2 chip lost!");
+            LOG_ERROR(TAG, "OUT2 chip lost!");
         }
     } else {
         uint32_t now = millis();
@@ -140,13 +158,14 @@ uint16_t ioExpanderReadInputs()
             if (pcfOut2.begin()) {
                 chipOk[3] = true;
                 pcfOut2.write8((uint8_t)((currentOutputs >> 8) & 0xFF));
-                Serial.println("[IO] INFO: OUT2 chip recovered");
+                LOG_INFO(TAG, "OUT2 chip recovered");
             }
         }
     }
 
     // Combine into 16-bit value.
     uint16_t raw = ((uint16_t)high << 8) | (uint16_t)low;
+    xSemaphoreGive(i2cMutex);
     return ~raw & 0xFFFF;
 }
 
@@ -158,12 +177,15 @@ void ioExpanderWriteOutputs(uint16_t mask)
     currentOutputs = mask;
     portEXIT_CRITICAL(&ioMux);
 
+    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT) != pdTRUE) return;
+
     if (chipOk[2]) {
         pcfOut1.write8((uint8_t)(mask & 0xFF));
     }
     if (chipOk[3]) {
         pcfOut2.write8((uint8_t)((mask >> 8) & 0xFF));
     }
+    xSemaphoreGive(i2cMutex);
 }
 
 void ioExpanderSetOutput(uint8_t channel, bool state)
@@ -179,6 +201,8 @@ void ioExpanderSetOutput(uint8_t channel, bool state)
     uint16_t mask = currentOutputs;
     portEXIT_CRITICAL(&ioMux);
 
+    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT) != pdTRUE) return;
+
     // Call output writer without nested lock since we bypass ioExpanderWriteOutputs update
     if (chipOk[2]) {
         pcfOut1.write8((uint8_t)(mask & 0xFF));
@@ -186,6 +210,7 @@ void ioExpanderSetOutput(uint8_t channel, bool state)
     if (chipOk[3]) {
         pcfOut2.write8((uint8_t)((mask >> 8) & 0xFF));
     }
+    xSemaphoreGive(i2cMutex);
 }
 
 uint16_t ioExpanderGetOutputs()

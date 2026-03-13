@@ -1,6 +1,7 @@
 #include "mqtt_client.h"
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include "logging.h"
 #include "alarm_controller.h"
 #include "alarm_zones.h"
 #include "io_expander.h"
@@ -8,6 +9,8 @@
 #include <freertos/queue.h>
 #include <esp_task_wdt.h>
 #include <esp_task_wdt.h>
+
+static const char* TAG = "MQTT";
 
 static WiFiClient espClient;
 static PubSubClient client(espClient);
@@ -57,9 +60,9 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
 
     // Redact PIN from log — commands with ':' contain a PIN (e.g. "DISARM:1234")
     if (strchr(message, ':')) {
-        Serial.printf("[MQTT] Message arrived [%s]: [PIN REDACTED]\n", topic);
+        LOG_INFO(TAG, "Message arrived [%s]: [PIN REDACTED]", topic);
     } else {
-        Serial.printf("[MQTT] Message arrived [%s]: %s\n", topic, message);
+        LOG_INFO(TAG, "Message arrived [%s]: %s", topic, message);
     }
 
     if (strstr(topic, "/cmd")) {
@@ -185,13 +188,12 @@ void mqttUpdate() {
             }
             
             if (connected) {
-                Serial.println("[MQTT] Connected!");
+                LOG_INFO(TAG, "Connected to broker");
                 client.publish("SF_Alarm/availability", "online", true);
                 client.subscribe("SF_Alarm/cmd");
                 mqttSyncRequested = true;
             } else {
-                Serial.print("[MQTT] Connection failed, rc=");
-                Serial.println(client.state());
+                LOG_WARN(TAG, "Connection failed, rc=%d", client.state());
             }
             xSemaphoreGive(mqttConfigMutex);
         }

@@ -3,8 +3,12 @@
 #include "alarm_zones.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <time.h>
+#include "logging.h"
 #include <mbedtls/sha1.h>
 #include <base64.h>
+
+static const char* TAG = "ONVIF";
 
 // ---------------------------------------------------------------------------
 // Constants & Templates
@@ -140,13 +144,13 @@ static bool createSubscription() {
             int end = res.indexOf("</tt:Address>", start);
             state.subscriptionAddress = res.substring(start, end);
             state.connected = true;
-            Serial.println("[ONVIF] Subscription created: " + state.subscriptionAddress);
+            LOG_INFO(TAG, "Subscription created: %s", state.subscriptionAddress.c_str());
             http.end();
             return true;
         }
     }
 
-    Serial.printf("[ONVIF] Subscription failed, code: %d\n", code);
+    LOG_WARN(TAG, "Subscription failed, code: %d", code);
     http.end();
     return false;
 }
@@ -181,55 +185,56 @@ static void pollMessages() {
             return;
         }
         
-        String window;
-        window.reserve(1024); // Micro-buffer for parsing tags
+        char buffer[512];
+        int bufferPos = 0;
         bool motion = false;
         unsigned long timeoutMs = millis();
         
         while (http.connected() || stream->available()) {
             if (millis() - timeoutMs > 5000) break; // Emergency timeout
             
-            size_t size = stream->available();
-            if (size) {
+            if (stream->available()) {
                 timeoutMs = millis();
-                uint8_t buf[256];
-                int c = stream->readBytes(buf, min(size, sizeof(buf)));
-                window += String((char*)buf, c);
-                
-                // Stream parsing logic: find IsMotion and true in close proximity
-                int namePos = window.indexOf("IsMotion");
-                if (namePos >= 0) {
-                    int valPos = window.indexOf("Value=\"true\"", namePos);
-                    if (valPos >= 0 && valPos - namePos < 100) {
+                // We read one byte at a time or in small chunks to the end of our fixed buffer
+                int c = stream->read();
+                if (c < 0) break;
+
+                buffer[bufferPos++] = (char)c;
+                buffer[bufferPos] = '\0';
+
+                // Check for keywords in the current buffer
+                // "IsMotion" + "Value=\"true\""
+                if (strcasestr(buffer, "IsMotion")) {
+                    if (strcasestr(buffer, "Value=\"true\"")) {
                         motion = true;
-                        break; // Found motion, abort scanning the rest of the stream
+                        break;
                     }
                 }
-                
-                // Keep the sliding window small to prevent OOM
-                if (window.length() > 512) {
-                    // Retain the last 150 characters to catch spanning tags like "IsMotion... Value="true""
-                    window.remove(0, window.length() - 150);
+
+                // If buffer is full, shift it to keep the last 128 bytes (enough for the pattern)
+                if (bufferPos >= (int)sizeof(buffer) - 1) {
+                    memmove(buffer, buffer + 256, 256);
+                    bufferPos = 256;
                 }
             } else {
-                delay(10);
+                vTaskDelay(pdMS_TO_TICKS(10));
             }
         }
         
-        if (motion) {
-            // Flush remaining stream nicely
-            while (stream->available()) stream->read();
-        }
+        // Drain stream safely
+        while (stream->available()) stream->read();
         
         zonesSetVirtualInput(state.targetZone, motion);
-        
         if (motion) {
-            Serial.println("[ONVIF] Motion detected on camera!");
+            LOG_INFO(TAG, "Motion detected on camera!");
         }
     } else if (code > 0) {
+        if (code == 401) {
+            LOG_ERROR(TAG, "ONVIF Auth failed - check credentials");
+        }
         if (code == 400 || code == 404 || code == 500) {
             state.connected = false;
-            Serial.println("[ONVIF] Connection lost, will retry subscription");
+            LOG_WARN(TAG, "Connection lost, retrying subscription");
         }
     }
     http.end();
@@ -303,7 +308,7 @@ static void onvifTask(void* pvParameters) {
                 state.lastRenewMs = now;
                 if (stateMutex) xSemaphoreGive(stateMutex);
             } else {
-                vTaskDelay(pdMS_TO_TICKS(10000));
+                vTaskDelay(pdMS_TO_TICKS(5000)); // Reduced from 10s
             }
         } else {
             bool renewNeeded = false;

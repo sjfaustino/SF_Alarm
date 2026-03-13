@@ -12,6 +12,9 @@
 #include <ctype.h>
 #include <time.h>
 #include <SimpleCLI.h>
+#include "logging.h"
+
+static const char* TAG = "CLI";
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -406,9 +409,7 @@ void cliInit() {
     cmdRouter.addArgument("pass", "");
     cmdRouter.addArgument("pin", "");
 
-    Serial.println();
-    Serial.println("SF_Alarm Serial Interface Initialized");
-    Serial.println("Type 'help' for command list.");
+    LOG_INFO(TAG, "Serial Interface Initialized. Type 'help' for command list.");
     printPrompt();
 }
 

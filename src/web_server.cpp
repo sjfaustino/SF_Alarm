@@ -10,8 +10,11 @@
 #include "onvif_client.h"
 #include "config_manager.h"
 #include "network.h"
+#include "logging.h"
 
 #include <PsychicHttp.h>
+
+static const char* TAG = "WEB";
 #include <ArduinoJson.h>
 
 // ---------------------------------------------------------------------------
@@ -32,6 +35,50 @@ static const char* zoneStateStr(ZoneState s)
         case ZONE_BYPASSED:  return "BYPASSED";
         default:             return "UNKNOWN";
     }
+}
+
+// ---------------------------------------------------------------------------
+// Security: IP-based Rate Limiting
+// ---------------------------------------------------------------------------
+struct AuthTracker {
+    uint32_t ip;
+    uint32_t lastAttemptMs;
+    uint8_t  failCount;
+};
+static AuthTracker authHistory[8]; // Track last 8 IPs
+static uint8_t authHistoryIdx = 0;
+
+static bool checkRateLimit(uint32_t ip)
+{
+    uint32_t now = millis();
+    for (int i = 0; i < 8; i++) {
+        if (authHistory[i].ip == ip) {
+            // cooldown 5 seconds between attempts from same IP
+            if (now - authHistory[i].lastAttemptMs < 5000) return false;
+            // lockout IP for 1 minute after 5 consecutive failures
+            if (authHistory[i].failCount >= 5 && (now - authHistory[i].lastAttemptMs < 60000)) return false;
+            return true;
+        }
+    }
+    return true;
+}
+
+static void recordAttempt(uint32_t ip, bool success)
+{
+    uint32_t now = millis();
+    for (int i = 0; i < 8; i++) {
+        if (authHistory[i].ip == ip) {
+            authHistory[i].lastAttemptMs = now;
+            if (success) authHistory[i].failCount = 0;
+            else authHistory[i].failCount++;
+            return;
+        }
+    }
+    // New IP
+    authHistory[authHistoryIdx].ip = ip;
+    authHistory[authHistoryIdx].lastAttemptMs = now;
+    authHistory[authHistoryIdx].failCount = success ? 0 : 1;
+    authHistoryIdx = (authHistoryIdx + 1) % 8;
 }
 
 static const char* zoneTypeStr(ZoneType t)
@@ -60,8 +107,21 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
 {
     JsonDocument doc;
 
-    // Alarm
     JsonObject alarm = doc["alarm"].to<JsonObject>();
+
+    // Security: Require PIN for full status details
+    const char* pin = request->getParam("pin") ? request->getParam("pin")->value().c_str() : "";
+    if (strlen(pin) == 0) {
+         // Fallback: check JSON body if it's a POST, but status is GET. 
+         // Let's check headers or params.
+    }
+
+    if (!alarmValidatePin(pin)) {
+        alarm["state"]     = "LOCKED";
+        alarm["stateCode"] = 0xFF;
+        return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"PIN required for status\"}");
+    }
+
     alarm["state"]          = alarmGetStateStr();
     alarm["stateCode"]      = (uint8_t)alarmGetState();
     alarm["delayRemaining"] = alarmGetDelayRemaining();
@@ -303,7 +363,14 @@ static esp_err_t handleApiDisarm(PsychicRequest* request, PsychicResponse* respo
     }
 
     const char* pin = doc["pin"] | "";
+    uint32_t remoteIp = request->client()->remoteIP();
+
+    if (!checkRateLimit(remoteIp)) {
+        return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts. Wait 1 minute.\"}");
+    }
+
     bool ok = alarmDisarm(pin);
+    recordAttempt(remoteIp, ok);
 
     if (ok) {
         return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"System disarmed\"}");
@@ -370,6 +437,13 @@ static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* respo
 // ---------------------------------------------------------------------------
 static esp_err_t handleApiOutputs(PsychicRequest* request, PsychicResponse* response)
 {
+    // Security check: require PIN
+    const char* pin = request->getParam("pin") ? request->getParam("pin")->value().c_str() : "";
+    
+    if (!alarmValidatePin(pin)) {
+        return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
+    }
+    
     char resp[48];
     snprintf(resp, sizeof(resp), "{\"outputs\":%u}", ioExpanderGetOutputs());
     return response->send(200, "application/json", resp);
@@ -435,5 +509,5 @@ void webServerInit()
     server.on("/api/output", HTTP_POST, handleApiOutput);
 
     server.begin();
-    Serial.println("[WEB] Dashboard started on port 80");
+    LOG_INFO(TAG, "Dashboard started on port 80");
 }

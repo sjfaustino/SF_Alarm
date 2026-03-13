@@ -1,5 +1,12 @@
-#include "config_manager.h"
+#include <Arduino.h>
+#include <Preferences.h>
+#include <nvs_flash.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <esp_task_wdt.h>
 #include "config.h"
+#include "logging.h"
+#include "config_manager.h"
 #include "alarm_controller.h"
 #include "alarm_zones.h"
 #include "sms_gateway.h"
@@ -8,13 +15,34 @@
 #include "mqtt_client.h"
 #include "onvif_client.h"
 #include "network.h"
-#include <Preferences.h>
-#include <nvs_flash.h>
+
+static const char* TAG = "CFG";
 
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
 static Preferences prefs;
+static SemaphoreHandle_t configMutex = NULL;
+
+// Dirty Flags for granular saving (Protected by configMutex)
+static bool dirtyMain      = false;
+static bool dirtyWifi      = false;
+static bool dirtyRouter    = false;
+static bool dirtyZones     = false;
+static bool dirtyAlerts    = false;
+static bool dirtyMqtt      = false;
+static bool dirtyOnvif     = false;
+static bool dirtySchedule  = false;
+static bool dirtyHeartbeat = false;
+static bool dirtyTimezone  = false;
+
+// Helper to safely set a dirty flag
+static void setDirty(bool &flag) {
+    if (configMutex && xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        flag = true;
+        xSemaphoreGive(configMutex);
+    }
+}
 
 // Keys for NVS storage
 static const char* KEY_PIN           = "pin";
@@ -48,17 +76,49 @@ static const char* KEY_HEARTBEAT_EN   = "hbEn";
 static const char* KEY_TZ            = "timezone";
 static const char* KEY_CONFIGURED    = "configured";
 
-// ---------------------------------------------------------------------------
-// Global config state mapping
-// ---------------------------------------------------------------------------
-static bool g_heartbeatEnabled = true;
-static String g_timezone = "GMT0";
+static bool    g_heartbeatEnabled = true;
+static char    g_timezone[32]     = "GMT0";
 
-bool configGetHeartbeatEnabled() { return g_heartbeatEnabled; }
-void configSetHeartbeatEnabled(bool en) { g_heartbeatEnabled = en; }
+bool configGetHeartbeatEnabled() { 
+    bool en = true;
+    if (configMutex && xSemaphoreTake(configMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        en = g_heartbeatEnabled;
+        xSemaphoreGive(configMutex);
+    }
+    return en;
+}
 
-const char* configGetTimezone() { return g_timezone.c_str(); }
-void configSetTimezone(const char* tz) { g_timezone = tz; }
+void configSetHeartbeatEnabled(bool en) { 
+    if (configMutex && xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (g_heartbeatEnabled != en) {
+            g_heartbeatEnabled = en; 
+            dirtyHeartbeat = true;
+        }
+        xSemaphoreGive(configMutex);
+    }
+}
+
+const char* configGetTimezone() { 
+    static char buf[32]; // Return snapshot to prevent use-after-change
+    if (configMutex && xSemaphoreTake(configMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        strncpy(buf, g_timezone, sizeof(buf)-1);
+        buf[sizeof(buf)-1] = '\0';
+        xSemaphoreGive(configMutex);
+    }
+    return buf;
+}
+
+void configSetTimezone(const char* tz) { 
+    if (tz == nullptr) return;
+    if (configMutex && xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (strcmp(g_timezone, tz) != 0) {
+            strncpy(g_timezone, tz, sizeof(g_timezone)-1);
+            g_timezone[sizeof(g_timezone)-1] = '\0';
+            dirtyTimezone = true;
+        }
+        xSemaphoreGive(configMutex);
+    }
+}
 
 static int8_t g_schedArmHr[7] = {-1, -1, -1, -1, -1, -1, -1};
 static int8_t g_schedArmMin[7] = {-1, -1, -1, -1, -1, -1, -1};
@@ -76,10 +136,36 @@ void configGetSchedule(int dayOfWeek, int8_t &armHr, int8_t &armMin, int8_t &dis
 
 void configSetSchedule(int dayOfWeek, int8_t armHr, int8_t armMin, int8_t disarmHr, int8_t disarmMin) {
     if (dayOfWeek < 0 || dayOfWeek > 6) return;
-    g_schedArmHr[dayOfWeek] = armHr;
-    g_schedArmMin[dayOfWeek] = armMin;
-    g_schedDisarmHr[dayOfWeek] = disarmHr;
-    g_schedDisarmMin[dayOfWeek] = disarmMin;
+    if (g_schedArmHr[dayOfWeek] != armHr || g_schedArmMin[dayOfWeek] != armMin ||
+        g_schedDisarmHr[dayOfWeek] != disarmHr || g_schedDisarmMin[dayOfWeek] != disarmMin) {
+        g_schedArmHr[dayOfWeek] = armHr;
+        g_schedArmMin[dayOfWeek] = armMin;
+        g_schedDisarmHr[dayOfWeek] = disarmHr;
+        g_schedDisarmMin[dayOfWeek] = disarmMin;
+        setDirty(dirtySchedule);
+    }
+}
+
+void configMarkDirty(ConfigSection section) {
+    if (!configMutex || xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    
+    switch (section) {
+        case CFG_MAIN:      dirtyMain = true; break;
+        case CFG_WIFI:      dirtyWifi = true; break;
+        case CFG_ROUTER:    dirtyRouter = true; break;
+        case CFG_ZONES:     dirtyZones = true; break;
+        case CFG_ALERTS:    dirtyAlerts = true; break;
+        case CFG_MQTT:      dirtyMqtt = true; break;
+        case CFG_ONVIF:     dirtyOnvif = true; break;
+        case CFG_SCHEDULE:  dirtySchedule = true; break;
+        case CFG_HEARTBEAT: dirtyHeartbeat = true; break;
+        case CFG_TIMEZONE:  dirtyTimezone = true; break;
+        case CFG_ALL:
+            dirtyMain = dirtyWifi = dirtyRouter = dirtyZones = dirtyAlerts = 
+            dirtyMqtt = dirtyOnvif = dirtySchedule = dirtyHeartbeat = dirtyTimezone = true;
+            break;
+    }
+    xSemaphoreGive(configMutex);
 }
 
 uint8_t configGetScheduleMode() { return g_schedMode; }
@@ -87,10 +173,12 @@ void configSetScheduleMode(uint8_t mode) { g_schedMode = mode; }
 
 void configSaveHeartbeat() {
     prefs.putBool(KEY_HEARTBEAT_EN, g_heartbeatEnabled);
+    dirtyHeartbeat = false;
 }
 
 void configSaveTimezone() {
     prefs.putString(KEY_TZ, g_timezone);
+    dirtyTimezone = false;
 }
 
 void configSaveSchedule() {
@@ -104,6 +192,7 @@ void configSaveSchedule() {
         blob[22 + i]     = (uint8_t)g_schedDisarmMin[i];
     }
     prefs.putBytes("sched", blob, sizeof(blob));
+    dirtySchedule = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,33 +201,54 @@ void configSaveSchedule() {
 
 void configInit()
 {
-    // --- NVS BROWNOUT DEATH SPIRAL FIX ---
-    // Standard prefs.begin() silently panics if the physical flash sector corrupts
-    // during a power-loss write failure. We must interact with the raw IDF API
-    // to trap the corruption and self-heal the physical partition.
     esp_err_t err = nvs_flash_init();
+    
+    // Only erase and retry if we explicitly have no free pages or a version mismatch
+    // (which means the partition is functionally empty/invalid anyway).
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        Serial.println("[CFG] CRITICAL: NVS partition corrupted (brownout)! Executing self-healing erase...");
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-        Serial.println("[CFG] NVS partition repaired. Rebooting system for clean state.");
-        delay(1000);
-        ESP.restart();
+        LOG_WARN(TAG, "NVS Partition maintenance required (full or new). Repairing...");
+        esp_err_t eraseErr = nvs_flash_erase();
+        if (eraseErr == ESP_OK) {
+            err = nvs_flash_init();
+            if (err == ESP_OK) {
+                LOG_INFO(TAG, "NVS successfully repaired.");
+            }
+        }
     }
-    ESP_ERROR_CHECK(err);
 
+    if (err != ESP_OK) {
+        LOG_ERROR(TAG, "CRITICAL: NVS Flash Init FAILED (0x%X). System PANIC.", (uint32_t)err);
+        // We PANIC here instead of factory resetting. 
+        // We pet the watchdog manually for a short forensic window then allow reboot.
+        for(int i=0; i<300; i++) {
+            digitalWrite(HEARTBEAT_LED_PIN, HIGH);
+            esp_task_wdt_reset();
+            delay(50);
+            digitalWrite(HEARTBEAT_LED_PIN, LOW);
+            delay(50);
+        }
+        // After 30s of blinking, we stop petting and let WDT reboot us.
+        while(true) {
+            digitalWrite(HEARTBEAT_LED_PIN, HIGH);
+            delay(50);
+            digitalWrite(HEARTBEAT_LED_PIN, LOW);
+            delay(50);
+        }
+    }
+
+    configMutex = xSemaphoreCreateMutex();
     prefs.begin(NVS_NAMESPACE, false);
-    Serial.println("[CFG] NVS namespace opened securely");
+    LOG_INFO(TAG, "NVS namespace opened with Mutex protection");
 }
 
 void configLoad()
 {
     if (!prefs.getBool(KEY_CONFIGURED, false)) {
-        Serial.println("[CFG] No saved configuration — using defaults");
+        LOG_INFO(TAG, "No saved configuration — using defaults");
         return;
     }
 
-    Serial.println("[CFG] Loading configuration from NVS...");
+    LOG_INFO(TAG, "Loading configuration from NVS...");
 
     // --- Alarm PIN ---
     String pin = prefs.getString(KEY_PIN, "1234");
@@ -181,8 +291,10 @@ void configLoad()
 
     // --- System Extras ---
     g_heartbeatEnabled = prefs.getBool(KEY_HEARTBEAT_EN, true);
-    g_timezone = prefs.getString(KEY_TZ, "GMT0");
-    setenv("TZ", g_timezone.c_str(), 1); // Set POSIX TZ environment var
+    String tz = prefs.getString(KEY_TZ, "GMT0");
+    strncpy(g_timezone, tz.c_str(), sizeof(g_timezone)-1);
+    g_timezone[sizeof(g_timezone)-1] = '\0';
+    setenv("TZ", g_timezone, 1); // Set POSIX TZ environment var
     tzset();
 
     // --- Schedule ---
@@ -253,11 +365,12 @@ void configLoad()
         }
     }
 
-    Serial.println("[CFG] Configuration loaded");
+    LOG_INFO(TAG, "Configuration loaded");
 }
 
 void configSavePin() {
     prefs.putString(KEY_PIN, alarmGetPin());
+    dirtyMain = false;
 }
 
 void configSaveTiming() {
@@ -265,11 +378,13 @@ void configSaveTiming() {
     prefs.putUShort(KEY_ENTRY_DELAY, alarmGetEntryDelay());
     prefs.putUShort(KEY_SIREN_DUR, alarmGetSirenDuration());
     prefs.putUChar(KEY_SIREN_CH, alarmGetSirenOutput());
+    dirtyMain = false;
 }
 
 void configSaveWifi() {
     prefs.putString(KEY_WIFI_SSID, networkGetSsid());
     prefs.putString(KEY_WIFI_PASS, networkGetPass());
+    dirtyWifi = false;
 }
 
 void configSavePhones() {
@@ -280,12 +395,14 @@ void configSavePhones() {
         snprintf(key, sizeof(key), "phone%d", i);
         prefs.putString(key, smsCmdGetPhone(i));
     }
+    dirtyAlerts = false;
 }
 
 void configSaveRouter() {
     prefs.putString(KEY_ROUTER_IP, smsGatewayGetRouterIp());
     prefs.putString(KEY_ROUTER_USER, smsGatewayGetRouterUser());
     prefs.putString(KEY_ROUTER_PASS, smsGatewayGetRouterPass());
+    dirtyRouter = false;
 }
 
 void configSaveZones() {
@@ -309,18 +426,21 @@ void configSaveZones() {
         snprintf(key, sizeof(key), "zTxt%d", i);
         prefs.putString(key, smsCmdGetAlarmText(i));
     }
+    dirtyZones = false;
 }
 
 void configSavePeriodic() {
     prefs.putUShort(KEY_REPORT_DUR, smsCmdGetReportInterval());
     prefs.putString(KEY_RECOVERY_TXT, smsCmdGetRecoveryText());
     prefs.putUChar(KEY_ALARM_MODE, (uint8_t)smsCmdGetWorkingMode());
+    dirtyAlerts = false;
 }
 
 void configSaveWhatsapp() {
     prefs.putString(KEY_WA_PHONE, whatsappGetPhone());
     prefs.putString(KEY_WA_APIKEY, whatsappGetApiKey());
     prefs.putUChar(KEY_WA_MODE, (uint8_t)whatsappGetMode());
+    dirtyAlerts = false;
 }
 
 void configSaveMqtt() {
@@ -329,6 +449,7 @@ void configSaveMqtt() {
     prefs.putString(KEY_MQTT_USER, mqttGetUser());
     prefs.putString(KEY_MQTT_PASS, mqttGetPass());
     prefs.putString(KEY_MQTT_CLIENTID, mqttGetClientId());
+    dirtyMqtt = false;
 }
 
 void configSaveOnvif() {
@@ -337,35 +458,52 @@ void configSaveOnvif() {
     prefs.putString(KEY_ONVIF_USER, onvifGetUser());
     prefs.putString(KEY_ONVIF_PASS, onvifGetPass());
     prefs.putUChar(KEY_ONVIF_ZONE, onvifGetTargetZone());
+    dirtyOnvif = false;
 }
 
 void configSave()
 {
-    Serial.println("[CFG] Saving full configuration to NVS...");
-    prefs.putBool(KEY_CONFIGURED, true);
-    
-    configSavePin();
-    configSaveTiming();
-    configSaveWifi();
-    configSavePhones();
-    configSaveRouter();
-    configSaveZones();
-    configSavePeriodic();
-    configSaveWhatsapp();
-    configSaveMqtt();
-    configSaveOnvif();
-    configSaveHeartbeat();
-    configSaveTimezone();
-    configSaveSchedule();
+    if (!configMutex || xSemaphoreTake(configMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        LOG_ERROR(TAG, "Save failed: Mutex timeout");
+        return;
+    }
 
-    Serial.println("[CFG] Full configuration saved");
+    LOG_INFO(TAG, "Executing granular save...");
+    
+    // Create local copies of flags to minimize mutex hold time
+    bool sMain = dirtyMain, sWifi = dirtyWifi, sAlerts = dirtyAlerts, sRouter = dirtyRouter;
+    bool sZones = dirtyZones, sMqtt = dirtyMqtt, sOnvif = dirtyOnvif, sHeart = dirtyHeartbeat;
+    bool sTz = dirtyTimezone, sSched = dirtySchedule;
+    
+    // Clear flags while inside mutex
+    dirtyMain = dirtyWifi = dirtyAlerts = dirtyRouter = false;
+    dirtyZones = dirtyMqtt = dirtyOnvif = dirtyHeartbeat = false;
+    dirtyTimezone = dirtySchedule = false;
+
+    xSemaphoreGive(configMutex);
+
+    if (sMain)      { configSavePin(); configSaveTiming(); }
+    if (sWifi)      configSaveWifi();
+    if (sAlerts)    { configSavePhones(); configSavePeriodic(); configSaveWhatsapp(); }
+    if (sRouter)    configSaveRouter();
+    if (sZones)     configSaveZones();
+    if (sMqtt)      configSaveMqtt();
+    if (sOnvif)     configSaveOnvif();
+    if (sHeart)     configSaveHeartbeat();
+    if (sTz)        configSaveTimezone();
+    if (sSched)     configSaveSchedule();
+
+    // Persist "configured" bit LAST to ensure atomic boot integrity
+    prefs.putBool(KEY_CONFIGURED, true);
+
+    LOG_INFO(TAG, "Granular save complete");
 }
 
 void configFactoryReset()
 {
-    Serial.println("[CFG] Factory reset — clearing NVS...");
+    LOG_INFO(TAG, "Factory reset — clearing NVS...");
     prefs.clear();
-    Serial.println("[CFG] NVS cleared. Restart to apply defaults.");
+    LOG_INFO(TAG, "NVS cleared. Restart to apply defaults.");
 }
 
 void configPrint()
@@ -391,7 +529,7 @@ void configPrint()
     Serial.printf("  MQTT User:   %s\n", mqttGetUser());
     Serial.printf("  ONVIF Cam:   %s:%d (Zone %d)\n", onvifGetHost(), onvifGetPort(), (int)onvifGetTargetZone());
     Serial.printf("  Heartbeat:   %s\n", g_heartbeatEnabled ? "ON" : "OFF");
-    Serial.printf("  Timezone:    %s\n", g_timezone.c_str());
+    Serial.printf("  Timezone:    %s\n", g_timezone);
     Serial.printf("  Auto-Arm:    %s Mode\n", g_schedMode == 3 ? "HOME" : "AWAY");
     for (int i=0; i<7; i++) {
         Serial.printf("    Day %d: Arm %02d:%02d, Disarm %02d:%02d\n", 

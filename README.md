@@ -73,9 +73,27 @@ extended to support all 16 zones.
   |  [x] Event-driven SMS notifications                              |
   |  [x] Session management with auto-relogin to router              |
   |  [x] Live input monitoring mode                                  |
+  |  [x] **Hardened Security & Concurrency (Remediation 8.0/9.0)**    |
   |                                                                  |
   +------------------------------------------------------------------+
 ```
+
+---
+
+## Hardened Architecture (Senior Remediation 8.0 / 9.0)
+
+The system has undergone a comprehensive structural and security hardening ("The Bastion Hardening") to ensure industrial-grade stability:
+
+### 🛡️ Security Implementation
+- **API Authentication**: Core diagnostic endpoints (`/api/status`, `/api/outputs`) are protected by PIN-based authorization.
+- **Anti-Brute Force**: IP-based rate limiting on the web API prevents local network brute-force attacks from locking out legitimate users.
+- **Stored XSS Prevention**: All custom SMS alarm texts are sanitized to prevent malicious payloads from hijacking the web dashboard.
+- **Atomic Persistence**: Configuration commits are now atomic; the "Configured" flag is only set after all settings are verified in NVS.
+
+### ⚙️ Stability & Performance
+- **Zero-Heap Parsers**: Replaced heap-fragmenting `String` usage with fixed `char` buffer sliding windows for both **ONVIF XML** and **LuCI HTML** scraping.
+- **Concurrency Mutexing**: All shared global state and the **I2C hardware bus (`Wire`)** are protected by FreeRTOS mutexes to prevent cross-core data corruption.
+- **Asynchronous Logging**: Synchronous serial traps have been purged; all logging is now offloaded to an asynchronous buffer, preventing system stalls under high load.
 
 ---
 

@@ -1,8 +1,11 @@
 #include "network.h"
 #include "config.h"
-#include "config_manager.h"
 #include <WiFi.h>
 #include <ETH.h>
+#include "config_manager.h"
+#include "logging.h"
+
+static const char* TAG = "NET";
 #include <time.h>
 
 // ---------------------------------------------------------------------------
@@ -18,14 +21,14 @@ static void NetworkEvent(WiFiEvent_t event)
 {
     switch (event) {
         case ARDUINO_EVENT_ETH_START:
-            Serial.println("[NET] ETH Started");
+            LOG_INFO(TAG, "ETH Started");
             ETH.setHostname("sf-alarm");
             break;
         case ARDUINO_EVENT_ETH_CONNECTED:
-            Serial.println("[NET] ETH Link Up");
+            LOG_INFO(TAG, "ETH Link Up");
             break;
         case ARDUINO_EVENT_ETH_GOT_IP:
-            Serial.printf("[NET] ETH MAC: %s, IPv4: %s, FULL_DUPLEX: %d, Mbps: %d\n",
+            LOG_INFO(TAG, "ETH MAC: %s, IPv4: %s, FULL_DUPLEX: %d, Mbps: %d",
                           ETH.macAddress().c_str(),
                           ETH.localIP().toString().c_str(),
                           ETH.fullDuplex(),
@@ -33,11 +36,11 @@ static void NetworkEvent(WiFiEvent_t event)
             ethConnected = true;
             break;
         case ARDUINO_EVENT_ETH_DISCONNECTED:
-            Serial.println("[NET] ETH Link Down");
+            LOG_INFO(TAG, "ETH Link Down");
             ethConnected = false;
             break;
         case ARDUINO_EVENT_ETH_STOP:
-            Serial.println("[NET] ETH Stopped");
+            LOG_INFO(TAG, "ETH Stopped");
             ethConnected = false;
             break;
         default:
@@ -56,9 +59,9 @@ void networkInit()
     // Initialize Kincony KC868-A16 LAN8720 Ethernet PHY
     // (uint8_t phy_addr, int power, int mdc, int mdio, eth_phy_type_t type, eth_clock_mode_t clk_mode)
     if (ETH.begin(ETH_PHY_ADDR, ETH_PHY_POWER, ETH_PHY_MDC, ETH_PHY_MDIO, ETH_PHY_TYPE, ETH_CLOCK_GPIO17_OUT)) {
-        Serial.println("[NET] Ethernet PHY initialized");
+        LOG_INFO(TAG, "Ethernet PHY initialized");
     } else {
-        Serial.println("[NET] ERROR: Ethernet PHY init failed");
+        LOG_ERROR(TAG, "Ethernet PHY init failed");
     }
 
     WiFi.mode(WIFI_STA);
@@ -87,7 +90,7 @@ void networkSetWifi(const char* ssid, const char* password)
     connecting = true;
     lastReconnectAttempt = millis();
 
-    Serial.printf("[NET] Wi-Fi credentials updated: %s (use 'save' to persist)\n", wifiSsid);
+    LOG_INFO(TAG, "Wi-Fi credentials updated: %s (use 'save' to persist)", wifiSsid);
 }
 
 void networkUpdate()
@@ -99,14 +102,14 @@ void networkUpdate()
     if (WiFi.status() == WL_CONNECTED) {
         if (connecting) {
             connecting = false;
-            Serial.printf("[NET] Wi-Fi Connected! IP: %s  RSSI: %d dBm\n",
+            LOG_INFO(TAG, "WiFi Connected: %s  RSSI: %d dBm",
                           WiFi.localIP().toString().c_str(),
                           WiFi.RSSI());
         }
     } else {
         if (!connecting && !ethConnected) {
             connecting = true;
-            Serial.printf("[NET] Wi-Fi Connection lost. ESP-IDF AutoReconnect active for %s...\n", wifiSsid);
+            LOG_WARN(TAG, "Wi-Fi Connection lost. ESP-IDF AutoReconnect active for %s...", wifiSsid);
         }
     }
 }
