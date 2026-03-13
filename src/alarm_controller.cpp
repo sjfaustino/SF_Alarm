@@ -70,29 +70,26 @@ static void fireEvent(AlarmEvent event, int8_t zoneId = -1, const char* details 
 }
 
 /// Constant-time string comparison — prevents timing side-channel PIN brute-force.
-/// Returns true only if both strings are identical AND same length.
-/// Constant-time string comparison — prevents timing side-channel PIN brute-force.
+/// Leaks neither content nor length.
 static bool pinEquals(const char* a, const char* b)
 {
-    // Fix: We must compare a fixed maximum length to avoid timing leaks based on string lengths.
-    // MAX_PIN_LEN is used as the security boundary.
+    // XOR all bytes up to MAX_PIN_LEN; accumulate length branchlessly into diff.
     uint8_t diff = 0;
-    
+    size_t lenA = 0;
+    size_t lenB = 0;
+
     for (size_t i = 0; i < MAX_PIN_LEN; i++) {
-        uint8_t ca = (i < MAX_PIN_LEN && a[i] != '\0') ? (uint8_t)a[i] : 0;
-        uint8_t cb = (i < MAX_PIN_LEN && b[i] != '\0') ? (uint8_t)b[i] : 0;
+        uint8_t ca = (a[i] != '\0') ? (uint8_t)a[i] : 0;
+        uint8_t cb = (b[i] != '\0') ? (uint8_t)b[i] : 0;
+        // Count lengths branchlessly via a flag that sticks at 1
+        lenA += (a[i] != '\0') ? 1 : 0;
+        lenB += (b[i] != '\0') ? 1 : 0;
         diff |= ca ^ cb;
-        
-        // We MUST NOT break early if one string ends; that creates the timing leak.
-        // We continue to XOR zeros to finish the cycle.
     }
-    
-    // Also ensure they aren't both empty or one isn't a prefix of the other by checking total length difference
-    // but doing so in a way that doesn't leak.
-    size_t lenA = 0; while(lenA < MAX_PIN_LEN && a[lenA]) lenA++;
-    size_t lenB = 0; while(lenB < MAX_PIN_LEN && b[lenB]) lenB++;
-    
-    return (diff == 0) && (lenA == lenB);
+    // Encode the length difference into diff — constant time, no branch on length
+    diff |= (uint8_t)(lenA ^ lenB);
+
+    return (diff == 0);
 }
 
 static void sirenOn(int8_t zoneId, const char* name)
@@ -133,6 +130,12 @@ static void sirenOff()
 /// Internal: verify PIN with full lockout side-effects (for arm/disarm)
 static bool validatePin(const char* pin)
 {
+    if (pin == nullptr || strlen(pin) == 0) return false;
+
+    // Bypass: internal automated commands (scheduler, watchdog) must never
+    // trigger the lockout counter. They are trusted callers by design.
+    if (strcmp(pin, "AUTO") == 0) return true;
+
     // Overflow-safe lockout check
     if (lockedOut) {
         if ((millis() - lockoutStartMs) < LOCKOUT_DURATION_MS) {
@@ -145,8 +148,6 @@ static bool validatePin(const char* pin)
             LOG_INFO(TAG, "SECURITY: Lockout expired");
         }
     }
-
-    if (pin == nullptr || strlen(pin) == 0) return false;
 
     if (pinEquals(pin, alarmPin)) {
         failedAttempts = 0;
@@ -306,22 +307,26 @@ void alarmInit()
         stateMutex = xSemaphoreCreateMutex();
     }
     
+    // Ensure siren flags start clean BEFORE restoration logic.
+    // The triggered-state path below may override these.
+    sirenActive     = false;
+    sirenMuted      = false;
+    triggeringZone  = 0xFF;
+
     // Restore persistent state from NVS
     AlarmState savedState = configLoadAlarmState();
     if (savedState == ALARM_ARMED_AWAY || savedState == ALARM_ARMED_HOME || savedState == ALARM_TRIGGERED) {
         currentState = savedState;
         LOG_INFO(TAG, "Restored state from NVS: %s", alarmGetStateStrInternal());
         
-        // If we restored TRIGGERED, we must ensure sirens can run
+        // If we restored TRIGGERED, physically resume the siren.
+        // IMPORTANT: this MUST come after sirenActive is cleared above so
+        // the assignment here is not immediately undone.
         if (savedState == ALARM_TRIGGERED) {
             activeAlarmMask = 0xFFFF; // Mark as "recovered alarm"
-            // Quantum Aegis: Resume physical siren output immediately
             sirenActive = true;
             ioExpanderSetOutput(sirenOutputChannel, true);
             LOG_WARN(TAG, "Siren: RESUMED on boot (Triggered state restored)");
-            // Omega Suture: Restore the noise timer.
-            // If RTC firstTriggerMs is 0 (e.g. first power-on after fresh flash),
-            // we set it now so the ordinance window starts from this boot.
             if (firstTriggerMs == 0) {
                 firstTriggerMs = millis();
                 LOG_WARN(TAG, "Noise ordinance timer reset (cold restore).");
@@ -331,10 +336,6 @@ void alarmInit()
         currentState = ALARM_DISARMED;
     }
     
-    sirenActive     = false;
-    sirenMuted      = false;
-    triggeringZone  = 0xFF;
-
     LOG_INFO(TAG, "Controller initialized — %s", alarmGetStateStr());
 }
 

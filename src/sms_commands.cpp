@@ -76,7 +76,7 @@ static void sendReply(const char* sender, const char* message)
     alarmQueueReply(sender, message);
 }
 
-#define MAX_SMS_TEXT_LEN 160
+
 
 static void trimStr(char* str)
 {

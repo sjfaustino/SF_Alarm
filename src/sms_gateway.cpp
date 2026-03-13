@@ -230,10 +230,8 @@ bool smsGatewayLogin()
                       "&luci_username=" + routerUser +
                       "&luci_password=" + finalHash;
 
-    Serial.printf("[SMS] Login POST to: %s\n", loginUrl.c_str());
-    Serial.printf("[SMS] POST body (len=%d): _csrf=%s...&luci_username=%s&luci_password=%s...\n",
-                  postData.length(), _csrf.substring(0,8).c_str(),
-                  routerUser, finalHash.substring(0,8).c_str());
+    LOG_INFO(TAG, "Login POST to %s (body len=%d)", loginUrl.c_str(), postData.length());
+    // SECURITY: Do NOT log CSRF token, password hash, or credentials.
 
     int postCode = http2.POST(postData);
     LOG_INFO(TAG, "Login POST result: %d", postCode);
