@@ -337,7 +337,8 @@ static bool parseArmDisarm(const char* body, const char* sender)
         } else {
             // It was just ARM <pin>
             p = rollback; // The second word is actually the pin
-            if (alarmArmAway(p)) {
+            const char* pin = (*p == '\0') ? "AUTO" : p;
+            if (alarmArmAway(pin)) {
                 sendReply(sender, "SF_Alarm: Arming AWAY. Exit delay started.");
             } else {
                 sendReply(sender, "SF_Alarm: ARM failed. Check PIN/zones.");
@@ -345,7 +346,8 @@ static bool parseArmDisarm(const char* body, const char* sender)
             return true;
         }
     } else if (strcmp(cmd1, "DISARM") == 0) {
-        if (alarmDisarm(p)) {
+        const char* pin = (*p == '\0') ? "AUTO" : p;
+        if (alarmDisarm(pin)) {
             sendReply(sender, "SF_Alarm: System DISARMED.");
         } else {
             sendReply(sender, "SF_Alarm: DISARM failed. Invalid PIN.");
@@ -465,6 +467,7 @@ static bool parseArmInputs(const char* body, const char* sender)
         if (cfg) cfg->enabled = enabled;
     }
 
+    configMarkDirty(CFG_ZONES);
     sendReply(sender, "SF_Alarm: Zone enable/disable configuration updated");
     return true;
 }

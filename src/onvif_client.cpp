@@ -203,9 +203,9 @@ static void pollMessages() {
                 buffer[bufferPos] = '\0';
 
                 // Keyword detection: split "IsMotion" + "Value=\"true\""
-                // We check for the combined pattern or fragments.
-                // Improvement: check both fragments in the window to handle splits.
-                if (strcasestr(buffer, "IsMotion") && strcasestr(buffer, "Value=\"true\"")) {
+                // Enforce STRICT order constraint: "Value=\"true\"" MUST chronically trail "IsMotion"
+                char* m = strcasestr(buffer, "IsMotion");
+                if (m && strcasestr(m, "Value=\"true\"")) {
                     motion = true;
                     break;
                 }
