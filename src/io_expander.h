@@ -32,4 +32,7 @@ bool ioExpanderChipOk(uint8_t chipIndex);
 /// Check if the I2C input bus has been physically compromised (wires cut/shorted)
 bool ioExpanderIsTampered();
 
+/// Get the handle of the task currently holding the I2C mutex.
+TaskHandle_t ioExpanderGetLockOwner();
+
 #endif // SF_ALARM_IO_EXPANDER_H

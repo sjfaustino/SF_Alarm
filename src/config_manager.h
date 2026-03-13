@@ -59,6 +59,7 @@ uint8_t configGetScheduleMode();
 void configSetScheduleMode(uint8_t mode);
 
 /// Reset all configuration to factory defaults.
+TaskHandle_t configGetLockOwner();
 void configFactoryReset();
 
 /// Print current configuration to Serial.

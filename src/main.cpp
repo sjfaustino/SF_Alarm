@@ -49,8 +49,8 @@ static void restartTask(int index);
 #include <freertos/queue.h>
 
 struct PendingAlert {
-    char message[192];
-    char targetPhone[32]; // Empty for broadcast, populated for targeted reply
+    char message[128];
+    char targetPhone[24]; // Zero for broadcast
 };
 static QueueHandle_t rtosAlertQueue = NULL; 
 static uint32_t lastAlertProcessedMs = 0;
@@ -378,7 +378,7 @@ void setup()
     pinMode(HEARTBEAT_BUZZER_PIN, OUTPUT);
     digitalWrite(HEARTBEAT_BUZZER_PIN, LOW);
 
-    LOG_INFO(TAG, "Initializing I/O Expander...");
+    LOG_INFO(TAG, "Initializing Hardware...");
     if (!ioExpanderInit()) {
         LOG_ERROR(TAG, "FATAL: I/O Expander offline. Entering PANIC mode.");
         while (true) {
@@ -390,14 +390,16 @@ void setup()
         }
     }
 
-    // Initialize Alarm Logic (Restores ARM state from NVS)
+    // CRITICAL: Load config BEFORE initializing alarm logic
+    configLoad();
+    
+    // Initialize Alarm Logic (Restores ARM state from NVS correctly now)
     alarmInit();
     alarmSetCallback(onAlarmEvent);
 
     smsGatewayInit(DEFAULT_ROUTER_IP, DEFAULT_ROUTER_USER, DEFAULT_ROUTER_PASS);
     smsCmdInit();
     networkInit();
-    configLoad();
     webServerInit();
     cliInit();
     mqttInit();
@@ -417,10 +419,18 @@ static void restartTask(int index)
         return;
     }
 
-    LOG_WARN(TAG, "Restarting HUNG task: %s (Count: %d)", names[index], ++restartCount[index]);
-    
-    if (taskHandles[index] != NULL) {
-        vTaskDelete(taskHandles[index]);
+    // DEADLOCK PREVENTION: If this task holds a system-critical mutex, 
+    // a partial restart will cause a permanent lockup (The Mutex Graveyard).
+    // We MUST perform a full hardware reboot in this case.
+    TaskHandle_t h = taskHandles[index];
+    if (h != NULL) {
+        if (configGetLockOwner() == h || ioExpanderGetLockOwner() == h) {
+            LOG_ERROR(TAG, "WATCHDOG: Task %s holds CRITICAL MUTEX. Forced hardware reboot to clear lock.", names[index]);
+            delay(500); // Allow logs to flush
+            ESP.restart();
+        }
+        
+        vTaskDelete(h);
         taskHandles[index] = NULL;
     }
 

@@ -72,6 +72,8 @@ static void sendReply(const char* sender, const char* message)
     alarmQueueReply(sender, message);
 }
 
+#define MAX_SMS_TEXT_LEN 160
+
 static void trimStr(char* str)
 {
     // Trim leading whitespace
@@ -85,21 +87,26 @@ static void trimStr(char* str)
     *(end + 1) = '\0';
 }
 
-/// Strip suspicious HTML/Script characters to prevent Stored XSS in the dashboard
-static void sanitizeStr(char* str)
+/// Encodes unsafe HTML characters to prevent XSS without losing data
+static void encodeHtml(char* str, size_t maxLen)
 {
     if (str == nullptr) return;
+    char tmp[MAX_SMS_TEXT_LEN * 2]; // Enough room for expansion
     char* src = str;
-    char* dst = str;
-    while (*src) {
-        if (*src == '<' || *src == '>' || *src == '"' || *src == '\'' || *src == '`') {
-            // Skip unsafe char
-            src++;
-        } else {
-            *dst++ = *src++;
-        }
+    char* dst = tmp;
+    
+    while (*src && (size_t)(dst - tmp) < sizeof(tmp) - 8) {
+        if (*src == '<')      { strcpy(dst, "&lt;"); dst += 4; }
+        else if (*src == '>') { strcpy(dst, "&gt;"); dst += 4; }
+        else if (*src == '"') { strcpy(dst, "&quot;"); dst += 6; }
+        else if (*src == '\''){ strcpy(dst, "&apos;"); dst += 6; }
+        else if (*src == '&') { strcpy(dst, "&amp;"); dst += 5; }
+        else { *dst++ = *src; }
+        src++;
     }
     *dst = '\0';
+    strncpy(str, tmp, maxLen - 1);
+    str[maxLen - 1] = '\0';
 }
 
 // ---------------------------------------------------------------------------
@@ -728,7 +735,7 @@ void smsCmdSetAlarmText(int zoneIndex, const char* text)
     if (zoneIndex < 0 || zoneIndex >= MAX_ZONES) return;
     strncpy(alarmTexts[zoneIndex], text, sizeof(alarmTexts[zoneIndex]) - 1);
     alarmTexts[zoneIndex][sizeof(alarmTexts[zoneIndex]) - 1] = '\0';
-    sanitizeStr(alarmTexts[zoneIndex]); // Prevent XSS
+    encodeHtml(alarmTexts[zoneIndex], sizeof(alarmTexts[zoneIndex]));
     LOG_INFO(TAG, "Zone %d alarm text: \"%s\"", zoneIndex + 1, alarmTexts[zoneIndex]);
 }
 
@@ -752,7 +759,7 @@ void smsCmdSetRecoveryText(const char* text)
 {
     strncpy(recoveryText, text, sizeof(recoveryText) - 1);
     recoveryText[sizeof(recoveryText) - 1] = '\0';
-    sanitizeStr(recoveryText); // Prevent XSS
+    encodeHtml(recoveryText, sizeof(recoveryText));
     LOG_INFO(TAG, "Recovery text: \"%s\"", recoveryText);
 }
 

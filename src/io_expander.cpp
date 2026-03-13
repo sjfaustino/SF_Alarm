@@ -247,3 +247,9 @@ bool ioExpanderIsTampered()
     }
     return false;
 }
+
+TaskHandle_t ioExpanderGetLockOwner()
+{
+    if (i2cMutex == nullptr) return nullptr;
+    return xSemaphoreGetMutexHolder(i2cMutex);
+}

@@ -21,7 +21,6 @@ static const char* TAG = "CFG";
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
-static Preferences prefs;
 static SemaphoreHandle_t configMutex = NULL;
 
 // Dirty Flags for granular saving (Protected by configMutex)
@@ -172,27 +171,44 @@ uint8_t configGetScheduleMode() { return g_schedMode; }
 void configSetScheduleMode(uint8_t mode) { g_schedMode = mode; }
 
 void configSaveHeartbeat() {
-    prefs.putBool(KEY_HEARTBEAT_EN, g_heartbeatEnabled);
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putBool(KEY_HEARTBEAT_EN, g_heartbeatEnabled);
+        p.end();
+    }
     dirtyHeartbeat = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSaveTimezone() {
-    prefs.putString(KEY_TZ, g_timezone);
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putString(KEY_TZ, g_timezone);
+        p.end();
+    }
     dirtyTimezone = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSaveSchedule() {
-    // Pack: [mode, armHr0..6, armMin0..6, disarmHr0..6, disarmMin0..6] = 29 bytes
-    uint8_t blob[29];
-    blob[0] = g_schedMode;
-    for (int i = 0; i < 7; i++) {
-        blob[1 + i]      = (uint8_t)g_schedArmHr[i];
-        blob[8 + i]      = (uint8_t)g_schedArmMin[i];
-        blob[15 + i]     = (uint8_t)g_schedDisarmHr[i];
-        blob[22 + i]     = (uint8_t)g_schedDisarmMin[i];
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        uint8_t blob[29];
+        blob[0] = g_schedMode;
+        for (int i = 0; i < 7; i++) {
+            blob[1 + i]      = (uint8_t)g_schedArmHr[i];
+            blob[8 + i]      = (uint8_t)g_schedArmMin[i];
+            blob[15 + i]     = (uint8_t)g_schedDisarmHr[i];
+            blob[22 + i]     = (uint8_t)g_schedDisarmMin[i];
+        }
+        p.putBytes("sched", blob, sizeof(blob));
+        p.end();
     }
-    prefs.putBytes("sched", blob, sizeof(blob));
     dirtySchedule = false;
+    xSemaphoreGive(configMutex);
 }
 
 // ---------------------------------------------------------------------------
@@ -237,61 +253,80 @@ void configInit()
     }
 
     configMutex = xSemaphoreCreateMutex();
-    prefs.begin(NVS_NAMESPACE, false);
-    LOG_INFO(TAG, "NVS namespace opened with Mutex protection");
+    LOG_INFO(TAG, "NVS manager initialized with Mutex protection");
+}
+
+TaskHandle_t configGetLockOwner()
+{
+    if (configMutex == NULL) return NULL;
+    return xSemaphoreGetMutexHolder(configMutex);
 }
 
 void configLoad()
 {
-    if (!prefs.getBool(KEY_CONFIGURED, false)) {
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        LOG_ERROR(TAG, "Config load FAILED: Mutex timeout");
+        return;
+    }
+
+    Preferences p;
+    if (!p.begin(NVS_NAMESPACE, true)) {
+        LOG_ERROR(TAG, "NVS Namespace open failed");
+        xSemaphoreGive(configMutex);
+        return;
+    }
+
+    if (!p.getBool(KEY_CONFIGURED, false)) {
         LOG_INFO(TAG, "No saved configuration — using defaults");
+        p.end();
+        xSemaphoreGive(configMutex);
         return;
     }
 
     LOG_INFO(TAG, "Loading configuration from NVS...");
 
     // --- Alarm PIN ---
-    String pin = prefs.getString(KEY_PIN, "1234");
+    String pin = p.getString(KEY_PIN, "1234");
     alarmSetPin(pin.c_str());
 
     // --- Alarm timing ---
-    alarmSetExitDelay(prefs.getUShort(KEY_EXIT_DELAY, DEFAULT_EXIT_DELAY_S));
-    alarmSetEntryDelay(prefs.getUShort(KEY_ENTRY_DELAY, DEFAULT_ENTRY_DELAY_S));
-    alarmSetSirenDuration(prefs.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
-    alarmSetSirenOutput(prefs.getUChar(KEY_SIREN_CH, 0));
+    alarmSetExitDelay(p.getUShort(KEY_EXIT_DELAY, DEFAULT_EXIT_DELAY_S));
+    alarmSetEntryDelay(p.getUShort(KEY_ENTRY_DELAY, DEFAULT_ENTRY_DELAY_S));
+    alarmSetSirenDuration(p.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
+    alarmSetSirenOutput(p.getUChar(KEY_SIREN_CH, 0));
 
     // --- Periodic Report ---
-    smsCmdSetReportInterval(prefs.getUShort(KEY_REPORT_DUR, DEFAULT_REPORT_INTERVAL_MIN));
+    smsCmdSetReportInterval(p.getUShort(KEY_REPORT_DUR, DEFAULT_REPORT_INTERVAL_MIN));
 
     // --- Recovery & Mode ---
-    smsCmdSetRecoveryText(prefs.getString(KEY_RECOVERY_TXT, "SF_Alarm: All zones restored to normal.").c_str());
-    smsCmdSetWorkingMode((WorkingMode)prefs.getUChar(KEY_ALARM_MODE, (uint8_t)MODE_SMS));
+    smsCmdSetRecoveryText(p.getString(KEY_RECOVERY_TXT, "SF_Alarm: All zones restored to normal.").c_str());
+    smsCmdSetWorkingMode((WorkingMode)p.getUChar(KEY_ALARM_MODE, (uint8_t)MODE_SMS));
 
     // --- WhatsApp ---
-    String waPh = prefs.getString(KEY_WA_PHONE, "");
-    String waKey = prefs.getString(KEY_WA_APIKEY, "");
-    WhatsAppMode waM = (WhatsAppMode)prefs.getUChar(KEY_WA_MODE, (uint8_t)WA_MODE_SMS);
+    String waPh = p.getString(KEY_WA_PHONE, "");
+    String waKey = p.getString(KEY_WA_APIKEY, "");
+    WhatsAppMode waM = (WhatsAppMode)p.getUChar(KEY_WA_MODE, (uint8_t)WA_MODE_SMS);
     whatsappSetConfig(waPh.c_str(), waKey.c_str(), waM);
 
     // --- MQTT ---
-    String mqServer = prefs.getString(KEY_MQTT_SERVER, "");
-    uint16_t mqPort = prefs.getUShort(KEY_MQTT_PORT, 1883);
-    String mqUser = prefs.getString(KEY_MQTT_USER, "");
-    String mqPass = prefs.getString(KEY_MQTT_PASS, "");
-    String mqClientId = prefs.getString(KEY_MQTT_CLIENTID, "SF_Alarm");
+    String mqServer = p.getString(KEY_MQTT_SERVER, "");
+    uint16_t mqPort = p.getUShort(KEY_MQTT_PORT, 1883);
+    String mqUser = p.getString(KEY_MQTT_USER, "");
+    String mqPass = p.getString(KEY_MQTT_PASS, "");
+    String mqClientId = p.getString(KEY_MQTT_CLIENTID, "SF_Alarm");
     mqttSetConfig(mqServer.c_str(), mqPort, mqUser.c_str(), mqPass.c_str(), mqClientId.c_str());
 
     // --- ONVIF ---
-    String ovHost = prefs.getString(KEY_ONVIF_HOST, "");
-    uint16_t ovPort = prefs.getUShort(KEY_ONVIF_PORT, 80);
-    String ovUser = prefs.getString(KEY_ONVIF_USER, "");
-    String ovPass = prefs.getString(KEY_ONVIF_PASS, "");
-    uint8_t ovZone = prefs.getUChar(KEY_ONVIF_ZONE, 1);
+    String ovHost = p.getString(KEY_ONVIF_HOST, "");
+    uint16_t ovPort = p.getUShort(KEY_ONVIF_PORT, 80);
+    String ovUser = p.getString(KEY_ONVIF_USER, "");
+    String ovPass = p.getString(KEY_ONVIF_PASS, "");
+    uint8_t ovZone = p.getUChar(KEY_ONVIF_ZONE, 1);
     onvifSetServer(ovHost.c_str(), ovPort, ovUser.c_str(), ovPass.c_str(), ovZone);
 
     // --- System Extras ---
-    g_heartbeatEnabled = prefs.getBool(KEY_HEARTBEAT_EN, true);
-    String tz = prefs.getString(KEY_TZ, "GMT0");
+    g_heartbeatEnabled = p.getBool(KEY_HEARTBEAT_EN, true);
+    String tz = p.getString(KEY_TZ, "GMT0");
     strncpy(g_timezone, tz.c_str(), sizeof(g_timezone)-1);
     g_timezone[sizeof(g_timezone)-1] = '\0';
     setenv("TZ", g_timezone, 1); // Set POSIX TZ environment var
@@ -299,7 +334,7 @@ void configLoad()
 
     // --- Schedule ---
     uint8_t blob[29];
-    if (prefs.getBytes("sched", blob, sizeof(blob)) == sizeof(blob)) {
+    if (p.getBytes("sched", blob, sizeof(blob)) == sizeof(blob)) {
         g_schedMode = blob[0];
         for (int i = 0; i < 7; i++) {
             g_schedArmHr[i]     = (int8_t)blob[1 + i];
@@ -311,27 +346,27 @@ void configLoad()
 
     // --- Phone numbers ---
     smsCmdClearPhones();
-    int phoneCnt = prefs.getInt(KEY_PHONE_COUNT, 0);
+    int phoneCnt = p.getInt(KEY_PHONE_COUNT, 0);
     for (int i = 0; i < phoneCnt && i < MAX_PHONE_NUMBERS; i++) {
         char key[16];
         snprintf(key, sizeof(key), "phone%d", i);
-        String phone = prefs.getString(key, "");
+        String phone = p.getString(key, "");
         if (phone.length() > 0) {
             smsCmdAddPhone(phone.c_str());
         }
     }
 
     // --- WiFi credentials ---
-    String wifiSsid = prefs.getString(KEY_WIFI_SSID, "");
-    String wifiPassStr = prefs.getString(KEY_WIFI_PASS, "");
+    String wifiSsid = p.getString(KEY_WIFI_SSID, "");
+    String wifiPassStr = p.getString(KEY_WIFI_PASS, "");
     if (wifiSsid.length() > 0) {
         networkSetWifi(wifiSsid.c_str(), wifiPassStr.c_str());
     }
 
     // --- Router credentials ---
-    String routerIp   = prefs.getString(KEY_ROUTER_IP, DEFAULT_ROUTER_IP);
-    String routerUser = prefs.getString(KEY_ROUTER_USER, DEFAULT_ROUTER_USER);
-    String routerPass = prefs.getString(KEY_ROUTER_PASS, DEFAULT_ROUTER_PASS);
+    String routerIp   = p.getString(KEY_ROUTER_IP, DEFAULT_ROUTER_IP);
+    String routerUser = p.getString(KEY_ROUTER_USER, DEFAULT_ROUTER_USER);
+    String routerPass = p.getString(KEY_ROUTER_PASS, DEFAULT_ROUTER_PASS);
     smsGatewaySetCredentials(routerIp.c_str(), routerUser.c_str(), routerPass.c_str());
 
     // --- Zone configurations ---
@@ -339,7 +374,7 @@ void configLoad()
         char key[16];
 
         snprintf(key, sizeof(key), "zName%d", i);
-        String name = prefs.getString(key, "");
+        String name = p.getString(key, "");
         if (name.length() > 0) {
             ZoneConfig* cfg = zonesGetConfig(i);
             if (cfg) {
@@ -347,118 +382,180 @@ void configLoad()
                 cfg->name[MAX_ZONE_NAME_LEN - 1] = '\0';
 
                 snprintf(key, sizeof(key), "zType%d", i);
-                cfg->type = (ZoneType)prefs.getUChar(key, ZONE_INSTANT);
+                cfg->type = (ZoneType)p.getUChar(key, ZONE_INSTANT);
 
                 snprintf(key, sizeof(key), "zWire%d", i);
-                cfg->wiring = (ZoneWiring)prefs.getUChar(key, ZONE_NO);
+                cfg->wiring = (ZoneWiring)p.getUChar(key, ZONE_NO);
 
                 snprintf(key, sizeof(key), "zEn%d", i);
-                cfg->enabled = prefs.getBool(key, true);
+                cfg->enabled = p.getBool(key, true);
             }
         }
 
         // Load alarm text
         snprintf(key, sizeof(key), "zTxt%d", i);
-        String txt = prefs.getString(key, "");
+        String txt = p.getString(key, "");
         if (txt.length() > 0) {
             smsCmdSetAlarmText(i, txt.c_str());
         }
     }
 
+    p.end();
+    xSemaphoreGive(configMutex);
     LOG_INFO(TAG, "Configuration loaded");
 }
 
 void configSavePin() {
-    prefs.putString(KEY_PIN, alarmGetPin());
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putString(KEY_PIN, alarmGetPin());
+        p.end();
+    }
     dirtyMain = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSaveTiming() {
-    prefs.putUShort(KEY_EXIT_DELAY, alarmGetExitDelay());
-    prefs.putUShort(KEY_ENTRY_DELAY, alarmGetEntryDelay());
-    prefs.putUShort(KEY_SIREN_DUR, alarmGetSirenDuration());
-    prefs.putUChar(KEY_SIREN_CH, alarmGetSirenOutput());
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putUShort(KEY_EXIT_DELAY, alarmGetExitDelay());
+        p.putUShort(KEY_ENTRY_DELAY, alarmGetEntryDelay());
+        p.putUShort(KEY_SIREN_DUR, alarmGetSirenDuration());
+        p.putUChar(KEY_SIREN_CH, alarmGetSirenOutput());
+        p.end();
+    }
     dirtyMain = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSaveWifi() {
-    prefs.putString(KEY_WIFI_SSID, networkGetSsid());
-    prefs.putString(KEY_WIFI_PASS, networkGetPass());
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putString(KEY_WIFI_SSID, networkGetSsid());
+        p.putString(KEY_WIFI_PASS, networkGetPass());
+        p.end();
+    }
     dirtyWifi = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSavePhones() {
-    int phoneCnt = smsCmdGetPhoneCount();
-    prefs.putInt(KEY_PHONE_COUNT, phoneCnt);
-    for (int i = 0; i < phoneCnt; i++) {
-        char key[16];
-        snprintf(key, sizeof(key), "phone%d", i);
-        prefs.putString(key, smsCmdGetPhone(i));
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        int phoneCnt = smsCmdGetPhoneCount();
+        p.putInt(KEY_PHONE_COUNT, phoneCnt);
+        for (int i = 0; i < phoneCnt; i++) {
+            char key[16];
+            snprintf(key, sizeof(key), "phone%d", i);
+            p.putString(key, smsCmdGetPhone(i));
+        }
+        p.end();
     }
     dirtyAlerts = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSaveRouter() {
-    prefs.putString(KEY_ROUTER_IP, smsGatewayGetRouterIp());
-    prefs.putString(KEY_ROUTER_USER, smsGatewayGetRouterUser());
-    prefs.putString(KEY_ROUTER_PASS, smsGatewayGetRouterPass());
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putString(KEY_ROUTER_IP, smsGatewayGetRouterIp());
+        p.putString(KEY_ROUTER_USER, smsGatewayGetRouterUser());
+        p.putString(KEY_ROUTER_PASS, smsGatewayGetRouterPass());
+        p.end();
+    }
     dirtyRouter = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSaveZones() {
-    for (int i = 0; i < MAX_ZONES; i++) {
-        const ZoneInfo* info = zonesGetInfo(i);
-        if (!info) continue;
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        for (int i = 0; i < MAX_ZONES; i++) {
+            const ZoneInfo* info = zonesGetInfo(i);
+            if (!info) continue;
 
-        char key[16];
-        snprintf(key, sizeof(key), "zName%d", i);
-        prefs.putString(key, info->config.name);
+            char key[16];
+            snprintf(key, sizeof(key), "zName%d", i);
+            p.putString(key, info->config.name);
 
-        snprintf(key, sizeof(key), "zType%d", i);
-        prefs.putUChar(key, (uint8_t)info->config.type);
+            snprintf(key, sizeof(key), "zType%d", i);
+            p.putUChar(key, (uint8_t)info->config.type);
 
-        snprintf(key, sizeof(key), "zWire%d", i);
-        prefs.putUChar(key, (uint8_t)info->config.wiring);
+            snprintf(key, sizeof(key), "zWire%d", i);
+            p.putUChar(key, (uint8_t)info->config.wiring);
 
-        snprintf(key, sizeof(key), "zEn%d", i);
-        prefs.putBool(key, info->config.enabled);
+            snprintf(key, sizeof(key), "zEn%d", i);
+            p.putBool(key, info->config.enabled);
 
-        snprintf(key, sizeof(key), "zTxt%d", i);
-        prefs.putString(key, smsCmdGetAlarmText(i));
+            snprintf(key, sizeof(key), "zTxt%d", i);
+            p.putString(key, smsCmdGetAlarmText(i));
+        }
+        p.end();
     }
     dirtyZones = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSavePeriodic() {
-    prefs.putUShort(KEY_REPORT_DUR, smsCmdGetReportInterval());
-    prefs.putString(KEY_RECOVERY_TXT, smsCmdGetRecoveryText());
-    prefs.putUChar(KEY_ALARM_MODE, (uint8_t)smsCmdGetWorkingMode());
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putUShort(KEY_REPORT_DUR, smsCmdGetReportInterval());
+        p.putString(KEY_RECOVERY_TXT, smsCmdGetRecoveryText());
+        p.putUChar(KEY_ALARM_MODE, (uint8_t)smsCmdGetWorkingMode());
+        p.end();
+    }
     dirtyAlerts = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSaveWhatsapp() {
-    prefs.putString(KEY_WA_PHONE, whatsappGetPhone());
-    prefs.putString(KEY_WA_APIKEY, whatsappGetApiKey());
-    prefs.putUChar(KEY_WA_MODE, (uint8_t)whatsappGetMode());
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putString(KEY_WA_PHONE, whatsappGetPhone());
+        p.putString(KEY_WA_APIKEY, whatsappGetApiKey());
+        p.putUChar(KEY_WA_MODE, (uint8_t)whatsappGetMode());
+        p.end();
+    }
     dirtyAlerts = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSaveMqtt() {
-    prefs.putString(KEY_MQTT_SERVER, mqttGetServer());
-    prefs.putUShort(KEY_MQTT_PORT, mqttGetPort());
-    prefs.putString(KEY_MQTT_USER, mqttGetUser());
-    prefs.putString(KEY_MQTT_PASS, mqttGetPass());
-    prefs.putString(KEY_MQTT_CLIENTID, mqttGetClientId());
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putString(KEY_MQTT_SERVER, mqttGetServer());
+        p.putUShort(KEY_MQTT_PORT, mqttGetPort());
+        p.putString(KEY_MQTT_USER, mqttGetUser());
+        p.putString(KEY_MQTT_PASS, mqttGetPass());
+        p.putString(KEY_MQTT_CLIENTID, mqttGetClientId());
+        p.end();
+    }
     dirtyMqtt = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSaveOnvif() {
-    prefs.putString(KEY_ONVIF_HOST, onvifGetHost());
-    prefs.putUShort(KEY_ONVIF_PORT, onvifGetPort());
-    prefs.putString(KEY_ONVIF_USER, onvifGetUser());
-    prefs.putString(KEY_ONVIF_PASS, onvifGetPass());
-    prefs.putUChar(KEY_ONVIF_ZONE, onvifGetTargetZone());
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putString(KEY_ONVIF_HOST, onvifGetHost());
+        p.putUShort(KEY_ONVIF_PORT, onvifGetPort());
+        p.putString(KEY_ONVIF_USER, onvifGetUser());
+        p.putString(KEY_ONVIF_PASS, onvifGetPass());
+        p.putUChar(KEY_ONVIF_ZONE, onvifGetTargetZone());
+        p.end();
+    }
     dirtyOnvif = false;
+    xSemaphoreGive(configMutex);
 }
 
 void configSave()
@@ -471,15 +568,16 @@ void configSave()
     LOG_INFO(TAG, "Executing granular save...");
     
     // Create local copies of flags to minimize mutex hold time
-    bool sMain = dirtyMain, sWifi = dirtyWifi, sAlerts = dirtyAlerts, sRouter = dirtyRouter;
-    bool sZones = dirtyZones, sMqtt = dirtyMqtt, sOnvif = dirtyOnvif, sHeart = dirtyHeartbeat;
-    bool sTz = dirtyTimezone, sSched = dirtySchedule;
+    bool sMain, sWifi, sAlerts, sRouter, sZones, sMqtt, sOnvif, sHeart, sTz, sSched;
     
-    // Clear flags while inside mutex
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
+    sMain = dirtyMain; sWifi = dirtyWifi; sAlerts = dirtyAlerts; sRouter = dirtyRouter;
+    sZones = dirtyZones; sMqtt = dirtyMqtt; sOnvif = dirtyOnvif; sHeart = dirtyHeartbeat;
+    sTz = dirtyTimezone; sSched = dirtySchedule;
+
     dirtyMain = dirtyWifi = dirtyAlerts = dirtyRouter = false;
     dirtyZones = dirtyMqtt = dirtyOnvif = dirtyHeartbeat = false;
     dirtyTimezone = dirtySchedule = false;
-
     xSemaphoreGive(configMutex);
 
     if (sMain)      { configSavePin(); configSaveTiming(); }
@@ -493,26 +591,55 @@ void configSave()
     if (sTz)        configSaveTimezone();
     if (sSched)     configSaveSchedule();
 
-    // Persist "configured" bit LAST to ensure atomic boot integrity
-    prefs.putBool(KEY_CONFIGURED, true);
+    // Persist "configured" bit LAST
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        Preferences p;
+        if (p.begin(NVS_NAMESPACE, false)) {
+            p.putBool(KEY_CONFIGURED, true);
+            p.end();
+        }
+        xSemaphoreGive(configMutex);
+    }
 
     LOG_INFO(TAG, "Granular save complete");
 }
 
 void configSaveAlarmState(AlarmState state)
 {
-    prefs.putUChar("state", (uint8_t)state);
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        Preferences p;
+        if (p.begin(NVS_NAMESPACE, false)) {
+            p.putUChar("state", (uint8_t)state);
+            p.end();
+        }
+        xSemaphoreGive(configMutex);
+    }
 }
 
 AlarmState configLoadAlarmState()
 {
-    return (AlarmState)prefs.getUChar("state", (uint8_t)ALARM_DISARMED);
+    AlarmState state = ALARM_DISARMED;
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        Preferences p;
+        if (p.begin(NVS_NAMESPACE, true)) {
+            state = (AlarmState)p.getUChar("state", (uint8_t)ALARM_DISARMED);
+            p.end();
+        }
+        xSemaphoreGive(configMutex);
+    }
+    return state;
 }
 
 void configFactoryReset()
 {
     LOG_INFO(TAG, "Factory reset — clearing NVS...");
-    prefs.clear();
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        Preferences p;
+        p.begin(NVS_NAMESPACE, false);
+        p.clear();
+        p.end();
+        xSemaphoreGive(configMutex);
+    }
     LOG_INFO(TAG, "NVS cleared. Restart to apply defaults.");
 }
 
