@@ -409,7 +409,10 @@ void configSavePin() {
     if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
     Preferences p;
     if (p.begin(NVS_NAMESPACE, false)) {
-        p.putString(KEY_PIN, alarmGetPin());
+        char pinBuf[MAX_PIN_LEN];
+        alarmCopyPin(pinBuf, sizeof(pinBuf));
+        p.putString(KEY_PIN, pinBuf);
+        memset(pinBuf, 0, sizeof(pinBuf)); // Scrub stack buffer
         p.end();
     }
     dirtyMain = false;

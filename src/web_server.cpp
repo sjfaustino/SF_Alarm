@@ -390,14 +390,12 @@ static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* respons
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
     }
 
-    // Mute requires PIN — silencing the siren is a security-sensitive action
     const char* pin = doc["pin"] | "";
-    if (!alarmValidatePin(pin)) {
-        return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
+    if (alarmMuteSiren(pin)) {
+        return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Siren muted\"}");
+    } else {
+        return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"ACCESS DENIED: PIN required\"}");
     }
-
-    alarmMuteSiren();
-    return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Siren muted\"}");
 }
 
 // ---------------------------------------------------------------------------

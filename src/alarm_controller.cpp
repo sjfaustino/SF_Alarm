@@ -192,13 +192,15 @@ static void setState(AlarmState newState)
                 firstTriggerMs = 0; // Clear RTC noise timer on clean disarm
             }
             stateChanged = true;
-
-            // Persist INSIDE the lock using a local snapshot.
-            // This prevents rapid-transition races where out-of-order NVS writes
-            // would restore a stale state on reboot.
-            configSaveAlarmState(snapshotState);
         }
         xSemaphoreGive(stateMutex);
+        
+        // Persist OUTSIDE the lock using a local snapshot.
+        // This prevents rapid-transition races from starving out Web/MQTT/CLI tasks
+        // by holding the mutex during flash erase/write.
+        if (stateChanged) {
+            configSaveAlarmState(snapshotState);
+        }
     } else {
         LOG_ERROR(TAG, "CRITICAL: State transition failed (Mutex DEADLOCK?)");
     }
@@ -331,9 +333,13 @@ void alarmInit()
                 firstTriggerMs = millis();
                 LOG_WARN(TAG, "Noise ordinance timer reset (cold restore).");
             }
+        } else {
+            // If armed but not triggered, ensure the ordinance timer is zeroed
+            firstTriggerMs = 0;
         }
     } else {
         currentState = ALARM_DISARMED;
+        firstTriggerMs = 0; // Guard against RTC amnesia garbage
     }
     
     LOG_INFO(TAG, "Controller initialized — %s", alarmGetStateStr());
@@ -471,14 +477,20 @@ bool alarmDisarm(const char* pin)
     return true;
 }
 
-void alarmMuteSiren()
+bool alarmMuteSiren(const char* pin)
 {
+    if (!validatePin(pin)) {
+        LOG_WARN(TAG, "Mute failed — invalid PIN");
+        return false;
+    }
+
     if (sirenActive) {
         sirenMuted = true;
         ioExpanderSetOutput(sirenOutputChannel, false);
         LOG_INFO(TAG, "Siren MUTED (alarm still active)");
         fireEvent(EVT_SIREN_OFF, -1, "Manual Mute");
     }
+    return true;
 }
 
 AlarmState alarmGetState()
@@ -542,9 +554,11 @@ void alarmSetPin(const char* pin)
     LOG_INFO(TAG, "PIN successfully updated");
 }
 
-const char* alarmGetPin()
+void alarmCopyPin(char* dest, size_t maxLen)
 {
-    return alarmPin;
+    if (!dest || maxLen == 0) return;
+    strncpy(dest, alarmPin, maxLen - 1);
+    dest[maxLen - 1] = '\0';
 }
 
 

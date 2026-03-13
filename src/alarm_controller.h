@@ -70,8 +70,8 @@ bool alarmArmHome(const char* pin);
 /// Disarm the system. Returns false if PIN is wrong.
 bool alarmDisarm(const char* pin);
 
-/// Mute/silence the siren without disarming.
-void alarmMuteSiren();
+/// Mute/silence the siren without disarming. Returns false if PIN is wrong.
+bool alarmMuteSiren(const char* pin);
 
 /// Get the current alarm state.
 AlarmState alarmGetState();
@@ -88,8 +88,8 @@ uint16_t alarmGetDelayRemaining();
 /// Set the alarm PIN code.
 void alarmSetPin(const char* pin);
 
-/// Get the current alarm PIN code.
-const char* alarmGetPin();
+/// Securely copy the current alarm PIN code into the destination buffer
+void alarmCopyPin(char* dest, size_t maxLen);
 
 /// Validate a PIN without side effects (does NOT disarm).
 bool alarmValidatePin(const char* pin);

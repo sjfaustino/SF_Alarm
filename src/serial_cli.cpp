@@ -130,7 +130,8 @@ static void cmdDisarmCallback(cmd* c) {
 
 static void cmdMuteCallback(cmd* c) {
     if (!requirePin(c)) return;
-    alarmMuteSiren();
+    Command cmd(c);
+    alarmMuteSiren(cmd.getArgument("pin").getValue().c_str());
 }
 
 static void cmdRebootCallback(cmd* c) {

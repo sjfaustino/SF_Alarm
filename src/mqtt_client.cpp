@@ -92,8 +92,13 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
                 mqttPublish("SF_Alarm/events", "ARM_AWAY failed (wrong PIN)");
             }
         }
-        else if (strcmp(message, "MUTE") == 0) {
-            alarmMuteSiren();
+        else if (strncmp(message, "MUTE", 4) == 0) {
+            const char* pin = extractPin(message);
+            if (alarmMuteSiren(pin)) {
+                mqttPublish("SF_Alarm/events", "MUTE via MQTT");
+            } else {
+                mqttPublish("SF_Alarm/events", "MUTE failed (wrong PIN)");
+            }
         }
     }
 }

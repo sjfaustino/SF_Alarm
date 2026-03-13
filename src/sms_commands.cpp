@@ -302,38 +302,50 @@ static bool parseStatus(const char* body, const char* sender)
 /// Parse: ARM / ARM HOME / DISARM / DISARM <pin>
 static bool parseArmDisarm(const char* body, const char* sender)
 {
-    char upperTrimmed[64];
-    strncpy(upperTrimmed, body, sizeof(upperTrimmed)-1);
-    upperTrimmed[sizeof(upperTrimmed)-1] = '\0';
-    for(int i=0; upperTrimmed[i]; i++) upperTrimmed[i] = toupper((unsigned char)upperTrimmed[i]);
-    trimStr(upperTrimmed);
-
-    if (strncmp(upperTrimmed, "ARM HOME", 8) == 0) {
-        const char* pin = body + 8;
-        while (*pin && isspace(*pin)) pin++;
-        if (alarmArmHome(pin)) {
-            sendReply(sender, "SF_Alarm: Arming HOME. Exit delay started.");
-        } else {
-            sendReply(sender, "SF_Alarm: ARM HOME failed. Check PIN/zones.");
-        }
-        return true;
+    // The incoming 'body' is already trimmed of leading/trailing spaces.
+    // Let's find the command by skipping spaces manually.
+    const char* p = body;
+    char cmd1[16] = {0};
+    char cmd2[16] = {0};
+    
+    // Read first word
+    int i = 0;
+    while (*p && !isspace(*p) && i < 15) {
+        cmd1[i++] = toupper((unsigned char)*p);
+        p++;
     }
-
-    if (strncmp(upperTrimmed, "ARM", 3) == 0 && (upperTrimmed[3] == '\0' || isspace(upperTrimmed[3]))) {
-        const char* pin = body + 3;
-        while (*pin && isspace(*pin)) pin++;
-        if (alarmArmAway(pin)) {
-            sendReply(sender, "SF_Alarm: Arming AWAY. Exit delay started.");
-        } else {
-            sendReply(sender, "SF_Alarm: ARM failed. Check PIN/zones.");
+    // skip spaces
+    while (*p && isspace(*p)) p++;
+    
+    // If cmd1 is ARM, we might have HOME as cmd2
+    if (strcmp(cmd1, "ARM") == 0) {
+        const char* rollback = p;
+        i = 0;
+        while (*p && !isspace(*p) && i < 15) {
+            cmd2[i++] = toupper((unsigned char)*p);
+            p++;
         }
-        return true;
-    }
-
-    if (strncmp(upperTrimmed, "DISARM", 6) == 0) {
-        const char* pin = body + 6;
-        while (*pin && isspace(*pin)) pin++;
-        if (alarmDisarm(pin)) {
+        if (strcmp(cmd2, "HOME") == 0) {
+            // skip spaces
+            while (*p && isspace(*p)) p++;
+            if (alarmArmHome(p)) {
+                sendReply(sender, "SF_Alarm: Arming HOME. Exit delay started.");
+            } else {
+                sendReply(sender, "SF_Alarm: ARM HOME failed. Check PIN/zones.");
+            }
+            return true;
+        } else {
+            // It was just ARM <pin>
+            p = rollback; // The second word is actually the pin
+            if (alarmArmAway(p)) {
+                sendReply(sender, "SF_Alarm: Arming AWAY. Exit delay started.");
+            } else {
+                sendReply(sender, "SF_Alarm: ARM failed. Check PIN/zones.");
+            }
+            return true;
+        }
+    } else if (strcmp(cmd1, "DISARM") == 0) {
+        if (alarmDisarm(p)) {
             sendReply(sender, "SF_Alarm: System DISARMED.");
         } else {
             sendReply(sender, "SF_Alarm: DISARM failed. Invalid PIN.");
@@ -347,8 +359,14 @@ static bool parseArmDisarm(const char* body, const char* sender)
 /// Parse: MUTE
 static bool parseMute(const char* body, const char* sender)
 {
-    alarmMuteSiren();
-    sendReply(sender, "SF_Alarm: Siren MUTED.");
+    const char* pin = body + 4;
+    while (*pin && isspace(*pin)) pin++;
+
+    if (alarmMuteSiren(pin)) {
+        sendReply(sender, "SF_Alarm: Siren MUTED.");
+    } else {
+        sendReply(sender, "SF_Alarm: MUTE failed. Invalid PIN.");
+    }
     return true;
 }
 
