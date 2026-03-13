@@ -202,19 +202,21 @@ static void pollMessages() {
                 buffer[bufferPos++] = (char)c;
                 buffer[bufferPos] = '\0';
 
-                // Check for keywords in the current buffer
-                // "IsMotion" + "Value=\"true\""
-                if (strcasestr(buffer, "IsMotion")) {
-                    if (strcasestr(buffer, "Value=\"true\"")) {
-                        motion = true;
-                        break;
-                    }
+                // Keyword detection: split "IsMotion" + "Value=\"true\""
+                // We check for the combined pattern or fragments.
+                // Improvement: check both fragments in the window to handle splits.
+                if (strcasestr(buffer, "IsMotion") && strcasestr(buffer, "Value=\"true\"")) {
+                    motion = true;
+                    break;
                 }
 
-                // If buffer is full, shift it to keep the last 128 bytes (enough for the pattern)
+                // If buffer is full, shift it to keep the last 128 bytes (overlapping window)
+                // This ensures we never miss a keyword split across the 512-byte boundary.
                 if (bufferPos >= (int)sizeof(buffer) - 1) {
-                    memmove(buffer, buffer + 256, 256);
-                    bufferPos = 256;
+                    const int OVERLAP = 128;
+                    memmove(buffer, buffer + (sizeof(buffer) - OVERLAP - 1), OVERLAP);
+                    bufferPos = OVERLAP;
+                    buffer[bufferPos] = '\0';
                 }
             } else {
                 vTaskDelay(pdMS_TO_TICKS(10));

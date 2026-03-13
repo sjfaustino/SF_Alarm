@@ -90,21 +90,29 @@ static void trimStr(char* str)
 /// Encodes unsafe HTML characters to prevent XSS without losing data
 static void encodeHtml(char* str, size_t maxLen)
 {
-    if (str == nullptr) return;
-    char tmp[MAX_SMS_TEXT_LEN * 2]; // Enough room for expansion
+    if (str == nullptr || maxLen == 0) return;
+    
+    // Worst case: every character is a double quote (&quot; = 6 chars).
+    // Plus null terminator. 160 * 6 + 1 = 961.
+    char tmp[MAX_SMS_TEXT_LEN * 6 + 1]; 
     char* src = str;
     char* dst = tmp;
     
-    while (*src && (size_t)(dst - tmp) < sizeof(tmp) - 8) {
-        if (*src == '<')      { strcpy(dst, "&lt;"); dst += 4; }
-        else if (*src == '>') { strcpy(dst, "&gt;"); dst += 4; }
-        else if (*src == '"') { strcpy(dst, "&quot;"); dst += 6; }
-        else if (*src == '\''){ strcpy(dst, "&apos;"); dst += 6; }
-        else if (*src == '&') { strcpy(dst, "&amp;"); dst += 5; }
-        else { *dst++ = *src; }
-        src++;
+    // Safety check: ensure we don't overflow tmp even if input is larger than MAX_SMS_TEXT_LEN
+    size_t srcLen = strlen(str);
+    if (srcLen > MAX_SMS_TEXT_LEN) srcLen = MAX_SMS_TEXT_LEN;
+
+    for (size_t i = 0; i < srcLen; i++) {
+        char c = *src++;
+        if (c == '<')      { strcpy(dst, "&lt;"); dst += 4; }
+        else if (c == '>') { strcpy(dst, "&gt;"); dst += 4; }
+        else if (c == '"') { strcpy(dst, "&quot;"); dst += 6; }
+        else if (c == '\''){ strcpy(dst, "&apos;"); dst += 6; }
+        else if (c == '&') { strcpy(dst, "&amp;"); dst += 5; }
+        else { *dst++ = c; }
     }
     *dst = '\0';
+    
     strncpy(str, tmp, maxLen - 1);
     str[maxLen - 1] = '\0';
 }

@@ -12,7 +12,7 @@ static const char* TAG = "ALM";
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
-static AlarmState       currentState     = ALARM_DISARMED;
+static volatile AlarmState currentState = ALARM_DISARMED;
 static AlarmState       returnState      = ALARM_DISARMED; // State to return to after alarm timeout
 static AlarmEventCallback eventCallback  = nullptr;
 

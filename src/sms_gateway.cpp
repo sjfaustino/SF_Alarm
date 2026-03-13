@@ -142,38 +142,69 @@ bool smsGatewayLogin()
     int code = http.GET();
     LOG_INFO(TAG, "Login page response: %d", code);
 
-    // Some Cudy router firmwares return the login form with 403 Forbidden 
-    // when unauthenticated. We treat 200/403 as valid for scraping.
     if (code != HTTP_CODE_OK && code != 403) {
         setError("Network failure accessing router (HTTP %d)", code);
         http.end();
         return false;
     }
 
-    String loginPage = http.getString();
-    http.end();
-
-    String csrf = extractHiddenField(loginPage, "_csrf");
-    String token = extractHiddenField(loginPage, "token");
-    String salt = extractHiddenField(loginPage, "salt");
-
-    if (csrf.length() == 0 || token.length() == 0 || salt.length() == 0) {
-        setError("Could not extract login fields (csrf=%d, token=%d, salt=%d)",
-                 csrf.length(), token.length(), salt.length());
+    // --- ZERO-HEAP STREAM SCRAPER ---
+    WiFiClient* stream = http.getStreamPtr();
+    if (!stream) {
+        setError("Failed to get response stream");
+        http.end();
         return false;
     }
 
-    LOG_INFO(TAG, "Login factors: csrf=%.8s... token=%.8s... salt=%.8s...",
-                   csrf.c_str(), token.c_str(), salt.c_str());
+    String _csrf = "", salt = "", token = "";
+    char buffer[512];
+    int bufPos = 0;
+    unsigned long start = millis();
+    
+    while (http.connected() && (_csrf == "" || salt == "" || token == "")) {
+        if (millis() - start > 10000) break; // Timeout
+        
+        if (stream->available()) {
+            int c = stream->read();
+            if (c < 0) break;
+            buffer[bufPos++] = (char)c;
+            buffer[bufPos] = '\0';
+            
+            // Search for tokens in isolated input tags
+            if (c == '>') {
+                if (strcasestr(buffer, "name=\"_csrf\"")) _csrf = extractBetween(buffer, "value=\"", "\"");
+                if (strcasestr(buffer, "name=\"salt\"")) salt = extractBetween(buffer, "value=\"", "\"");
+                if (strcasestr(buffer, "name=\"token\"")) token = extractBetween(buffer, "value=\"", "\"");
+                
+                // Clear buffer for next tag
+                bufPos = 0;
+            } else if (bufPos >= (int)sizeof(buffer) - 1) {
+                // Shift buffer
+                memmove(buffer, buffer + 256, 256);
+                bufPos = 256;
+            }
+        } else {
+            vTaskDelay(10);
+        }
+    }
+    http.end();
+
+    if (_csrf == "" || salt == "" || token == "") {
+        setError("Failed to scrape LuCI login tokens (Router firmare mismatch?)");
+        return false;
+    }
 
     // Store login _csrf as fallback for send operations
-    csrfToken = csrf;
+    csrfToken = _csrf;
 
     // --- Step 2: Double SHA-256 hash ---
     // hash1 = SHA256(password + salt)
-    String hash1 = sha256Hex(String(routerPass) + salt);
+    String hashVal1 = sha256Hex(String(routerPass) + salt);
     // finalHash = SHA256(hash1 + token)
-    String finalHash = sha256Hex(hash1 + token);
+    String finalHash = sha256Hex(hashVal1 + token);
+
+    LOG_INFO(TAG, "Login factors: _csrf=%.8s... token=%.8s... salt=%.8s...",
+                   _csrf.c_str(), token.c_str(), salt.c_str());
 
     Serial.printf("[SMS] Password hashed OK\n");
 
@@ -193,13 +224,13 @@ bool smsGatewayLogin()
     http2.collectHeaders(headerKeys, 2);
 
     // Minimal POST body — only the fields Cudy LuCI actually requires
-    String postData = String("_csrf=") + csrf +
+    String postData = String("_csrf=") + _csrf +
                       "&luci_username=" + routerUser +
                       "&luci_password=" + finalHash;
 
     Serial.printf("[SMS] Login POST to: %s\n", loginUrl.c_str());
     Serial.printf("[SMS] POST body (len=%d): _csrf=%s...&luci_username=%s&luci_password=%s...\n",
-                  postData.length(), csrf.substring(0,8).c_str(),
+                  postData.length(), _csrf.substring(0,8).c_str(),
                   routerUser, finalHash.substring(0,8).c_str());
 
     int postCode = http2.POST(postData);

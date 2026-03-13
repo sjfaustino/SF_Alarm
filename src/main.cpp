@@ -42,6 +42,11 @@ static const uint32_t WATCHDOG_INTEGRITY_WINDOW_MS = 15000; // 15 seconds
 static TaskHandle_t taskHandles[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
 static uint8_t restartCount[6] = { 0, 0, 0, 0, 0, 0 };
 
+// Boot Loop Protection (RTC memory persists through soft/WDT reset)
+RTC_NOINIT_ATTR uint32_t bootCount;
+RTC_NOINIT_ATTR uint32_t lastBootTime;
+static bool recoveryMode = false;
+
 static void restartTask(int index);
 
 // Alert Queue for non-blocking broadcasts
@@ -363,8 +368,37 @@ void setup()
     logInit();
 
     Serial.begin(CLI_BAUD_RATE);
-    delay(1000);  
-    Serial.println();
+    LOG_INFO(TAG, "SF_Alarm Booting (v%s)...", FW_VERSION_STR);
+
+    // Boot Loop Protection Logic
+    uint32_t now = millis();
+    // If we've been running for > 10 min, reset the cycle count
+    if (now - lastBootTime > 600000) {
+        bootCount = 0;
+    }
+    bootCount++;
+    lastBootTime = now;
+
+    if (bootCount > 5) {
+        LOG_ERROR(TAG, "FATAL: Recursive boot loop detected! Entering RECOVERY MODE.");
+        recoveryMode = true;
+        // In recovery mode, we skip heavy workers and just run CLI/Diagnostics
+        configInit();
+        cliInit();
+        while(true) {
+            cliUpdate();
+            // Slow "Distress" blink
+            digitalWrite(HEARTBEAT_LED_PIN, HIGH);
+            delay(100);
+            digitalWrite(HEARTBEAT_LED_PIN, LOW);
+            delay(100);
+            digitalWrite(HEARTBEAT_LED_PIN, HIGH);
+            delay(100);
+            digitalWrite(HEARTBEAT_LED_PIN, LOW);
+            delay(2000);
+            esp_task_wdt_reset();
+        }
+    }
     Serial.println("========================================");
     Serial.printf("  SF_Alarm v%s — Obsidian Mantle\n", FW_VERSION_STR);
     Serial.println("  Industrial Security Controller (ESP32)");
