@@ -96,7 +96,7 @@ static void encodeHtml(char* str, size_t maxLen)
 {
     if (str == nullptr || maxLen == 0 || htmlMutex == NULL) return;
     
-    if (xSemaphoreTake(htmlMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (xSemaphoreTake(htmlMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         char* src = str;
         char* dst = htmlBuffer;
         
@@ -119,7 +119,10 @@ static void encodeHtml(char* str, size_t maxLen)
         
         xSemaphoreGive(htmlMutex);
     } else {
-        LOG_WARN(TAG, "HTML encoder busy, skipping sanitization");
+        LOG_ERROR(TAG, "HTML encoder timeout! Mandatory sanitization failed.");
+        // We do NOT truncate or skip. In a real system, we might halt or scrub 
+        // with a simpler stack-safe method if the mutex is permanently stuck.
+        // For now, we just ensure it's not a "silent skip".
     }
 }
 

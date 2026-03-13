@@ -10,28 +10,31 @@
 static const char* TAG = "ALM";
 
 // ---------------------------------------------------------------------------
-// Module State
+// Globals (Unchanged but documented)
 // ---------------------------------------------------------------------------
-static AlarmState       currentState     = ALARM_DISARMED;
-static AlarmState       returnState      = ALARM_DISARMED; 
-static SemaphoreHandle_t stateMutex       = NULL;
-static AlarmEventCallback eventCallback  = nullptr;
-
-static const char* alarmGetStateStrInternal();
-
-static char     alarmPin[MAX_PIN_LEN]    = "1234";  // Default PIN
+static char     alarmPin[MAX_PIN_LEN]    = "1234";
 static uint16_t exitDelaySec             = DEFAULT_EXIT_DELAY_S;
 static uint16_t entryDelaySec            = DEFAULT_ENTRY_DELAY_S;
 static uint16_t sirenDurationSec         = DEFAULT_SIREN_DURATION_S;
 static uint8_t  sirenOutputChannel       = 0;   // Output channel 0 = siren
 
+// ---------------------------------------------------------------------------
+// Module State
+// ---------------------------------------------------------------------------
+static AlarmState       currentState     = ALARM_DISARMED;
+static AlarmState       returnState      = ALARM_DISARMED;
+static SemaphoreHandle_t stateMutex       = NULL;
+static AlarmEventCallback eventCallback  = nullptr;
+
+static bool             sirenActive      = false;
+static bool             sirenMuted       = false;
+
+static const char* alarmGetStateStrInternal();
+
 static uint16_t activeAlarmMask  = 0;    // Bitmask of all zones triggered in current cycle
 static uint32_t delayStartMs     = 0;
 static uint32_t sirenStartMs     = 0;
 static uint32_t firstTriggerMs   = 0;    // Strict start for noise ordinance compliance
-static bool     sirenActive      = false;
-static bool     sirenMuted       = false;
-
 static uint8_t  triggeringZone   = 0xFF; // First zone that tripped
 
 uint16_t alarmGetActiveAlarmMask() { return activeAlarmMask; }
@@ -166,11 +169,9 @@ static void setState(AlarmState newState)
 {
     if (!stateMutex) return;
     
-    // Infallible State Transition: Use a longer timeout or block to ensure DISARM/TRIGGER 
-    // is never ignored due to transient contention with telemetry/MQTT polling.
+    bool stateChanged = false;
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         if (currentState != newState) {
-            // Capture return state when transitioning out of stable armed/disarmed states
             if (currentState == ALARM_DISARMED ||
                 currentState == ALARM_ARMED_AWAY ||
                 currentState == ALARM_ARMED_HOME) {
@@ -181,17 +182,19 @@ static void setState(AlarmState newState)
             currentState = newState;
             LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStrInternal());
             
-            // Clean up noise ordinance timer on disarm
             if (newState == ALARM_DISARMED) {
                 firstTriggerMs = 0;
             }
-
-            // Industrial Hardening: Persist state to survive reboots/power cycles
-            configSaveAlarmState(currentState);
+            stateChanged = true;
         }
         xSemaphoreGive(stateMutex);
     } else {
         LOG_ERROR(TAG, "CRITICAL: State transition failed (Mutex DEADLOCK?)");
+    }
+
+    // Industrial Hardening: Persist outside the lock to minimize contention latency
+    if (stateChanged) {
+        configSaveAlarmState(newState);
     }
 }
 
@@ -300,9 +303,14 @@ void alarmInit()
     
     // Restore persistent state from NVS
     AlarmState savedState = configLoadAlarmState();
-    if (savedState == ALARM_ARMED_AWAY || savedState == ALARM_ARMED_HOME) {
+    if (savedState == ALARM_ARMED_AWAY || savedState == ALARM_ARMED_HOME || savedState == ALARM_TRIGGERED) {
         currentState = savedState;
-        LOG_INFO(TAG, "Restored state from NVS: %s", alarmGetStateStr());
+        LOG_INFO(TAG, "Restored state from NVS: %s", alarmGetStateStrInternal());
+        
+        // If we restored TRIGGERED, we must ensure sirens can run
+        if (savedState == ALARM_TRIGGERED) {
+            activeAlarmMask = 0xFFFF; // Mark as "recovered alarm"
+        }
     } else {
         currentState = ALARM_DISARMED;
     }

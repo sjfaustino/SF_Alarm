@@ -45,7 +45,7 @@ bool ioExpanderInit()
 
     if (digitalRead(I2C_SDA_PIN) == LOW) {
         LOG_WARN(TAG, "I2C SDA stuck LOW. Attempting bus recovery...");
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < 20; i++) { // Max 20 pulses to clear any byte/ack state
             digitalWrite(I2C_SCL_PIN, LOW);
             delayMicroseconds(5);
             digitalWrite(I2C_SCL_PIN, HIGH);
