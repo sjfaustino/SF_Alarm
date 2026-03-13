@@ -414,24 +414,23 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
 }
 
 // ---------------------------------------------------------------------------
-// Poll Inbox
+// Poll Messages Helper
 // ---------------------------------------------------------------------------
-// GET /cgi-bin/luci/admin/network/gcom/sms/smslist?smsbox=rec&iface=4g
-// Returns HTML table with <tr class="cbi-section-table-row ...">
 
-int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
+static int smsGatewayPollMessages(SmsMessage* msgs, int maxMessages, const char* boxParam)
 {
     if (!loggedIn) {
         if (!smsGatewayLogin()) return 0;
     }
 
     HTTPClient http;
-    String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms/smslist?smsbox=rec&iface=4g");
+    String pathStr = String("/cgi-bin/luci/admin/network/gcom/sms/smslist?smsbox=") + boxParam + "&iface=4g";
+    String url = buildUrl(pathStr.c_str());
 
     http.begin(url);
     http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
-    http.setConnectTimeout(2000); // Fast-fail if router is completely unresponsive
-    http.setTimeout(3000); // 3s is plenty for a local HTML poll
+    http.setConnectTimeout(2000);
+    http.setTimeout(3000);
 
     int httpCode = http.GET();
 
@@ -448,7 +447,7 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
     }
 
     if (httpCode != HTTP_CODE_OK) {
-        setError("Poll HTTP error: %d", httpCode);
+        setError("Poll %s HTTP error: %d", boxParam, httpCode);
         http.end();
         return 0;
     }
@@ -467,18 +466,18 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
     while ((http.connected() || stream->available()) && count < maxMessages && (millis() - streamStartMs) < 5000) {
         size_t size = stream->available();
         if (size) {
-            streamStartMs = millis(); // Refresh timeout
-            uint8_t buf[256];
-            int c = stream->readBytes(buf, min(size, sizeof(buf)));
+            streamStartMs = millis();
+            uint8_t buf[257];
+            int c = stream->readBytes(buf, min(size, sizeof(buf) - 1));
             
-            // Sanitize: Replace null bytes and non-printable trash that can break String logic
             for (int j = 0; j < c; j++) {
                 if (buf[j] == '\0') buf[j] = ' '; 
             }
+            buf[c] = '\0';
             
-            window += String((char*)buf, c);
+            // Fix: avoid temporary String allocations that fragment heap
+            window += (const char*)buf;
 
-            // --- Parse HTML table rows from sliding window ---
             int searchPos = 0;
             while (count < maxMessages) {
                 int rowStart = window.indexOf("<tr class=\"cbi-section-table-row", searchPos);
@@ -489,7 +488,6 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
 
                 String row = window.substring(rowStart, rowEnd + 5);
 
-                // Extract <td> contents
                 int tdPos = 0;
                 int tdIdx = 0;
                 String phone = "";
@@ -546,144 +544,6 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
                 searchPos = rowEnd + 5;
             }
 
-            // Eject processed HTML or truncate to prevent OOM panic
-            // Use .remove(0, size) instead of substring to prevent string allocation fragmentation
-            if (searchPos > 0) {
-                window.remove(0, searchPos);
-            } else if (window.length() > 2048) {
-                int lastPartial = window.lastIndexOf("<tr ");
-                if (lastPartial >= 0) {
-                    window.remove(0, lastPartial);
-                } else {
-                    window.remove(0, 1024); // Flush half if entirely garbage
-                }
-            }
-        } else {
-            delay(10);
-        }
-    }
-
-    http.end();
-
-    if (count > 0) {
-        Serial.printf("[SMS] Polled %d message(s)\n", count);
-    }
-    return count;
-}
-
-// ---------------------------------------------------------------------------
-// Poll Outbox (sent messages)
-// ---------------------------------------------------------------------------
-// Same HTML table format as inbox, but URL parameter is smsbox=sent
-
-int smsGatewayPollOutbox(SmsMessage* msgs, int maxMessages)
-{
-    if (!loggedIn) {
-        if (!smsGatewayLogin()) return 0;
-    }
-
-    HTTPClient http;
-    String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms/smslist?smsbox=sent&iface=4g");
-
-    http.begin(url);
-    http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
-    http.setConnectTimeout(2000);
-    http.setTimeout(3000);
-
-    int httpCode = http.GET();
-
-    if (httpCode == 403 || httpCode == 401) {
-        http.end();
-        loggedIn = false;
-        if (smsGatewayLogin()) {
-            http.begin(url);
-            http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
-            http.setConnectTimeout(2000);
-            http.setTimeout(3000);
-            httpCode = http.GET();
-        }
-    }
-
-    if (httpCode != HTTP_CODE_OK) {
-        setError("Outbox poll HTTP error: %d", httpCode);
-        http.end();
-        return 0;
-    }
-
-    WiFiClient* stream = http.getStreamPtr();
-    if (!stream) {
-        http.end();
-        return 0;
-    }
-
-    String window;
-    window.reserve(4096);
-    int count = 0;
-    unsigned long streamStartMs = millis();
-
-    while ((http.connected() || stream->available()) && count < maxMessages && (millis() - streamStartMs) < 5000) {
-        size_t size = stream->available();
-        if (size) {
-            streamStartMs = millis();
-            uint8_t buf[256];
-            int c = stream->readBytes(buf, min(size, sizeof(buf)));
-
-            for (int j = 0; j < c; j++) {
-                if (buf[j] == '\0') buf[j] = ' ';
-            }
-
-            window += String((char*)buf, c);
-
-            int searchPos = 0;
-            while (count < maxMessages) {
-                int rowStart = window.indexOf("<tr class=\"cbi-section-table-row", searchPos);
-                if (rowStart < 0) break;
-
-                int rowEnd = window.indexOf("</tr>", rowStart);
-                if (rowEnd < 0) break;
-
-                String row = window.substring(rowStart, rowEnd + 5);
-
-                int tdPos = 0;
-                int tdIdx = 0;
-                String phone = "";
-                String content = "";
-                String timestamp = "";
-
-                while (tdIdx < 6) {
-                    int tdStart = row.indexOf("<td", tdPos);
-                    if (tdStart < 0) break;
-                    int tdContentStart = row.indexOf(">", tdStart) + 1;
-                    int tdEnd = row.indexOf("</td>", tdContentStart);
-                    if (tdEnd < 0) break;
-
-                    String cellContent = row.substring(tdContentStart, tdEnd);
-                    cellContent.trim();
-
-                    switch (tdIdx) {
-                        case 1: phone = cellContent; break;     // Destination number
-                        case 2: content = cellContent; break;   // Message body
-                        case 3: timestamp = cellContent; break; // Sent timestamp
-                    }
-
-                    tdPos = tdEnd + 5;
-                    tdIdx++;
-                }
-
-                if (phone.length() > 0) {
-                    msgs[count].id = count;
-                    strncpy(msgs[count].sender, phone.c_str(), sizeof(msgs[count].sender) - 1);
-                    msgs[count].sender[sizeof(msgs[count].sender) - 1] = '\0';
-                    strncpy(msgs[count].body, content.c_str(), sizeof(msgs[count].body) - 1);
-                    msgs[count].body[sizeof(msgs[count].body) - 1] = '\0';
-                    strncpy(msgs[count].timestamp, timestamp.c_str(), sizeof(msgs[count].timestamp) - 1);
-                    msgs[count].timestamp[sizeof(msgs[count].timestamp) - 1] = '\0';
-                    count++;
-                }
-
-                searchPos = rowEnd + 5;
-            }
-
             if (searchPos > 0) {
                 window.remove(0, searchPos);
             } else if (window.length() > 2048) {
@@ -695,16 +555,30 @@ int smsGatewayPollOutbox(SmsMessage* msgs, int maxMessages)
                 }
             }
         } else {
-            delay(10);
+            vTaskDelay(pdMS_TO_TICKS(10)); // Cooperative multitasking yield instead of delay(10)
         }
     }
 
     http.end();
 
     if (count > 0) {
-        Serial.printf("[SMS] Outbox: %d message(s)\n", count);
+        Serial.printf("[SMS] Polled %s: %d message(s)\n", boxParam, count);
     }
     return count;
+}
+
+// ---------------------------------------------------------------------------
+// Public API Wrappers
+// ---------------------------------------------------------------------------
+
+int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
+{
+    return smsGatewayPollMessages(msgs, maxMessages, "rec");
+}
+
+int smsGatewayPollOutbox(SmsMessage* msgs, int maxMessages)
+{
+    return smsGatewayPollMessages(msgs, maxMessages, "sent");
 }
 
 // ---------------------------------------------------------------------------

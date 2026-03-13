@@ -62,9 +62,15 @@ static bool isAuthorized(const char* sender)
         const int MATCH_DIGITS = 9;
 
         if (senderLen >= MATCH_DIGITS && storedLen >= MATCH_DIGITS) {
-            if (strcmp(sender + senderLen - MATCH_DIGITS,
-                       phoneNumbers[i] + storedLen - MATCH_DIGITS) == 0) {
-                return true;
+            // Security fix: restrict extreme length differences to prevent padding spoofing.
+            // A max difference of 5 handles "+351" (13 chars) vs "91..." (9 chars)
+            // or "00351" (14 chars) vs "91..." (9 chars).
+            int lenDiff = senderLen > storedLen ? (senderLen - storedLen) : (storedLen - senderLen);
+            if (lenDiff <= 5) {
+                if (strcmp(sender + senderLen - MATCH_DIGITS,
+                           phoneNumbers[i] + storedLen - MATCH_DIGITS) == 0) {
+                    return true;
+                }
             }
         }
     }
