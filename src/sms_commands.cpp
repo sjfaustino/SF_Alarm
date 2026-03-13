@@ -119,11 +119,17 @@ static void encodeHtml(char* str, size_t maxLen)
         
         xSemaphoreGive(htmlMutex);
     } else {
-        LOG_ERROR(TAG, "HTML encoder timeout! Mandatory sanitization failed. Returning safety string.");
-        // Fallback: If we can't sanitize, we MUST NOT return the original unsafe string.
-        // We overwrite the output with a generic error indicator.
-        strncpy(str, "ERROR_SECURE_SAN_FAIL", maxLen - 1);
-        str[maxLen - 1] = '\0';
+        // Omega Suture: If the static buffer mutex timed out, use an emergency in-place scrubber.
+        // This is stack-safe (no allocation), avoids logic crashes from error strings,
+        // and never returns unsanitized content. It replaces dangerous chars with '?'.
+        LOG_ERROR(TAG, "HTML encoder timeout! Using emergency in-place scrubber.");
+        char* p = str;
+        while (*p) {
+            if (*p == '<' || *p == '>' || *p == '"' || *p == '\'' || *p == '&') {
+                *p = '?';
+            }
+            p++;
+        }
     }
 }
 

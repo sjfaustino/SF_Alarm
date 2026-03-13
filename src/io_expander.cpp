@@ -57,12 +57,20 @@ bool ioExpanderInit()
         }
     }
 
-    // Issue manual STOP condition: SDA low -> high while SCL is high
+    // Issue deterministic STOP condition:
+    // 1. Ensure SCL is LOW first (safe baseline)
+    // 2. Drive SDA LOW while SCL is LOW (prepare for STOP)
+    // 3. Drive SCL HIGH
+    // 4. Drive SDA HIGH while SCL is HIGH (this IS the STOP condition)
     pinMode(I2C_SDA_PIN, OUTPUT);
+    pinMode(I2C_SCL_PIN, OUTPUT);
+    digitalWrite(I2C_SCL_PIN, LOW);
+    delayMicroseconds(5);
     digitalWrite(I2C_SDA_PIN, LOW);
+    delayMicroseconds(5);
     digitalWrite(I2C_SCL_PIN, HIGH);
     delayMicroseconds(5);
-    digitalWrite(I2C_SDA_PIN, HIGH);
+    digitalWrite(I2C_SDA_PIN, HIGH); // STOP: SDA rising while SCL is high
     delayMicroseconds(5);
 
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_CLOCK_HZ);

@@ -34,8 +34,12 @@ static const char* alarmGetStateStrInternal();
 static uint16_t activeAlarmMask  = 0;    // Bitmask of all zones triggered in current cycle
 static uint32_t delayStartMs     = 0;
 static uint32_t sirenStartMs     = 0;
-static uint32_t firstTriggerMs   = 0;    // Strict start for noise ordinance compliance
 static uint8_t  triggeringZone   = 0xFF; // First zone that tripped
+
+// RTC_NOINIT_ATTR: persists across soft-reset and WDT reboots.
+// This ensures the noise ordinance window doesn't restart after a reboot
+// in TRIGGERED state, preventing municipal fines on flicker.
+RTC_NOINIT_ATTR static uint32_t firstTriggerMs;
 
 uint16_t alarmGetActiveAlarmMask() { return activeAlarmMask; }
 
@@ -170,6 +174,7 @@ static void setState(AlarmState newState)
     if (!stateMutex) return;
     
     bool stateChanged = false;
+    AlarmState snapshotState = newState; // Local snapshot avoids race on NVS write
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         if (currentState != newState) {
             if (currentState == ALARM_DISARMED ||
@@ -183,19 +188,18 @@ static void setState(AlarmState newState)
             LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStrInternal());
             
             if (newState == ALARM_DISARMED) {
-                firstTriggerMs = 0;
+                firstTriggerMs = 0; // Clear RTC noise timer on clean disarm
             }
             stateChanged = true;
+
+            // Persist INSIDE the lock using a local snapshot.
+            // This prevents rapid-transition races where out-of-order NVS writes
+            // would restore a stale state on reboot.
+            configSaveAlarmState(snapshotState);
         }
         xSemaphoreGive(stateMutex);
     } else {
         LOG_ERROR(TAG, "CRITICAL: State transition failed (Mutex DEADLOCK?)");
-    }
-
-    // Industrial Hardening: Persist outside the lock to minimize contention latency
-    // We use the parameter 'newState' directly as it IS the state we intended to set
-    if (stateChanged) {
-        configSaveAlarmState(newState);
     }
 }
 
@@ -315,6 +319,13 @@ void alarmInit()
             sirenActive = true;
             ioExpanderSetOutput(sirenOutputChannel, true);
             LOG_WARN(TAG, "Siren: RESUMED on boot (Triggered state restored)");
+            // Omega Suture: Restore the noise timer.
+            // If RTC firstTriggerMs is 0 (e.g. first power-on after fresh flash),
+            // we set it now so the ordinance window starts from this boot.
+            if (firstTriggerMs == 0) {
+                firstTriggerMs = millis();
+                LOG_WARN(TAG, "Noise ordinance timer reset (cold restore).");
+            }
         }
     } else {
         currentState = ALARM_DISARMED;
