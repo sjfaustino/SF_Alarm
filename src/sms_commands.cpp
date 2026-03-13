@@ -119,10 +119,11 @@ static void encodeHtml(char* str, size_t maxLen)
         
         xSemaphoreGive(htmlMutex);
     } else {
-        LOG_ERROR(TAG, "HTML encoder timeout! Mandatory sanitization failed.");
-        // We do NOT truncate or skip. In a real system, we might halt or scrub 
-        // with a simpler stack-safe method if the mutex is permanently stuck.
-        // For now, we just ensure it's not a "silent skip".
+        LOG_ERROR(TAG, "HTML encoder timeout! Mandatory sanitization failed. Returning safety string.");
+        // Fallback: If we can't sanitize, we MUST NOT return the original unsafe string.
+        // We overwrite the output with a generic error indicator.
+        strncpy(str, "ERROR_SECURE_SAN_FAIL", maxLen - 1);
+        str[maxLen - 1] = '\0';
     }
 }
 

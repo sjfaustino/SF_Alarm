@@ -193,6 +193,7 @@ static void setState(AlarmState newState)
     }
 
     // Industrial Hardening: Persist outside the lock to minimize contention latency
+    // We use the parameter 'newState' directly as it IS the state we intended to set
     if (stateChanged) {
         configSaveAlarmState(newState);
     }
@@ -310,6 +311,10 @@ void alarmInit()
         // If we restored TRIGGERED, we must ensure sirens can run
         if (savedState == ALARM_TRIGGERED) {
             activeAlarmMask = 0xFFFF; // Mark as "recovered alarm"
+            // Quantum Aegis: Resume physical siren output immediately
+            sirenActive = true;
+            ioExpanderSetOutput(sirenOutputChannel, true);
+            LOG_WARN(TAG, "Siren: RESUMED on boot (Triggered state restored)");
         }
     } else {
         currentState = ALARM_DISARMED;

@@ -51,11 +51,19 @@ bool ioExpanderInit()
             digitalWrite(I2C_SCL_PIN, HIGH);
             delayMicroseconds(5);
             if (digitalRead(I2C_SDA_PIN) == HIGH) {
-                LOG_INFO(TAG, "I2C bus recovered after %d pulses", i+1);
+                LOG_INFO(TAG, "I2C bus released after %d pulses", i+1);
                 break;
             }
         }
     }
+
+    // Issue manual STOP condition: SDA low -> high while SCL is high
+    pinMode(I2C_SDA_PIN, OUTPUT);
+    digitalWrite(I2C_SDA_PIN, LOW);
+    digitalWrite(I2C_SCL_PIN, HIGH);
+    delayMicroseconds(5);
+    digitalWrite(I2C_SDA_PIN, HIGH);
+    delayMicroseconds(5);
 
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_CLOCK_HZ);
     Wire.setTimeOut(100); 
