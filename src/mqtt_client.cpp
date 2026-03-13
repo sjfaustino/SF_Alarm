@@ -107,7 +107,7 @@ void mqttInit() {
     if (mqttConfigMutex == NULL) {
         mqttConfigMutex = xSemaphoreCreateMutex();
     }
-    mqttMsgQueue = xQueueCreate(10, sizeof(MqttMsg));
+    mqttMsgQueue = xQueueCreate(30, sizeof(MqttMsg));
     
     // Safety Clamps: Prevent 15-second default FreeRTOS hangs on dead sockets
     client.setSocketTimeout(2);
@@ -229,8 +229,8 @@ void mqttPublish(const char* topic, const char* payload, bool retained) {
         msg.payload[sizeof(msg.payload)-1] = '\0';
         msg.retained = retained;
         
-        // Push to queue, dropping if full (10 item max to save heap)
-        xQueueSend(mqttMsgQueue, &msg, 0);
+        // Push to queue, enforcing a 50ms block timeout to absorb burst events
+        xQueueSend(mqttMsgQueue, &msg, pdMS_TO_TICKS(50));
     }
 }
 

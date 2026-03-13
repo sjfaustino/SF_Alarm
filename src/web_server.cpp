@@ -109,19 +109,9 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
 
     JsonObject alarm = doc["alarm"].to<JsonObject>();
 
-    // Security: Require PIN for full status details
-    const char* pin = request->getParam("pin") ? request->getParam("pin")->value().c_str() : "";
-    if (strlen(pin) == 0) {
-         // Fallback: check JSON body if it's a POST, but status is GET. 
-         // Let's check headers or params.
-    }
-
-    if (!alarmValidatePin(pin)) {
-        alarm["state"]     = "LOCKED";
-        alarm["stateCode"] = 0xFF;
-        return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"PIN required for status\"}");
-    }
-
+    // Security: Local read-only telemetry requires no PIN.
+    // Calling alarmValidatePin() here causes a 5-minute system lockout DDoS vulnerability.
+    
     alarm["state"]          = alarmGetStateStr();
     alarm["stateCode"]      = (uint8_t)alarmGetState();
     alarm["delayRemaining"] = alarmGetDelayRemaining();
@@ -477,12 +467,8 @@ static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* respo
 // ---------------------------------------------------------------------------
 static esp_err_t handleApiOutputs(PsychicRequest* request, PsychicResponse* response)
 {
-    // Security check: require PIN
-    const char* pin = request->getParam("pin") ? request->getParam("pin")->value().c_str() : "";
-    
-    if (!alarmValidatePin(pin)) {
-        return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
-    }
+    // Security: Local read-only telemetry requires no PIN.
+    // Calling alarmValidatePin() here causes a 5-minute system lockout DDoS vulnerability.
     
     char resp[48];
     snprintf(resp, sizeof(resp), "{\"outputs\":%u}", ioExpanderGetOutputs());
