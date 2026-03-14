@@ -13,6 +13,7 @@ static const char* TAG = "SMSC";
 #include <string.h>
 #include <ctype.h>
 #include "config_manager.h"
+#include "telegram_client.h"
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -425,12 +426,13 @@ static bool parseHelp(const char* body, const char* sender)
               "#N#text (Alarm text)\n"
               "#0#text (Recovery text)\n"
               "*NCxyz (NC zones)\n"
-              "%#Mx (Mode: 1.SMS 2.Call 3.Both)");
+              "%#Mx (Server Mode)\n"
+              "%#Wx (Alert Bitmask: 1:SMS, 2:WA, 4:TG)");
 
     sendReply(sender,
               "SF_Alarm Integrations:\n"
-              "%#Wx (Alert: 1.SMS 2.WA 3.Both)\n"
-              "#WA#ph#key# (WhatsApp setup)\n"
+              "#WA#ph#key# (WhatsApp)\n"
+              "#TG#tok#chat# (Telegram)\n"
               "#MQTT#srv#port#usr#pass# (Broker)");
     return true;
 }
@@ -488,45 +490,69 @@ static bool parseCallNumbers(const char* body, const char* sender)
 static bool parseAlertChannel(const char* body, const char* sender)
 {
     int m = body[3] - '0';
-    if (m < 1 || m > 3) return false;
+    if (m < 0 || m > 15) return false; // Extended for future bits
 
-    whatsappSetConfig(whatsappGetPhone(), whatsappGetApiKey(), (WhatsAppMode)m);
+    whatsappSetConfig(whatsappGetPhone(), whatsappGetApiKey(), (AlertChannel)m);
+    telegramSetConfig(telegramGetToken(), telegramGetChatId(), (uint8_t)m);
 
-    char reply[80];
-    const char* modeStrs[] = {"", "SMS ONLY", "WHATSAPP ONLY", "SMS & WHATSAPP"};
-    snprintf(reply, sizeof(reply), "SF_Alarm: Alert channel set to %s", modeStrs[m]);
+    char reply[120];
+    snprintf(reply, sizeof(reply), "SF_Alarm: Alert bitmask set to 0x%02X (SMS:%s, WA:%s, TG:%s)", 
+             m, (m&CH_SMS)?"ON":"OFF", (m&CH_WA)?"ON":"OFF", (m&CH_TG)?"ON":"OFF");
     sendReply(sender, reply);
+    return true;
+}
+
+static bool tokenize(const char* body, int fieldCount, char* fields[], int fieldSizes[]) {
+    const char* start = body;
+    // Skip command (e.g., #WA#)
+    if (*start == '#') start++;
+    while (*start && *start != '#') start++;
+    if (*start == '#') start++;
+
+    for (int i = 0; i < fieldCount; i++) {
+        const char* end = strchr(start, '#');
+        if (!end) {
+            // Last field might not have a trailing '#' if the sender forgot it
+            strncpy(fields[i], start, fieldSizes[i] - 1);
+            fields[i][fieldSizes[i]-1] = '\0';
+            return (i == fieldCount - 1);
+        }
+        int len = end - start;
+        if (len >= fieldSizes[i]) len = fieldSizes[i] - 1;
+        strncpy(fields[i], start, len);
+        fields[i][len] = '\0';
+        start = end + 1;
+    }
     return true;
 }
 
 /// Parse: #WA#phone#apikey#  — set WhatsApp credentials
 static bool parseSetWhatsApp(const char* body, const char* sender)
 {
-    const char* phoneStart = body + 4;
-    const char* phoneEnd = strchr(phoneStart, '#');
-    if (!phoneEnd) return false;
-
-    char phone[32];
-    int phoneLen = phoneEnd - phoneStart;
-    if (phoneLen >= (int)sizeof(phone)) phoneLen = sizeof(phone) - 1;
-    strncpy(phone, phoneStart, phoneLen);
-    phone[phoneLen] = '\0';
-
-    const char* keyStart = phoneEnd + 1;
-    const char* keyEnd = strchr(keyStart, '#');
-    char key[32];
-    if (keyEnd) {
-        int keyLen = keyEnd - keyStart;
-        if (keyLen >= (int)sizeof(key)) keyLen = sizeof(key) - 1;
-        strncpy(key, keyStart, keyLen);
-        key[keyLen] = '\0';
-    } else {
-        strncpy(key, keyStart, sizeof(key) - 1);
-        key[sizeof(key) - 1] = '\0';
-    }
+    char phone[32], key[64];
+    char* fields[] = {phone, key};
+    int sizes[] = {sizeof(phone), sizeof(key)};
+    
+    if (!tokenize(body, 2, fields, sizes)) return false;
 
     whatsappSetConfig(phone, key, whatsappGetMode());
+    configSaveWhatsapp();
     sendReply(sender, "SF_Alarm: WhatsApp configuration updated");
+    return true;
+}
+
+/// Parse: #TG#token#chat# — set Telegram credentials
+static bool parseSetTelegram(const char* body, const char* sender)
+{
+    char tok[80], chat[32];
+    char* fields[] = {tok, chat};
+    int sizes[] = {sizeof(tok), sizeof(chat)};
+
+    if (!tokenize(body, 2, fields, sizes)) return false;
+
+    telegramSetConfig(tok, chat, (uint8_t)whatsappGetMode());
+    configSaveTelegram();
+    sendReply(sender, "SF_Alarm: Telegram configuration updated");
     return true;
 }
 
@@ -591,6 +617,7 @@ static const CommandEntry COMMAND_TABLE[] = {
     {"@#",        parseSetMultiplePhones, true},
     {"@@#",       parseSetMultiplePhones, true},
     {"#WA#",      parseSetWhatsApp,       true},
+    {"#TG#",      parseSetTelegram,       true},
     {"#MQTT#",    parseSetMQTT,           true},
     {"#",         parseSetAlarmText,      true},
     {"*NC",       parseSetNC,             true},

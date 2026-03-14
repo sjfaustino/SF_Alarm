@@ -36,9 +36,9 @@ bool smsGatewaySend(const char* phoneNumber, const char* message);
 /// maxMessages: size of the msgs array.
 int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages);
 
-/// Poll the router outbox (sent messages) for display.
+/// Poll the router for sent messages for display.
 /// For sent messages, the 'sender' field contains the destination number.
-int smsGatewayPollOutbox(SmsMessage* msgs, int maxMessages);
+int smsGatewayPollSent(SmsMessage* msgs, int maxMessages);
 
 /// Main update loop for background tasks (polling). 
 /// Call from a background task at regular intervals.

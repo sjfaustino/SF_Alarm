@@ -91,7 +91,9 @@ The system has undergone a comprehensive structural and security hardening ("The
 - **Atomic Persistence**: Configuration commits are now atomic; the "Configured" flag is only set after all settings are verified in NVS.
 
 ### ⚙️ Stability & Performance
-- **Zero-Heap Parsers**: Replaced heap-fragmenting `String` usage with fixed `char` buffer sliding windows for both **ONVIF XML** and **LuCI HTML** scraping.
+- **Zero-Heap NVS Access**: Optimized `config_manager.cpp` to load credentials and settings directly into static buffers, eliminating boot-time heap fragmentation from `String` objects.
+- **Unified Alert Bitmask**: Replaced monolithic mode enums with an extensible `AlertChannel` bitmask, allowing concurrent SMS, WhatsApp, and Telegram notifications.
+- **Robust SMS Tokenizer**: Implemented a stateful parser in `sms_commands.cpp` that correctly handles `#` and other special characters in API tokens and passwords.
 - **Concurrency Mutexing**: All shared global state and the **I2C hardware bus (`Wire`)** are protected by FreeRTOS mutexes to prevent cross-core data corruption.
 - **Asynchronous Logging**: Synchronous serial traps have been purged; all logging is now offloaded to an asynchronous buffer, preventing system stalls under high load.
 

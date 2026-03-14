@@ -18,6 +18,7 @@ static const char* TAG = "SMS";
 // ---------------------------------------------------------------------------
 static String sysauthCookie = "";   // LuCI sysauth cookie
 static String csrfToken     = "";   // LuCI CSRF token (from HTML pages)
+static String sessionStok   = "";   // LuCI session token (from URL path)
 static bool   loggedIn      = false;
 static SemaphoreHandle_t smsMutex = NULL; // Protects lastError and session state
 
@@ -67,7 +68,14 @@ static void setError(const char* fmt, ...)
 
 static void buildUrlStr(const char* path, char* dest, size_t maxLen)
 {
-    snprintf(dest, maxLen, "http://%s%s", routerIp, path);
+    // If we have a session token and the path starts with the LuCI prefix,
+    // inject the stok into the URL path as required by modern LuCI versions.
+    if (sessionStok.length() > 0 && strncmp(path, "/cgi-bin/luci/", 14) == 0) {
+        snprintf(dest, maxLen, "http://%s/cgi-bin/luci/;stok=%s/%s", 
+                 routerIp, sessionStok.c_str(), path + 14);
+    } else {
+        snprintf(dest, maxLen, "http://%s%s", routerIp, path);
+    }
 }
 
 
@@ -153,7 +161,7 @@ bool smsGatewayLogin()
 
     http.begin(loginPageUrl);
     http.setTimeout(10000);
-    http.setUserAgent("Mozilla/5.0");
+    http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36");
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
     int code = http.GET();
@@ -173,7 +181,7 @@ bool smsGatewayLogin()
         return false;
     }
 
-    String _csrf = "", salt = "", token = "";
+    String _csrf = "", salt = "", token = "", zonename = "", timeclock = "";
     char buffer[512];
     int bufPos = 0;
     unsigned long start = millis();
@@ -194,6 +202,8 @@ bool smsGatewayLogin()
             if (_csrf == "" && strcasestr(buffer, "name=\"_csrf\"")) _csrf = extractBetween(buffer, "value=\"", "\"");
             if (salt == "" && strcasestr(buffer, "name=\"salt\""))  salt  = extractBetween(buffer, "value=\"", "\"");
             if (token == "" && strcasestr(buffer, "name=\"token\"")) token = extractBetween(buffer, "value=\"", "\"");
+            if (zonename == "" && strcasestr(buffer, "name=\"zonename\"")) zonename = extractBetween(buffer, "value=\"", "\"");
+            if (timeclock == "" && strcasestr(buffer, "name=\"timeclock\"")) timeclock = extractBetween(buffer, "value=\"", "\"");
 
             // HARDENING: Prevent heap detonation by malformed/maliciously large tags
             if (_csrf.length() > 256) _csrf = "";
@@ -242,6 +252,7 @@ bool smsGatewayLogin()
     buildUrlStr("/cgi-bin/luci/", loginUrl, sizeof(loginUrl));
     HTTPClient http2;
     http2.begin(loginUrl);
+    http2.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36");
     http2.addHeader("Content-Type", "application/x-www-form-urlencoded");
     http2.addHeader("Referer", loginUrl);  // Required by LuCI CSRF guard
     
@@ -257,12 +268,11 @@ bool smsGatewayLogin()
     char encCsrf[512] = "";
     urlEncodeTo(_csrf.c_str(), encCsrf, sizeof(encCsrf));
     
-    // Minimal POST body — only the fields Cudy LuCI actually requires
-    // Minimal POST body — only the fields Cudy LuCI actually requires
+    // POST body — Mirroring the exact sequence from Wireshark capture
     char postData[1024];
     snprintf(postData, sizeof(postData), 
-             "_csrf=%s&luci_username=%s&luci_password=%s",
-             encCsrf, routerUser, finalHash.c_str());
+             "_csrf=%s&token=%s&salt=%s&zonename=%s&timeclock=%s&luci_language=auto&luci_username=%s&luci_password=%s",
+             encCsrf, token.c_str(), salt.c_str(), zonename.c_str(), timeclock.c_str(), routerUser, finalHash.c_str());
     
     scrubString(finalHash); // Absolute final scrub of the credential hash
 
@@ -299,10 +309,21 @@ bool smsGatewayLogin()
                 sysauthCookie = location.substring(s, e);
             }
         }
-    } else {
-        // Log response body to see what the router actually says
-        String body = http2.getString();
-        Serial.printf("[SMS] POST response body (first 200): %.200s\n", body.c_str());
+    }
+    // --- Step 4: Extract stok from Location header or redirect URL ---
+    if (postCode == 302 || postCode == 301 || postCode == 200) {
+        String location = http2.header("Location");
+        LOG_INFO(TAG, "Login redirect: %s", location.c_str());
+        
+        // Search for ;stok=xxxxxxxxxxxxxxx/
+        int stokStart = location.indexOf(";stok=");
+        if (stokStart >= 0) {
+            stokStart += 6;
+            int stokEnd = location.indexOf('/', stokStart);
+            if (stokEnd < 0) stokEnd = location.length();
+            sessionStok = location.substring(stokStart, stokEnd);
+            LOG_INFO(TAG, "Session token (stok) extracted: %s...", sessionStok.substring(0, 8).c_str());
+        }
     }
 
     http2.end();
@@ -317,7 +338,9 @@ bool smsGatewayLogin()
     char smsUrl[128];
     buildUrlStr("/cgi-bin/luci/admin/network/gcom/sms?iface=4g", smsUrl, sizeof(smsUrl));
     http3.begin(smsUrl);
+    http3.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36");
     http3.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+    http3.addHeader("Referer", String("http://") + routerIp + "/cgi-bin/luci/");
     http3.setTimeout(10000);
 
     int code3 = http3.GET();
@@ -363,6 +386,7 @@ static void smsGatewayCleanup()
     // Deep Memory Scrubbing: Leave no trace of session credentials in heap fragments
     scrubString(sysauthCookie);
     scrubString(csrfToken);
+    scrubString(sessionStok);
     loggedIn = false;
 }
 
@@ -384,7 +408,9 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
         buildUrlStr("/cgi-bin/luci/admin/network/gcom/sms/smsnew?nomodal=&iface=4g", getterUrl, sizeof(getterUrl));
 
         httpGet.begin(getterUrl);
+        httpGet.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36");
         httpGet.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+        httpGet.addHeader("Referer", String("http://") + routerIp + "/cgi-bin/luci/admin/network/gcom/sms?iface=4g");
         httpGet.setTimeout(3000); // Fast timeout for local router access
         
         esp_task_wdt_reset(); // Reset watchdog before blocking call
@@ -445,8 +471,11 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
         char targetUrl[128];
         buildUrlStr("/cgi-bin/luci/admin/network/gcom/sms/smsnew?nomodal=&iface=4g", targetUrl, sizeof(targetUrl));
         httpPost.begin(targetUrl);
+        httpPost.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36");
         httpPost.addHeader("Content-Type", "application/x-www-form-urlencoded");
         httpPost.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+        httpPost.addHeader("Origin", String("http://") + routerIp);
+        httpPost.addHeader("Referer", String("http://") + routerIp + "/cgi-bin/luci/admin/network/gcom/sms?iface=4g");
         httpPost.setTimeout(5000); // 5s is plenty for a local POST
 
         char sendTokenSnapshot[128];
@@ -471,7 +500,7 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
 
         char postData[2048];
         snprintf(postData, sizeof(postData), 
-                 "token=%s&cbid.smsnew.1.phone=%s&cbid.smsnew.1.content=%s&cbi.submit=1&cbid.smsnew.1.send=Send",
+                 "token=%s&timeclock=0&cbid.smsnew.1.phone=%s&cbid.smsnew.1.content=%s&cbi.submit=1&cbid.smsnew.1.send=Send",
                  sendTokenSnapshot, phoneNumber, encodedMsg);
         
         memset(sendTokenSnapshot, 0, sizeof(sendTokenSnapshot)); // Scrub
@@ -513,7 +542,9 @@ static int smsGatewayPollMessages(SmsMessage* msgs, int maxMessages, const char*
     buildUrlStr(pathStr.c_str(), pollUrl, sizeof(pollUrl));
     
     http.begin(pollUrl);
+    http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36");
     http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
+    http.addHeader("Referer", String("http://") + routerIp + "/cgi-bin/luci/admin/network/gcom/sms?iface=4g");
     http.setConnectTimeout(2000);
     http.setTimeout(3000);
 
@@ -568,7 +599,9 @@ static int smsGatewayPollMessages(SmsMessage* msgs, int maxMessages, const char*
                     
                     int tdIdx = 0;
                     char* td = strcasestr(rowStart, "<td");
-                    while (td && tdIdx < 6) {
+                    int colOffset = (strcmp(boxParam, "rec") == 0) ? 1 : 0; // Inbox has an extra "Status" column
+
+                    while (td && tdIdx < 7) {
                         char* contentStart = strchr(td, '>');
                         if (!contentStart) break;
                         contentStart++;
@@ -588,19 +621,24 @@ static int smsGatewayPollMessages(SmsMessage* msgs, int maxMessages, const char*
                         char* e = trimmed + strlen(trimmed) - 1;
                         while (e > trimmed && isspace(*e)) *e-- = '\0';
 
-                        switch (tdIdx) {
-                            case 1: strncpy(msg.sender, trimmed, sizeof(msg.sender)-1); break;
-                            case 2: strncpy(msg.body, trimmed, sizeof(msg.body)-1); break;
-                            case 3: strncpy(msg.timestamp, trimmed, sizeof(msg.timestamp)-1); break;
-                            case 4: {
-                                char* cfg = strcasestr(trimmed, "cfg=");
-                                if (cfg) {
-                                    cfg += 4;
-                                    char* endCfg = strpbrk(cfg, " \"'&");
-                                    if (endCfg) *endCfg = '\0';
+                        if (tdIdx == 1 + colOffset) {
+                            strncpy(msg.sender, trimmed, sizeof(msg.sender)-1);
+                        } else if (tdIdx == 2 + colOffset) {
+                            strncpy(msg.body, trimmed, sizeof(msg.body)-1);
+                        } else if (tdIdx == 3 + colOffset) {
+                            strncpy(msg.timestamp, trimmed, sizeof(msg.timestamp)-1);
+                        } else if (tdIdx >= 4 + colOffset) {
+                            // Look for ID in action buttons
+                            char* cfg = strcasestr(trimmed, "cfg=");
+                            if (cfg && msg.id == 0) {
+                                cfg += 4;
+                                char* endCfg = strpbrk(cfg, " \"'&");
+                                if (endCfg) {
+                                    char tmp = *endCfg;
+                                    *endCfg = '\0';
                                     msg.id = (int)strtol(cfg + 3, nullptr, 16);
+                                    *endCfg = tmp;
                                 }
-                                break;
                             }
                         }
                         td = strcasestr(contentEnd, "<td");
@@ -642,11 +680,12 @@ int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages)
 {
     return smsGatewayPollMessages(msgs, maxMessages, "rec");
 }
-
-int smsGatewayPollOutbox(SmsMessage* msgs, int maxMessages)
+ 
+int smsGatewayPollSent(SmsMessage* msgs, int maxMessages)
 {
-    return smsGatewayPollMessages(msgs, maxMessages, "sent");
+    return smsGatewayPollMessages(msgs, maxMessages, "sto");
 }
+
 
 // ---------------------------------------------------------------------------
 // Delete Message

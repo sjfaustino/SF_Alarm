@@ -37,9 +37,8 @@ static uint32_t sirenStartMs     = 0;
 static uint8_t  triggeringZone   = 0xFF; // First zone that tripped
 
 // Persistent indicators: persisted to NVS periodically and survived reboots.
-// This ensures the noise ordinance window doesn't restart after a reboot
-// in TRIGGERED state, preventing municipal fines on flicker.
-static uint32_t sirenAccumulatedSec = 0;
+// This ensures the siren timeout window is protected across reboots.
+static uint32_t sirenActiveTime     = 0;
 static uint32_t lastSirenUpdateMs   = 0;
 
 uint16_t alarmGetActiveAlarmMask() { return activeAlarmMask; }
@@ -199,8 +198,8 @@ static void setState(AlarmState newState)
             LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStrInternal());
             
             if (newState == ALARM_DISARMED) {
-                sirenAccumulatedSec = 0; // Clear noise timer on clean disarm
-                configSaveSirenAccum(0);
+                sirenActiveTime = 0; // Clear noise timer on clean disarm
+                configUpdateSirenTime(0);
                 failedAttempts = 0;
                 lockedOut = false;
                 configSaveSecurityState(0, false);
@@ -339,8 +338,8 @@ void alarmInit()
     // Restore persistent state from NVS
     AlarmState savedState = configLoadAlarmState();
     configLoadSecurityState(failedAttempts, lockedOut);
-    sirenAccumulatedSec = configLoadSirenAccum();
-
+    sirenActiveTime = configLoadSirenTime();
+ 
     if (lockedOut) {
         lockoutStartMs = millis(); // Penalize the full lockout duration from boot
         LOG_WARN(TAG, "SECURITY: PIN entries locked due to persistent brute-force protection.");
@@ -361,7 +360,7 @@ void alarmInit()
             LOG_WARN(TAG, "Siren: RESUMED on boot (Triggered state restored)");
         }
         else if (savedState == ALARM_EXIT_DELAY || savedState == ALARM_ENTRY_DELAY) {
-            // Chronos Anchor: Fail-Secure Delay Resumption
+            // Persistent Delay Tracking: RTC memory persists through warm reboots
             bool warmBoot = rtcIsValid();
             uint32_t remainingS = rtcGetDelayRemaining();
 
@@ -390,7 +389,7 @@ void alarmInit()
         }
     } else {
         currentState = ALARM_DISARMED;
-        sirenAccumulatedSec = 0;
+        sirenActiveTime = 0;
     }
     
     LOG_INFO(TAG, "Controller initialized — %s", alarmGetStateStr());
@@ -465,23 +464,25 @@ void alarmUpdate()
         }
 
         case ALARM_TRIGGERED: {
-            // Ordinance timer update - Throttled NVS writes (Flash Endurance)
+            // Siren timeout protection
             if (sirenActive) {
                 uint32_t nowTrigger = millis();
                 if (nowTrigger - lastSirenUpdateMs >= 1000) {
                     uint32_t diff = (nowTrigger - lastSirenUpdateMs) / 1000;
-                    sirenAccumulatedSec += diff;
-                    lastSirenUpdateMs += diff * 1000; // PRESERVE fractional milliseconds (no leak)
+                    sirenActiveTime += diff;
+                    lastSirenUpdateMs += diff * 1000;
                     
-                    // Throttled NVS writes are now handled internally by config_manager
-                    configSaveSirenAccum(sirenAccumulatedSec);
+                    // Throttled: Only nudge config manager every 30s to reduce function call overhead
+                    if (sirenActiveTime % 30 == 0) {
+                        configUpdateSirenTime(sirenActiveTime);
+                    }
                 }
             }
-
-            // Auto-silence siren after strict duration (Noise Ordinance Compliance)
-            if (sirenDurationSec > 0 && sirenAccumulatedSec >= sirenDurationSec) {
+ 
+            // Siren timeout protection
+            if (sirenDurationSec > 0 && sirenActiveTime >= sirenDurationSec) {
                 sirenOff();
-                LOG_INFO(TAG, "Siren auto-silenced after strict duration timeout.");
+                LOG_INFO(TAG, "Siren auto-silenced after duration timeout.");
                 activeAlarmMask = 0;
                 triggeringZone = 0xFF;
 

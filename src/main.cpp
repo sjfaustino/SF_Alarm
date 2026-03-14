@@ -10,6 +10,7 @@
 #include "network.h"
 #include "serial_cli.h"
 #include "web_server.h"
+#include "telegram_client.h"
 #include "mqtt_client.h"
 #include "onvif_client.h"
 #include <esp_task_wdt.h>
@@ -25,7 +26,7 @@ static uint32_t lastI2cPoll  = 0;
 static uint32_t lastMqttStateSync = 0;
 static bool     lastAllClear    = true;
 
-// Task Heartbeat Registry (Tungsten Aegis)
+// Task Heartbeat Registry (Task Integrity Monitor)
 static volatile uint8_t taskHeartbeatBits = 0;
 static portMUX_TYPE heartbeatMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -194,12 +195,21 @@ static void processAlertQueue()
             LOG_INFO(TAG, "Targeted reply to %s: %s", alert.targetPhone, alert.message);
             smsGatewaySend(alert.targetPhone, alert.message);
         } else {
-            WhatsAppMode waM = whatsappGetMode();
-            if (waM == WA_MODE_WHATSAPP || waM == WA_MODE_BOTH) {
+            // Get consolidated alert channels (bitmask)
+            uint8_t channels = (uint8_t)whatsappGetMode();
+            
+            // Check Telegram (0x04)
+            if (channels & CH_TG) {
+                telegramSend(telegramGetToken(), telegramGetChatId(), alert.message);
+            }
+
+            // Check WhatsApp (0x02)
+            if (channels & CH_WA) {
                 whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), alert.message);
             }
 
-            if (waM == WA_MODE_SMS || waM == WA_MODE_BOTH) {
+            // Check SMS (0x01)
+            if (channels & CH_SMS) {
                 if (smsCmdGetWorkingMode() == MODE_CALL) {
                     char voiceMsg[180];
                     snprintf(voiceMsg, sizeof(voiceMsg), "[VOICE CALL] %s", alert.message);
@@ -263,7 +273,7 @@ static void netWorkerTask(void* pvParameters)
         // Safe reset: if we've been stable for 10 minutes, clear boot counter
         if (millis() > 600000 && bootCount > 0) {
             bootCount = 0;
-            LOG_INFO(TAG, "System stable. Boot counter reset.");
+            LOG_INFO(TAG, "=== SF_Alarm System Core Initialized ===");
         }
         
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -416,7 +426,7 @@ void setup()
         }
     }
     Serial.println("========================================");
-    Serial.printf("  SF_Alarm v%s — Obsidian Mantle\n", FW_VERSION_STR);
+    Serial.printf("  SF_Alarm v%s — System Core\n", FW_VERSION_STR);
     Serial.println("  Industrial Security Controller (ESP32)");
     Serial.println("========================================");
 
@@ -477,8 +487,8 @@ static void restartTask(int index)
         return;
     }
 
-    // DEADLOCK PREVENTION: If this task holds a system-critical mutex, 
-    // a partial restart will cause a permanent lockup (The Mutex Graveyard).
+    // DEADLOCK PROTECTION: If one task holds a critical mutex and stops heartbeating, 
+    // we have a "Mutex Graveyard" scenario. Individual restarts won't work.
     // We MUST perform a full hardware reboot in this case.
     TaskHandle_t h = taskHandles[index];
     if (h != NULL) {

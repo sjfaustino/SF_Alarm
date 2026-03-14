@@ -314,20 +314,20 @@ static void cmdSmsCallback(cmd* c) {
              }
              Serial.println("================================");
         }
-    } else if (action == "outbox") {
-        Serial.println("Fetching router outbox...");
+    } else if (action == "sent") {
+        Serial.println("Fetching router sent messages...");
         SmsMessage msgs[10];
-        int count = smsGatewayPollOutbox(msgs, 10);
-        if (count == 0) Serial.println("  (outbox empty or not reachable)");
+        int count = smsGatewayPollSent(msgs, 10);
+        if (count == 0) Serial.println("  (sent messages empty or not reachable)");
         else {
-             Serial.printf("=== Router Outbox (%d message%s) ===\n", count, count > 1 ? "s" : "");
+             Serial.printf("=== Router Sent SMS (%d message%s) ===\n", count, count > 1 ? "s" : "");
              for (int i = 0; i < count; i++) {
                  Serial.printf("  [%d] %-16s  %s  \"%s\"\n", i + 1, msgs[i].sender, msgs[i].timestamp, msgs[i].body);
              }
-             Serial.println("=================================");
+             Serial.println("================================");
         }
     } else {
-        Serial.println("Unknown sms box. Use inbox or outbox.");
+        Serial.println("Unknown sms box. Use inbox or sent.");
     }
 }
 
@@ -477,7 +477,7 @@ void cliUpdate() {
             Serial.println();
             if (inputStr.length() > 0) {
                 cli.parse(inputStr); // Pass to SimpleCLI
-                // Deep Memory Scrubbing: Exorcise the static buffer immediately (Obsidian Aegis)
+                // Deep Memory Scrubbing: Clear sensitivity from buffer immediately (Input Memory Scrubbing)
                 for (size_t i = 0; i < inputStr.length(); i++) {
                     ((volatile char*)inputStr.c_str())[i] = 0;
                 }

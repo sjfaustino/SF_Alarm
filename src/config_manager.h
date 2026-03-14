@@ -41,6 +41,7 @@ void configSaveRouter();
 void configSaveZones();
 void configSavePeriodic();
 void configSaveWhatsapp();
+void configSaveTelegram();
 void configSaveMqtt();
 void configSaveOnvif();
 void configSaveHeartbeat();
@@ -71,8 +72,8 @@ AlarmState configLoadAlarmState();
 void configSaveSecurityState(uint8_t failedAttempts, bool lockedOut);
 void configLoadSecurityState(uint8_t &failedAttempts, bool &lockedOut);
 
-void configSaveSirenAccum(uint32_t seconds);
-uint32_t configLoadSirenAccum();
+void configUpdateSirenTime(uint32_t seconds);
+uint32_t configLoadSirenTime();
 
 // RTC Helpers for Chronos Anchor
 uint32_t rtcGetDelayRemaining();

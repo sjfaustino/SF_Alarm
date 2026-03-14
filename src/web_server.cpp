@@ -12,6 +12,7 @@
 #include "network.h"
 #include "logging.h"
 #include "system_health.h"
+#include "telegram_client.h"
 
 #include <PsychicHttp.h>
 #include <PsychicStreamResponse.h>
@@ -196,9 +197,11 @@ static esp_err_t handleApiGetSettings(PsychicRequest* request, PsychicResponse* 
     reply["ok"] = true;
 
     JsonObject alerts = reply["alerts"].to<JsonObject>();
-    alerts["mode"] = (int)whatsappGetMode();
+    alerts["mode"] = (uint8_t)whatsappGetMode();
     alerts["waPhone"] = whatsappGetPhone();
     alerts["waApiKey"] = whatsappGetApiKey();
+    alerts["tgToken"] = telegramGetToken();
+    alerts["tgChatId"] = telegramGetChatId();
 
     JsonObject mqtt = reply["mqtt"].to<JsonObject>();
     mqtt["server"] = mqttGetServer();
@@ -241,16 +244,18 @@ static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* resp
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
 
-    if (doc["mode"].isNull() || doc["phone"].isNull() || doc["apikey"].isNull()) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Missing fields\"}");
-    }
-
-    WhatsAppMode mode = (WhatsAppMode)doc["mode"].as<int>();
+    uint8_t channels = doc["mode"] | (uint8_t)CH_SMS;
     const char* phone = doc["phone"];
     const char* apikey = doc["apikey"];
 
-    whatsappSetConfig(phone, apikey, mode);
+    whatsappSetConfig(phone, apikey, (AlertChannel)channels);
     configSaveWhatsapp();
+
+    const char* tgToken = doc["tgToken"] | "";
+    const char* tgChatId = doc["tgChatId"] | "";
+    
+    telegramSetConfig(tgToken, tgChatId, channels);
+    configSaveTelegram();
     doc.clear(); // Scavenge
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Alert settings saved\"}");

@@ -26,7 +26,7 @@ static size_t urlEncodeTo(const char* src, char* dest, size_t destSize) {
 
 static char waPhone[32] = "";
 static char waApiKey[32] = "";
-static WhatsAppMode waMode = WA_MODE_SMS;
+static AlertChannel waMode = CH_SMS;
 static SemaphoreHandle_t waMutex = NULL;
 
 void whatsappInit() {
@@ -36,7 +36,7 @@ void whatsappInit() {
     LOG_INFO(TAG, "WhatsApp client initialized");
 }
 
-void whatsappSetConfig(const char* phone, const char* apiKey, WhatsAppMode mode) {
+void whatsappSetConfig(const char* phone, const char* apiKey, AlertChannel mode) {
     if (waMutex && xSemaphoreTake(waMutex, portMAX_DELAY) == pdTRUE) {
         if (phone) {
             strncpy(waPhone, phone, sizeof(waPhone) - 1);
@@ -49,12 +49,12 @@ void whatsappSetConfig(const char* phone, const char* apiKey, WhatsAppMode mode)
         waMode = mode;
         xSemaphoreGive(waMutex);
     }
-    LOG_INFO(TAG, "Config updated: Phone=%s, Mode=%d", waPhone, (int)waMode);
+    LOG_INFO(TAG, "Config updated: Phone=%s, Channels=0x%02X", waPhone, (int)waMode);
 }
 
 const char* whatsappGetPhone() { return waPhone; }
 const char* whatsappGetApiKey() { return waApiKey; }
-WhatsAppMode whatsappGetMode() { return waMode; }
+AlertChannel whatsappGetMode() { return waMode; }
 
 bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
     if (!phone || strlen(phone) == 0 || !apiKey || strlen(apiKey) == 0) {

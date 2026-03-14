@@ -1,2 +1,8 @@
 .pio
 .vscode
+include/secrets.h
+test_telegram_access.py
+test_whatsapp_access.py
+test_router_access.py
+*.pyc
+__pycache__/

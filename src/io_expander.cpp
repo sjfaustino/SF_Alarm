@@ -29,7 +29,7 @@ static SemaphoreHandle_t i2cMutex = nullptr;
 
 static void ioBusRecover()
 {
-    // PHYSICAL BUS RECOVERY (Obsidian Sledgehammer)
+    // PHYSICAL BUS RECOVERY (Bus Recovery Sequence)
     // If SDA is held low by a hung slave, we toggle SCL until it's released.
     LOG_WARN(TAG, "I2C bus recovery initiated...");
     
@@ -71,7 +71,7 @@ bool ioExpanderInit()
 
     if (xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return false;
 
-    // --- PHYSICAL BUS RECOVERY (Obsidian Sledgehammer) ---
+    // --- PHYSICAL BUS RECOVERY (Bus Recovery Sequence) ---
     // If SDA is held low by a hung slave, we need to toggle SCL until it's released.
     pinMode(I2C_SDA_PIN, INPUT_PULLUP);
     pinMode(I2C_SCL_PIN, OUTPUT);

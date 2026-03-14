@@ -14,6 +14,13 @@
 #include "whatsapp_client.h"
 #include "mqtt_client.h"
 #include "onvif_client.h"
+#include "telegram_client.h"
+
+#if __has_include("secrets.h")
+  #include "secrets.h"
+#else
+  #include "secrets_template.h"
+#endif
 #include "network.h"
 #include "string_utils.h"
 
@@ -69,21 +76,23 @@ static const char* KEY_WIFI_PASS     = "wifiPass";
 static const char* KEY_RECOVERY_TXT  = "recStr";
 static const char* KEY_ALARM_MODE    = "alarmMode";
 static const char* KEY_REPORT_DUR    = "reportDur";
-static const char* KEY_WA_PHONE      = "waPhone";
-static const char* KEY_WA_APIKEY     = "waApiKey";
-static const char* KEY_WA_MODE       = "waMode";
-static const char* KEY_MQTT_SERVER   = "mqServer";
+#define KEY_ALERT_CHANNELS "alertChans"
+#define KEY_WA_PHONE       "waPhone"
+#define KEY_WA_APIKEY      "waApiKey"
+#define KEY_TG_TOKEN       "tgToken"
+#define KEY_TG_CHATID      "tgChatId"
+static const char* KEY_MQTT_SERVER   = "mqSrv";
 static const char* KEY_MQTT_PORT     = "mqPort";
 static const char* KEY_MQTT_USER     = "mqUser";
 static const char* KEY_MQTT_PASS     = "mqPass";
-static const char* KEY_MQTT_CLIENTID = "mqClientId";
-static const char* KEY_ONVIF_HOST     = "ovHost";
-static const char* KEY_ONVIF_PORT     = "ovPort";
-static const char* KEY_ONVIF_USER     = "ovUser";
-static const char* KEY_ONVIF_PASS     = "ovPass";
-static const char* KEY_ONVIF_ZONE     = "ovZone";
-static const char* KEY_HEARTBEAT_EN   = "hbEn";
-static const char* KEY_TZ            = "timezone";
+static const char* KEY_MQTT_CLIENTID = "mqClid";
+static const char* KEY_ONVIF_HOST    = "ovHost";
+static const char* KEY_ONVIF_PORT    = "ovPort";
+static const char* KEY_ONVIF_USER    = "ovUser";
+static const char* KEY_ONVIF_PASS    = "ovPass";
+static const char* KEY_ONVIF_ZONE    = "ovZone";
+static const char* KEY_HEARTBEAT_EN  = "hbEn";
+static const char* KEY_TZ            = "tz";
 static const char* KEY_CONFIGURED    = "configured";
 
 static bool    g_heartbeatEnabled = true;
@@ -95,7 +104,6 @@ static char    g_timezone[32]     = "GMT0";
 // These survive soft-resets and watchdog triggers, preventing flash burnout.
 // They are flushed to NVS only on disarm or graceful shutdown.
 static RTC_NOINIT_ATTR uint32_t rtc_magic;
-static RTC_NOINIT_ATTR uint32_t rtc_sirenAccum;
 static RTC_NOINIT_ATTR uint8_t  rtc_failedAttempts;
 static RTC_NOINIT_ATTR bool     rtc_lockedOut;
 static RTC_NOINIT_ATTR uint32_t rtc_delayRemaining; // Seconds remaining in entry/exit delay
@@ -104,7 +112,6 @@ static RTC_NOINIT_ATTR uint32_t rtc_delayRemaining; // Seconds remaining in entr
 
 static void rtcInit() {
     if (rtc_magic != RTC_CONFIG_MAGIC) {
-        rtc_sirenAccum = 0;
         rtc_failedAttempts = 0;
         rtc_lockedOut = false;
         rtc_delayRemaining = 0;
@@ -357,11 +364,31 @@ void configLoad()
     smsCmdSetRecoveryText(p.getString(KEY_RECOVERY_TXT, "SF_Alarm: All zones restored to normal.").c_str());
     smsCmdSetWorkingMode((WorkingMode)p.getUChar(KEY_ALARM_MODE, (uint8_t)MODE_SMS));
 
+    // Zero-Heap NVS Loading: Direct buffer fulfillment (Senior Dev Recommended)
+    char buf[128];
+    size_t len;
+
     // --- WhatsApp ---
-    String waPh = p.getString(KEY_WA_PHONE, "");
-    String waKey = p.getString(KEY_WA_APIKEY, "");
-    WhatsAppMode waM = (WhatsAppMode)p.getUChar(KEY_WA_MODE, (uint8_t)WA_MODE_SMS);
-    whatsappSetConfig(waPh.c_str(), waKey.c_str(), waM);
+    len = p.getString(KEY_WA_PHONE, buf, sizeof(buf));
+    if (len == 0) strncpy(buf, DEFAULT_WA_PHONE, sizeof(buf));
+    
+    char keyBuf[64];
+    len = p.getString(KEY_WA_APIKEY, keyBuf, sizeof(keyBuf));
+    if (len == 0) strncpy(keyBuf, DEFAULT_WA_APIKEY, sizeof(keyBuf));
+    
+    uint8_t channels = p.getUChar(KEY_ALERT_CHANNELS, (uint8_t)(CH_SMS | CH_TG));
+    whatsappSetConfig(buf, keyBuf, (AlertChannel)channels);
+
+    // --- Telegram ---
+    char tgTok[80];
+    len = p.getString(KEY_TG_TOKEN, tgTok, sizeof(tgTok));
+    if (len == 0) strncpy(tgTok, DEFAULT_TG_TOKEN, sizeof(tgTok));
+
+    char tgCid[32];
+    len = p.getString(KEY_TG_CHATID, tgCid, sizeof(tgCid));
+    if (len == 0) strncpy(tgCid, DEFAULT_TG_CHATID, sizeof(tgCid));
+
+    telegramSetConfig(tgTok, tgCid, channels);
 
     // --- MQTT ---
     String mqServer = p.getString(KEY_MQTT_SERVER, "");
@@ -436,8 +463,6 @@ void configLoad()
 
     // Scrub all local string objects from heap/stack
     scrubString(pin);
-    scrubString(waPh);
-    scrubString(waKey);
     scrubString(mqServer);
     scrubString(mqUser);
     scrubString(mqPass);
@@ -600,19 +625,6 @@ void configSavePeriodic() {
     xSemaphoreGiveRecursive(configMutex);
 }
 
-void configSaveWhatsapp() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
-        p.putString(KEY_WA_PHONE, whatsappGetPhone());
-        p.putString(KEY_WA_APIKEY, whatsappGetApiKey());
-        p.putUChar(KEY_WA_MODE, (uint8_t)whatsappGetMode());
-        p.end();
-    }
-    dirtyAlerts = false;
-    xSemaphoreGiveRecursive(configMutex);
-}
-
 void configSaveMqtt() {
     if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
     Preferences p;
@@ -682,7 +694,7 @@ void configSave()
         configSaveTiming();
     }
     if (sWifi)      configSaveWifi();
-    if (sAlerts)    { configSavePhones(); configSavePeriodic(); configSaveWhatsapp(); }
+    if (sAlerts)    { configSavePhones(); configSavePeriodic(); configSaveWhatsapp(); configSaveTelegram(); }
     if (sRouter)    configSaveRouter();
     if (sZones)     configSaveZones();
     if (sMqtt)      configSaveMqtt();
@@ -730,9 +742,8 @@ void configSaveAlarmState(AlarmState state)
             LOG_INFO(TAG, "NVS: Alarm state persisted: %d", (int)state);
         }
 
-        // On Disarm, we flush the RTC telemetry to NVS permanently
+        // On Disarm, we flush security telemetry to NVS permanently
         if (state == ALARM_DISARMED) {
-            configSaveSirenAccum(rtc_sirenAccum);
             configSaveSecurityState(rtc_failedAttempts, rtc_lockedOut);
         }
 
@@ -806,18 +817,13 @@ void configLoadSecurityState(uint8_t &failedAttempts, bool &lockedOut)
             p.end();
             // Populate RTC for next time
             rtc_failedAttempts = failedAttempts;
-            rtc_lockedOut = lockedOut;
         }
         xSemaphoreGiveRecursive(configMutex);
     }
 }
-
-void configSaveSirenAccum(uint32_t seconds)
+void configUpdateSirenTime(uint32_t seconds)
 {
-    rtc_sirenAccum = seconds;
-
-    // Only commit to NVS if reset to 0 (Disarmed) or every 300 seconds (Anti-Fry)
-    // The previous 30s interval in alarm_controller was still too aggressive for flash longevity
+    // Throttled NVS writes to preserve flash longevity
     static uint32_t lastNvsCommit = 0;
     bool forceCommit = (seconds == 0);
     
@@ -825,9 +831,9 @@ void configSaveSirenAccum(uint32_t seconds)
         if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             Preferences p;
             if (p.begin(NVS_NAMESPACE, false)) {
-                if (p.getUInt("sirenAcc", 0xFFFFFFFF) != seconds) {
-                    p.putUInt("sirenAcc", seconds);
-                    LOG_INFO(TAG, "NVS: Siren accumulation committed (%u s)", seconds);
+                if (p.getUInt("sirenTime", 0xFFFFFFFF) != seconds) {
+                    p.putUInt("sirenTime", seconds);
+                    LOG_INFO(TAG, "NVS: Siren active time updated (%u s)", seconds);
                 }
                 p.end();
             }
@@ -837,23 +843,45 @@ void configSaveSirenAccum(uint32_t seconds)
     }
 }
 
-uint32_t configLoadSirenAccum()
-{
-    if (rtc_magic == RTC_CONFIG_MAGIC) {
-        return rtc_sirenAccum;
-    }
 
+uint32_t configLoadSirenTime()
+{
     uint32_t seconds = 0;
     if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         Preferences p;
         if (p.begin(NVS_NAMESPACE, true)) {
-            seconds = p.getUInt("sirenAcc", 0);
+            seconds = p.getUInt("sirenTime", 0);
             p.end();
-            rtc_sirenAccum = seconds;
         }
         xSemaphoreGiveRecursive(configMutex);
     }
     return seconds;
+}
+
+void configSaveWhatsapp() {
+    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putString(KEY_WA_PHONE, whatsappGetPhone());
+        p.putString(KEY_WA_APIKEY, whatsappGetApiKey());
+        p.putUChar(KEY_ALERT_CHANNELS, (uint8_t)whatsappGetMode());
+        p.end();
+    }
+    dirtyAlerts = false; 
+    xSemaphoreGiveRecursive(configMutex);
+}
+
+void configSaveTelegram() {
+    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    Preferences p;
+    if (p.begin(NVS_NAMESPACE, false)) {
+        p.putString(KEY_TG_TOKEN, telegramGetToken());
+        p.putString(KEY_TG_CHATID, telegramGetChatId());
+        p.putUChar(KEY_ALERT_CHANNELS, (uint8_t)telegramGetChannels());
+        p.end();
+    }
+    dirtyAlerts = false;
+    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configFactoryReset()
@@ -887,7 +915,8 @@ void configPrint()
     Serial.printf("  Alarm mode:  %d (1:SMS, 2:Call, 3:Both)\n", (int)smsCmdGetWorkingMode());
     Serial.printf("  Recovery:    %s\n", smsCmdGetRecoveryText());
     Serial.printf("  WA Phone:    %s\n", whatsappGetPhone());
-    Serial.printf("  WA Mode:     %d (1:SMS, 2:WA, 3:Both)\n", (int)whatsappGetMode());
+    Serial.printf("  Alert Chans: 0x%02X\n", (uint8_t)whatsappGetMode());
+    Serial.printf("  TG ChatID:   %s\n", telegramGetChatId());
     Serial.printf("  MQTT Server: %s:%d\n", mqttGetServer(), mqttGetPort());
     Serial.printf("  MQTT User:   %s\n", mqttGetUser());
     Serial.printf("  ONVIF Cam:   %s:%d (Zone %d)\n", onvifGetHost(), onvifGetPort(), (int)onvifGetTargetZone());

@@ -6,10 +6,11 @@
 /**
  * @brief WhatsApp alert mode
  */
-enum WhatsAppMode {
-    WA_MODE_SMS = 1,
-    WA_MODE_WHATSAPP = 2,
-    WA_MODE_BOTH = 3
+enum AlertChannel {
+    CH_NONE = 0x00,
+    CH_SMS  = 0x01,
+    CH_WA   = 0x02,
+    CH_TG   = 0x04
 };
 
 /**
@@ -30,7 +31,7 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message);
 /**
  * @brief Set the global WhatsApp configuration
  */
-void whatsappSetConfig(const char* phone, const char* apiKey, WhatsAppMode mode);
+void whatsappSetConfig(const char* phone, const char* apiKey, AlertChannel mode);
 
 /**
  * @brief Get the WhatsApp phone number
@@ -45,6 +46,6 @@ const char* whatsappGetApiKey();
 /**
  * @brief Get the WhatsApp mode
  */
-WhatsAppMode whatsappGetMode();
+AlertChannel whatsappGetMode();
 
 #endif // SF_ALARM_WHATSAPP_CLIENT_H

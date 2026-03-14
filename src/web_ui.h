@@ -486,6 +486,10 @@ body {
             <option value="1">SMS Only</option>
             <option value="2">WhatsApp Only</option>
             <option value="3">SMS & WhatsApp</option>
+            <option value="4">Telegram Only</option>
+            <option value="5">Telegram & SMS</option>
+            <option value="6">Telegram & WhatsApp</option>
+            <option value="7">All Channels (SMS, WA, TG)</option>
           </select>
         </div>
         <div class="form-group">
@@ -495,6 +499,14 @@ body {
         <div class="form-group">
           <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">WhatsApp API Key</label>
           <input type="password" id="waApiKey" placeholder="CallMeBot Key" style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Telegram Bot Token</label>
+          <input type="password" id="tgToken" placeholder="123456:ABC-DEF..." style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
+        </div>
+        <div class="form-group">
+          <label style="display:block; font-size:.75rem; color:var(--text2); margin-bottom:4px">Telegram Chat ID</label>
+          <input type="text" id="tgChatId" placeholder="-100..." style="width:100%; padding:8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); outline:none">
         </div>
       </div>
       <div style="margin-top:16px; display:flex; justify-content:flex-end">
@@ -695,6 +707,8 @@ function unlockSettings() {
       document.getElementById('waMode').value = d.alerts.mode;
       document.getElementById('waPhone').value = d.alerts.waPhone;
       document.getElementById('waApiKey').value = d.alerts.waApiKey;
+      document.getElementById('tgToken').value = d.alerts.tgToken;
+      document.getElementById('tgChatId').value = d.alerts.tgChatId;
       
       document.getElementById('mqServer').value = d.mqtt.server;
       document.getElementById('mqPort').value = d.mqtt.port;
@@ -784,7 +798,9 @@ async function saveAlertSettings() {
     const mode = parseInt(document.getElementById('waMode').value);
     const phone = document.getElementById('waPhone').value;
     const apikey = document.getElementById('waApiKey').value;
-    apiPost('/api/settings/alerts', { mode, phone, apikey, pin });
+    const tgToken = document.getElementById('tgToken').value;
+    const tgChatId = document.getElementById('tgChatId').value;
+    apiPost('/api/settings/alerts', { mode, phone, apikey, tgToken, tgChatId, pin });
   });
 }
 
