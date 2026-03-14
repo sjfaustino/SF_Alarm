@@ -191,10 +191,11 @@ static bool parseSetMultiplePhones(const char* body, const char* sender)
     strncpy(temp, body + 2, sizeof(temp)-1);
     temp[sizeof(temp)-1] = '\0';
 
-    char* token = strtok(temp, "#");
+    char* saveptr;
+    char* token = strtok_r(temp, "#", &saveptr);
     while (token) {
         smsCmdAddPhone(token);
-        token = strtok(NULL, "#");
+        token = strtok_r(NULL, "#", &saveptr);
     }
 
     sendReply(sender, "SF_Alarm: Multiple phone numbers updated");
@@ -257,14 +258,15 @@ static bool parseSetNC(const char* body, const char* sender)
         char argsCopy[64];
         strncpy(argsCopy, args, sizeof(argsCopy) - 1);
         argsCopy[sizeof(argsCopy) - 1] = '\0';
-        char* token = strtok(argsCopy, ",");
+        char* saveptr;
+        char* token = strtok_r(argsCopy, ",", &saveptr);
         while (token) {
             int z = atoi(token);
             if (z >= 1 && z <= MAX_ZONES) {
                 ZoneConfig* cfg = zonesGetConfig(z - 1);
                 if (cfg) cfg->wiring = ZONE_NC;
             }
-            token = strtok(NULL, ",");
+            token = strtok_r(NULL, ",", &saveptr);
         }
     } else {
         for (int i = 0; args[i]; i++) {
@@ -537,10 +539,11 @@ static bool parseSetMQTT(const char* body, const char* sender)
 
     char* parts[7]; 
     int count = 0;
-    char* token = strtok(temp, "#");
+    char* saveptr;
+    char* token = strtok_r(temp, "#", &saveptr);
     while (token && count < 7) {
         parts[count++] = token;
-        token = strtok(NULL, "#");
+        token = strtok_r(NULL, "#", &saveptr);
     }
 
     if (count < 2) return false; 
