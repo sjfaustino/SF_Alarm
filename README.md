@@ -92,10 +92,12 @@ The system has undergone a comprehensive structural and security hardening ("The
 
 ### ⚙️ Stability & Performance
 - **Zero-Heap NVS Access**: Optimized `config_manager.cpp` to load credentials and settings directly into static buffers, eliminating boot-time heap fragmentation from `String` objects.
-- **Unified Alert Bitmask**: Replaced monolithic mode enums with an extensible `AlertChannel` bitmask, allowing concurrent SMS, WhatsApp, and Telegram notifications.
+- **Provider-Based Notification Engine**: Replaced monolithic mode enums with an extensible, registration-based Provider Pattern. The `NotificationManager` now dispatches alerts through decoupled providers (SMS, WhatsApp, Telegram).
+- **Robust HTML Parser**: Surgically eliminated brittle string scraping in the SMS gateway using `HtmlUtils`, a tag-aware parser that handles varied attribute orders and quote styles.
 - **Robust SMS Tokenizer**: Implemented a stateful parser in `sms_commands.cpp` that correctly handles `#` and other special characters in API tokens and passwords.
 - **Concurrency Mutexing**: All shared global state and the **I2C hardware bus (`Wire`)** are protected by FreeRTOS mutexes to prevent cross-core data corruption.
-- **Asynchronous Logging**: Synchronous serial traps have been purged; all logging is now offloaded to an asynchronous buffer, preventing system stalls under high load.
+- **FS-Based Web UI**: Offloaded 900+ lines of embedded HTML/JS to **LittleFS**, served asynchronously to reduce binary bloat and separate concerns.
+- **Asynchronous Logging**: Synchronous serial traps have been purged; all logging is now offloaded to an asynchronous buffer.
 
 ---
 
