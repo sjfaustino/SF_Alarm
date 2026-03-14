@@ -98,6 +98,7 @@ static RTC_NOINIT_ATTR uint32_t rtc_magic;
 static RTC_NOINIT_ATTR uint32_t rtc_sirenAccum;
 static RTC_NOINIT_ATTR uint8_t  rtc_failedAttempts;
 static RTC_NOINIT_ATTR bool     rtc_lockedOut;
+static RTC_NOINIT_ATTR uint32_t rtc_delayRemaining; // Seconds remaining in entry/exit delay
 
 #define RTC_CONFIG_MAGIC 0xFEEDC0DE
 
@@ -106,12 +107,17 @@ static void rtcInit() {
         rtc_sirenAccum = 0;
         rtc_failedAttempts = 0;
         rtc_lockedOut = false;
+        rtc_delayRemaining = 0;
         rtc_magic = RTC_CONFIG_MAGIC;
         LOG_INFO(TAG, "RTC Memory: Initialized (Cold Boot)");
     } else {
         LOG_INFO(TAG, "RTC Memory: Restored (Warm Boot)");
     }
 }
+
+uint32_t rtcGetDelayRemaining() { return rtc_delayRemaining; }
+void rtcSetDelayRemaining(uint32_t s) { rtc_delayRemaining = s; }
+bool rtcIsValid() { return rtc_magic == RTC_CONFIG_MAGIC; }
 
 bool configGetHeartbeatEnabled() { 
     bool en = true;

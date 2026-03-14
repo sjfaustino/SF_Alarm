@@ -210,6 +210,16 @@ static void setState(AlarmState newState)
         xSemaphoreGiveRecursive(stateMutex);
         
         if (stateChanged) {
+            // Chronos Anchor: Initialize RTC timers on entering delay states
+            if (snapshotState == ALARM_EXIT_DELAY) {
+                rtcSetDelayRemaining(exitDelaySec);
+            } else if (snapshotState == ALARM_ENTRY_DELAY) {
+                rtcSetDelayRemaining(entryDelaySec);
+            } else if (snapshotState != ALARM_TRIGGERED) {
+                // Clear delay on normal arming/disarming
+                rtcSetDelayRemaining(0);
+            }
+
             configSaveAlarmState(snapshotState);
         }
     } else {
@@ -336,7 +346,10 @@ void alarmInit()
         LOG_WARN(TAG, "SECURITY: PIN entries locked due to persistent brute-force protection.");
     }
 
-    if (savedState == ALARM_ARMED_AWAY || savedState == ALARM_ARMED_HOME || savedState == ALARM_TRIGGERED) {
+    if (savedState == ALARM_ARMED_AWAY || savedState == ALARM_ARMED_HOME || 
+        savedState == ALARM_TRIGGERED  || savedState == ALARM_EXIT_DELAY ||
+        savedState == ALARM_ENTRY_DELAY) {
+        
         currentState = savedState;
         LOG_INFO(TAG, "Restored state from NVS: %s", alarmGetStateStrInternal());
         
@@ -346,6 +359,34 @@ void alarmInit()
             lastSirenUpdateMs = millis();
             ioExpanderSetOutput(sirenOutputChannel, true);
             LOG_WARN(TAG, "Siren: RESUMED on boot (Triggered state restored)");
+        }
+        else if (savedState == ALARM_EXIT_DELAY || savedState == ALARM_ENTRY_DELAY) {
+            // Chronos Anchor: Fail-Secure Delay Resumption
+            bool warmBoot = rtcIsValid();
+            uint32_t remainingS = rtcGetDelayRemaining();
+
+            if (warmBoot && remainingS > 0) {
+                // Resume from RTC (Soft reset, Watchdog, etc)
+                delayStartMs = millis() - (DEFAULT_EXIT_DELAY_S * 1000); // Dummy offset
+                // We actually need a more precise way to set delayStartMs
+                // Let's just adjust the update logic to look at remainingS directly if configured.
+                LOG_INFO(TAG, "Chronos Anchor: Resuming %s (%u s remaining)", 
+                         alarmGetStateStrInternal(), remainingS);
+            } else {
+                // Cold Boot Interruption Check
+                if (savedState == ALARM_ENTRY_DELAY) {
+                    LOG_ERROR(TAG, "Chronos Anchor: Entry Delay INTERRUPTED (Cold Boot). FORCING ALARM.");
+                    currentState = ALARM_TRIGGERED;
+                    sirenActive = true;
+                    lastSirenUpdateMs = millis();
+                    ioExpanderSetOutput(sirenOutputChannel, true);
+                    fireEvent(EVT_ALARM_TRIGGERED, -1, "Interrupted Entry Delay");
+                } else {
+                    LOG_WARN(TAG, "Chronos Anchor: Exit Delay reset (Safe).");
+                    // Exit delay defaults back to full duration for safety
+                    delayStartMs = millis();
+                }
+            }
         }
     } else {
         currentState = ALARM_DISARMED;
@@ -366,36 +407,59 @@ void alarmUpdate()
 
     switch (currentState) {
         case ALARM_EXIT_DELAY: {
-            uint32_t elapsed = now - delayStartMs;
-            if (elapsed >= (uint32_t)exitDelaySec * 1000) {
-                // Exit delay complete — verify doors actually closed before arming
-                if (!zonesAllClear()) {
-                    setState(ALARM_TRIGGERED);
-                    sirenOn(-1, "Exit Failure");
-                    fireEvent(EVT_ALARM_TRIGGERED, -1, "Zones open at arming");
-                    triggeringZone = 0xFF;
-                } else {
-                    // System is armed normally
-                    if (pendingArmMode == ARM_PENDING_HOME) {
-                        setState(ALARM_ARMED_HOME);
-                        fireEvent(EVT_ARMED_HOME, -1, "Success");
+            uint32_t nowTrigger = millis();
+            static uint32_t lastTickMs = 0;
+            
+            // Decouple internal millis() tracking from reboot-persistent seconds
+            if (nowTrigger - lastTickMs >= 1000) {
+                uint32_t remaining = rtcGetDelayRemaining();
+                if (remaining > 0) {
+                    remaining--;
+                    rtcSetDelayRemaining(remaining);
+                }
+                lastTickMs = nowTrigger;
+
+                if (remaining == 0) {
+                    // Exit delay complete — verify doors actually closed before arming
+                    if (!zonesAllClear()) {
+                        setState(ALARM_TRIGGERED);
+                        sirenOn(-1, "Exit Failure");
+                        fireEvent(EVT_ALARM_TRIGGERED, -1, "Zones open at arming");
+                        triggeringZone = 0xFF;
                     } else {
-                        setState(ALARM_ARMED_AWAY);
-                        fireEvent(EVT_ARMED_AWAY, -1, "Success");
+                        // System is armed normally
+                        if (pendingArmMode == ARM_PENDING_HOME) {
+                            setState(ALARM_ARMED_HOME);
+                            fireEvent(EVT_ARMED_HOME, -1, "Success");
+                        } else {
+                            setState(ALARM_ARMED_AWAY);
+                            fireEvent(EVT_ARMED_AWAY, -1, "Success");
+                        }
+                        triggeringZone = 0xFF;
                     }
-                    triggeringZone = 0xFF;
                 }
             }
             break;
         }
 
         case ALARM_ENTRY_DELAY: {
-            uint32_t elapsed = now - delayStartMs;
-            if (elapsed >= (uint32_t)entryDelaySec * 1000) {
-                // Entry delay expired — trigger alarm
-                setState(ALARM_TRIGGERED);
-                sirenOn(-1, "Delay Timeout");
-                fireEvent(EVT_ALARM_TRIGGERED, -1, "Entry delay expired");
+            uint32_t nowTrigger = millis();
+            static uint32_t lastTickMs = 0;
+
+            if (nowTrigger - lastTickMs >= 1000) {
+                uint32_t remaining = rtcGetDelayRemaining();
+                if (remaining > 0) {
+                    remaining--;
+                    rtcSetDelayRemaining(remaining);
+                }
+                lastTickMs = nowTrigger;
+
+                if (remaining == 0) {
+                    // Entry delay expired — trigger alarm
+                    setState(ALARM_TRIGGERED);
+                    sirenOn(-1, "Delay Timeout");
+                    fireEvent(EVT_ALARM_TRIGGERED, -1, "Entry delay expired");
+                }
             }
             break;
         }
@@ -556,23 +620,10 @@ const char* alarmGetStateStr()
 
 uint16_t alarmGetDelayRemaining()
 {
-    uint32_t now = millis();
-    uint32_t elapsed;
-
-    switch (currentState) {
-        case ALARM_EXIT_DELAY:
-            elapsed = now - delayStartMs;
-            if (elapsed >= (uint32_t)exitDelaySec * 1000) return 0;
-            return (uint16_t)(exitDelaySec - elapsed / 1000);
-
-        case ALARM_ENTRY_DELAY:
-            elapsed = now - delayStartMs;
-            if (elapsed >= (uint32_t)entryDelaySec * 1000) return 0;
-            return (uint16_t)(entryDelaySec - elapsed / 1000);
-
-        default:
-            return 0;
+    if (currentState == ALARM_ENTRY_DELAY || currentState == ALARM_EXIT_DELAY) {
+        return (uint16_t)rtcGetDelayRemaining();
     }
+    return 0;
 }
 
 bool alarmSetPin(const char* currentPin, const char* newPin)

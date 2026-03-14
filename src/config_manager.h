@@ -74,4 +74,9 @@ void configLoadSecurityState(uint8_t &failedAttempts, bool &lockedOut);
 void configSaveSirenAccum(uint32_t seconds);
 uint32_t configLoadSirenAccum();
 
+// RTC Helpers for Chronos Anchor
+uint32_t rtcGetDelayRemaining();
+void rtcSetDelayRemaining(uint32_t s);
+bool rtcIsValid();
+
 #endif // SF_ALARM_CONFIG_MANAGER_H
