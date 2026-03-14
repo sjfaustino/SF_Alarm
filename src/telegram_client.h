@@ -4,10 +4,8 @@
 #include <Arduino.h>
 #include "notification_manager.h"
 
-/**
- * @brief Initialize the Telegram client
- */
-void telegramInit();
+struct SystemContext;
+void telegramInit(SystemContext* ctx);
 
 /**
  * @brief Send a Telegram message via Bot API

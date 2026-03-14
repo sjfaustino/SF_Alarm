@@ -57,7 +57,8 @@
 // ---------------------------------------------------------------------------
 
 /// Initialize the SMS command processor.
-void smsCmdInit();
+struct SystemContext;
+void smsCmdInit(SystemContext* ctx);
 bool smsCmdSendWrapper(const char* message);
 
 /// Main update loop for periodic reports. Call from background task.

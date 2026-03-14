@@ -4,9 +4,8 @@
 #include <Arduino.h>
 
 /// Initialize the serial CLI.
-void cliInit();
-
-/// Process serial input. Call in loop().
+struct SystemContext;
+void cliInit(SystemContext* ctx);
 void cliUpdate();
 
 #endif // SF_ALARM_SERIAL_CLI_H

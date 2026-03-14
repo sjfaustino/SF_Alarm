@@ -11,9 +11,7 @@
 #include "network.h"
 
 static const char* TAG = "ALM";
-
-// Global instance for C wrappers
-static AlarmController globalAlarmController;
+static AlarmController* g_instance = nullptr;
 
 AlarmController::AlarmController()
     : _ctx(nullptr), _exitDelaySec(DEFAULT_EXIT_DELAY_S), _entryDelaySec(DEFAULT_ENTRY_DELAY_S),
@@ -36,13 +34,14 @@ AlarmController::~AlarmController() {
 
 void AlarmController::init(SystemContext* ctx) {
     _ctx = ctx;
+    g_instance = this;
     if (_stateMutex == NULL) {
         _stateMutex = xSemaphoreCreateRecursiveMutex();
     }
     
     // Wire up zone events
     zonesSetCallback([](uint8_t zone, ZoneState state) {
-        globalAlarmController.update(); // Keep state fresh
+        if (g_instance) g_instance->update(); 
         // The actual logic is in the zone task, but we can hook if needed
     });
 }
@@ -209,54 +208,3 @@ const char* AlarmController::getStateStr() {
     }
 }
 
-// C Wrappers
-void alarmInit() { globalAlarmController.init(); }
-void alarmSetCallback(AlarmEventCallback cb) { globalAlarmController.setCallback(cb); }
-void alarmUpdate() { globalAlarmController.update(); }
-bool alarmArmAway(const char* p) { return globalAlarmController.armAway(p); }
-bool alarmArmHome(const char* p) { return globalAlarmController.armHome(p); }
-bool alarmDisarm(const char* p) { return globalAlarmController.disarm(p); }
-bool alarmArmAwayInternal() { return globalAlarmController.armAwayInternal(); }
-bool alarmArmHomeInternal() { return globalAlarmController.armHomeInternal(); }
-bool alarmDisarmInternal() { return globalAlarmController.disarmInternal(); }
-AlarmState alarmGetState() { return globalAlarmController.getState(); }
-const char* alarmGetStateStr() { return globalAlarmController.getStateStr(); }
-void alarmLoadPin(const char* p) { globalAlarmController.loadPin(p); }
-bool alarmValidatePin(const char* p) { return globalAlarmController.validatePin(p); }
-void alarmBroadcast(const char* m) { globalAlarmController.broadcast(m); }
-
-// Stub implementations for the rest to keep it building...
-bool AlarmController::armHome(const char* p) { if (!validatePin(p)) return false; return armHomeInternal(); }
-bool AlarmController::armHomeInternal() { if (xSemaphoreTakeRecursive((QueueHandle_t)_stateMutex, portMAX_DELAY) == pdTRUE) { _pendingArmMode = ARM_PENDING_HOME; _delayStartMs = millis(); _currentState = ALARM_EXIT_DELAY; fireEvent(EVT_EXIT_DELAY); xSemaphoreGiveRecursive((QueueHandle_t)_stateMutex); return true; } return false; }
-bool AlarmController::muteSiren(const char* p) { if (!validatePin(p)) return false; sirenOff(); return true; }
-uint16_t AlarmController::getActiveAlarmMask() { return _activeAlarmMask; }
-uint16_t AlarmController::getDelayRemaining() { if (_currentState == ALARM_EXIT_DELAY || _currentState == ALARM_ENTRY_DELAY) { uint32_t elapsed = (millis() - _delayStartMs) / 1000; uint32_t dur = (_currentState == ALARM_EXIT_DELAY) ? _exitDelaySec : _entryDelaySec; if (elapsed >= dur) return 0; return dur - elapsed; } return 0; }
-bool AlarmController::setPin(const char* c, const char* n) { if (!validatePin(c)) return false; loadPin(n); return true; }
-void AlarmController::loadPin(const char* p) { if (p) strncpy(_alarmPin, p, sizeof(_alarmPin)-1); }
-void AlarmController::copyPin(char* d, size_t m) { strncpy(d, _alarmPin, m-1); }
-void AlarmController::setExitDelay(uint16_t s) { _exitDelaySec = s; }
-void AlarmController::setEntryDelay(uint16_t s) { _entryDelaySec = s; }
-uint16_t AlarmController::getExitDelay() { return _exitDelaySec; }
-uint16_t AlarmController::getEntryDelay() { return _entryDelaySec; }
-void AlarmController::setSirenDuration(uint16_t s) { _sirenDurationSec = s; }
-uint16_t AlarmController::getSirenDuration() { return _sirenDurationSec; }
-void AlarmController::setSirenOutput(uint8_t c) { _sirenOutputChannel = c; }
-uint8_t AlarmController::getSirenOutput() { return _sirenOutputChannel; }
-void AlarmController::printStatus() { LOG_INFO(TAG, "Status: %s", getStateStr()); }
-void AlarmController::broadcast(const char* m) { if (_ctx && _ctx->notificationManager) _ctx->notificationManager->broadcast(m); }
-
-// More C Wrappers
-bool alarmMuteSiren(const char* p) { return globalAlarmController.muteSiren(p); }
-uint16_t alarmGetActiveAlarmMask() { return globalAlarmController.getActiveAlarmMask(); }
-uint16_t alarmGetDelayRemaining() { return globalAlarmController.getDelayRemaining(); }
-bool alarmSetPin(const char* c, const char* n) { return globalAlarmController.setPin(c, n); }
-void alarmCopyPin(char* d, size_t m) { globalAlarmController.copyPin(d, m); }
-void alarmSetExitDelay(uint16_t s) { globalAlarmController.setExitDelay(s); }
-void alarmSetEntryDelay(uint16_t s) { globalAlarmController.setEntryDelay(s); }
-uint16_t alarmGetExitDelay() { return globalAlarmController.getExitDelay(); }
-uint16_t alarmGetEntryDelay() { return globalAlarmController.getEntryDelay(); }
-void alarmSetSirenDuration(uint16_t s) { globalAlarmController.setSirenDuration(s); }
-uint16_t alarmGetSirenDuration() { return globalAlarmController.getSirenDuration(); }
-void alarmSetSirenOutput(uint8_t c) { globalAlarmController.setSirenOutput(c); }
-uint8_t alarmGetSirenOutput() { return globalAlarmController.getSirenOutput(); }
-void alarmPrintStatus() { globalAlarmController.printStatus(); }

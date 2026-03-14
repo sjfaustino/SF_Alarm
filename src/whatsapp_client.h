@@ -8,10 +8,8 @@
  */
 #include "notification_manager.h"
 
-/**
- * @brief Initialize the WhatsApp client
- */
-void whatsappInit();
+struct SystemContext;
+void whatsappInit(SystemContext* ctx);
 
 /**
  * @brief Send a WhatsApp message via CallMeBot gateway

@@ -22,11 +22,12 @@ enum ConfigSection {
 void configMarkDirty(ConfigSection section);
 
 /// Initialize the config manager (opens NVS namespace).
-void configInit();
+struct SystemContext;
+void configInit(SystemContext* ctx);
 
 /// Load all configuration from NVS into the running modules.
 /// Call after all modules are initialized.
-void configLoad();
+void configLoad(SystemContext* ctx);
 
 /// Save all current configuration to NVS.
 void configSave();

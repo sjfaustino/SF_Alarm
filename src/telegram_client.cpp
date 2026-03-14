@@ -4,16 +4,20 @@
 #include "network.h"
 
 static const char* TAG = "TG";
+#include "system_context.h"
+#include "notification_manager.h"
+static SystemContext* globalCtx = nullptr;
 
 static char tgToken[64] = "";
 static char tgChatId[32] = "";
 static SemaphoreHandle_t tgMutex = NULL;
 
-void telegramInit() {
+void telegramInit(SystemContext* ctx) {
+    globalCtx = ctx;
     if (tgMutex == NULL) {
         tgMutex = xSemaphoreCreateMutex();
     }
-    notificationRegisterProvider(CH_TG, "Telegram", telegramSendWrapper);
+    globalCtx->notificationManager->registerProvider(CH_TG, "Telegram", telegramSendWrapper);
     LOG_INFO(TAG, "Telegram client initialized");
 }
 

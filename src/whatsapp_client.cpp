@@ -5,6 +5,9 @@
 #include "network.h"
 
 static const char* TAG = "WA";
+#include "system_context.h"
+#include "notification_manager.h"
+static SystemContext* globalCtx = nullptr;
 
 // Professional URL encoder — Stack-allocated (Obsidian Mantle)
 static size_t urlEncodeTo(const char* src, char* dest, size_t destSize) {
@@ -29,11 +32,12 @@ static char waPhone[32] = "";
 static char waApiKey[32] = "";
 static SemaphoreHandle_t waMutex = NULL;
 
-void whatsappInit() {
+void whatsappInit(SystemContext* ctx) {
+    globalCtx = ctx;
     if (waMutex == NULL) {
         waMutex = xSemaphoreCreateMutex();
     }
-    notificationRegisterProvider(CH_WA, "WhatsApp", whatsappSendWrapper);
+    globalCtx->notificationManager->registerProvider(CH_WA, "WhatsApp", whatsappSendWrapper);
     LOG_INFO(TAG, "WhatsApp client initialized");
 }
 

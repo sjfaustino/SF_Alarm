@@ -29,6 +29,10 @@
 #include "string_utils.h"
 
 static const char* TAG = "CFG";
+#include "system_context.h"
+#include "notification_manager.h"
+#include "alarm_controller.h"
+static SystemContext* globalCtx = nullptr;
 
 // Dirty Flags for granular saving (Protected by ConfigUtils::lock)
 static bool dirtyMain      = false;
@@ -209,8 +213,9 @@ void configSaveSchedule() {
 // Public API
 // ---------------------------------------------------------------------------
 
-void configInit()
+void configInit(SystemContext* ctx)
 {
+    globalCtx = ctx;
     esp_err_t err = nvs_flash_init();
     
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -251,8 +256,9 @@ TaskHandle_t configGetLockOwner()
     return xSemaphoreGetMutexHolder(xSemaphoreCreateRecursiveMutex()); // Placeholder/Fix: ConfigUtils should expose this if needed
 }
 
-void configLoad()
+void configLoad(SystemContext* ctx)
 {
+    globalCtx = ctx;
     ConfigUtils::Session sess(true);
     if (!sess.isValid()) {
         LOG_ERROR(TAG, "Config load FAILED: Mutex timeout");
@@ -283,13 +289,13 @@ void configLoad()
             }
         }
     }
-    alarmLoadPin(pin.c_str());
+    globalCtx->alarmController->loadPin(pin.c_str());
 
     // --- Alarm timing ---
-    alarmSetExitDelay(p.getUShort(KEY_EXIT_DELAY, DEFAULT_EXIT_DELAY_S));
-    alarmSetEntryDelay(p.getUShort(KEY_ENTRY_DELAY, DEFAULT_ENTRY_DELAY_S));
-    alarmSetSirenDuration(p.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
-    alarmSetSirenOutput(p.getUChar(KEY_SIREN_CH, 0));
+    globalCtx->alarmController->setExitDelay(p.getUShort(KEY_EXIT_DELAY, DEFAULT_EXIT_DELAY_S));
+    globalCtx->alarmController->setEntryDelay(p.getUShort(KEY_ENTRY_DELAY, DEFAULT_ENTRY_DELAY_S));
+    globalCtx->alarmController->setSirenDuration(p.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
+    globalCtx->alarmController->setSirenOutput(p.getUChar(KEY_SIREN_CH, 0));
 
     // --- Periodic Report ---
     smsCmdSetReportInterval(p.getUShort(KEY_REPORT_DUR, DEFAULT_REPORT_INTERVAL_MIN));
@@ -311,7 +317,7 @@ void configLoad()
     if (len == 0) strncpy(keyBuf, DEFAULT_WA_APIKEY, sizeof(keyBuf));
     
     uint8_t channels = p.getUChar(KEY_ALERT_CHANNELS, (uint8_t)(CH_SMS | CH_TG));
-    notificationSetChannels(channels);
+    globalCtx->notificationManager->setChannels(channels);
     whatsappSetConfig(buf, keyBuf);
 
     // --- Telegram ---
@@ -438,10 +444,10 @@ void configSavePin(const char* pin) {
 void configSaveTiming() {
     ConfigUtils::Session sess(false);
     if (sess.isValid()) {
-        sess.p().putUShort(KEY_EXIT_DELAY, alarmGetExitDelay());
-        sess.p().putUShort(KEY_ENTRY_DELAY, alarmGetEntryDelay());
-        sess.p().putUShort(KEY_SIREN_DUR, alarmGetSirenDuration());
-        sess.p().putUChar(KEY_SIREN_CH, alarmGetSirenOutput());
+        sess.p().putUShort(KEY_EXIT_DELAY, globalCtx->alarmController->getExitDelay());
+        sess.p().putUShort(KEY_ENTRY_DELAY, globalCtx->alarmController->getEntryDelay());
+        sess.p().putUShort(KEY_SIREN_DUR, globalCtx->alarmController->getSirenDuration());
+        sess.p().putUChar(KEY_SIREN_CH, globalCtx->alarmController->getSirenOutput());
         dirtyMain = false;
     }
 }
@@ -591,7 +597,7 @@ void configSave()
 
     if (sMain) {
         char pin[MAX_PIN_LEN];
-        alarmCopyPin(pin, sizeof(pin));
+        globalCtx->alarmController->copyPin(pin, sizeof(pin));
         configSavePin(pin);
         ConfigUtils::scrubFmt(pin); // Actually scrubBuffer but let's be consistent
         memset(pin, 0, sizeof(pin));
@@ -744,7 +750,7 @@ void configSaveWhatsapp() {
     if (sess.isValid()) {
         sess.p().putString(KEY_WA_PHONE, whatsappGetPhone());
         sess.p().putString(KEY_WA_APIKEY, whatsappGetApiKey());
-        sess.p().putUChar(KEY_ALERT_CHANNELS, notificationGetChannels());
+        sess.p().putUChar(KEY_ALERT_CHANNELS, globalCtx->notificationManager->getChannels());
         dirtyAlerts = false; 
     }
 }
@@ -754,7 +760,7 @@ void configSaveTelegram() {
     if (sess.isValid()) {
         sess.p().putString(KEY_TG_TOKEN, telegramGetToken());
         sess.p().putString(KEY_TG_CHATID, telegramGetChatId());
-        sess.p().putUChar(KEY_ALERT_CHANNELS, notificationGetChannels());
+        sess.p().putUChar(KEY_ALERT_CHANNELS, globalCtx->notificationManager->getChannels());
         dirtyAlerts = false;
     }
 }
@@ -779,15 +785,15 @@ void configPrint()
     Serial.printf("  Router IP:     %s\n", smsGatewayGetRouterIp());
     Serial.printf("  Router User:   %s\n", smsGatewayGetRouterUser());
     Serial.printf("  Router Pass:   %s\n", strlen(smsGatewayGetRouterPass()) ? "********" : "");
-    Serial.printf("  Exit delay:  %d sec\n", alarmGetExitDelay());
-    Serial.printf("  Entry delay: %d sec\n", alarmGetEntryDelay());
-    Serial.printf("  Siren dur:   %d sec\n", alarmGetSirenDuration());
-    Serial.printf("  Siren ch:    %d\n", alarmGetSirenOutput());
+    Serial.printf("  Exit delay:  %d sec\n", globalCtx->alarmController->getExitDelay());
+    Serial.printf("  Entry delay: %d sec\n", globalCtx->alarmController->getEntryDelay());
+    Serial.printf("  Siren dur:   %d sec\n", globalCtx->alarmController->getSirenDuration());
+    Serial.printf("  Siren ch:    %d\n", globalCtx->alarmController->getSirenOutput());
     Serial.printf("  Report int:  %d min\n", smsCmdGetReportInterval());
     Serial.printf("  Alarm mode:  %d (1:SMS, 2:Call, 3:Both)\n", (int)smsCmdGetWorkingMode());
     Serial.printf("  Recovery:    %s\n", smsCmdGetRecoveryText());
     Serial.printf("  WA Phone:    %s\n", whatsappGetPhone());
-    Serial.printf("  Alert Chans: 0x%02X\n", notificationGetChannels());
+    Serial.printf("  Alert Chans: 0x%02X\n", globalCtx->notificationManager->getChannels());
     Serial.printf("  TG ChatID:   %s\n", telegramGetChatId());
     Serial.printf("  MQTT Server: %s:%d\n", mqttGetServer(), mqttGetPort());
     Serial.printf("  MQTT User:   %s\n", mqttGetUser());

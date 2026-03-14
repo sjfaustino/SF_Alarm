@@ -89,14 +89,4 @@ private:
     int _providerCount;
 };
 
-// C Wrappers for legacy code and easy access
-void notificationInit();
-void notificationRegisterProvider(AlertChannel channel, const char* name, NotificationSendFunc send);
-void notificationSetChannels(uint8_t channels);
-uint8_t notificationGetChannels();
-void notificationDispatch(const AlarmEventInfo& info);
-void notificationBroadcast(const char* message);
-void notificationQueueReply(const char* phone, const char* message);
-void notificationUpdate();
-
 #endif // SF_ALARM_NOTIFICATION_MANAGER_H

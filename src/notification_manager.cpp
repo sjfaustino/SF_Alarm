@@ -12,9 +12,6 @@
 
 static const char* TAG = "NOTIF";
 
-// Global instance for C wrappers
-static NotificationManager globalNotifManager;
-
 NotificationManager::NotificationManager()
     : _alertQueue(NULL), _lastAlertProcessedMs(0), _enabledChannels(CH_NONE), _providerCount(0) {
     memset(_lastZoneAlertMs, 0, sizeof(_lastZoneAlertMs));
@@ -143,14 +140,3 @@ void NotificationManager::update() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// C Wrappers
-// ---------------------------------------------------------------------------
-void notificationInit() { globalNotifManager.init(); }
-void notificationRegisterProvider(AlertChannel ch, const char* n, NotificationSendFunc s) { globalNotifManager.registerProvider(ch, n, s); }
-void notificationSetChannels(uint8_t ch) { globalNotifManager.setChannels(ch); }
-uint8_t notificationGetChannels() { return globalNotifManager.getChannels(); }
-void notificationDispatch(const AlarmEventInfo& i) { globalNotifManager.dispatch(i); }
-void notificationBroadcast(const char* m) { globalNotifManager.broadcast(m); }
-void notificationQueueReply(const char* p, const char* m) { globalNotifManager.queueReply(p, m); }
-void notificationUpdate() { globalNotifManager.update(); }

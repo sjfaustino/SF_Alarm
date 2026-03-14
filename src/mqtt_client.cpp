@@ -11,6 +11,9 @@
 #include <esp_task_wdt.h>
 
 static const char* TAG = "MQTT";
+#include "system_context.h"
+#include "alarm_controller.h" // Ensure we have the class definition
+static SystemContext* globalCtx = nullptr;
 
 static WiFiClient espClient;
 static PubSubClient client(espClient);
@@ -69,7 +72,7 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
         // MUTE is non-destructive and allowed without PIN
         if (strncmp(message, "DISARM", 6) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (alarmDisarm(pin)) {
+            if (globalCtx->alarmController->disarm(pin)) {
                 mqttPublish("SF_Alarm/events", "DISARMED via MQTT");
             } else {
                 mqttPublish("SF_Alarm/events", "DISARM failed (wrong PIN)");
@@ -77,7 +80,7 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
         }
         else if (strncmp(message, "ARM_HOME", 8) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (alarmArmHome(pin)) {
+            if (globalCtx->alarmController->armHome(pin)) {
                 mqttPublish("SF_Alarm/events", "ARM_HOME via MQTT");
             } else {
                 mqttPublish("SF_Alarm/events", "ARM_HOME failed (wrong PIN)");
@@ -85,7 +88,7 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
         }
         else if (strncmp(message, "ARM_AWAY", 8) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (alarmArmAway(pin)) {
+            if (globalCtx->alarmController->armAway(pin)) {
                 mqttPublish("SF_Alarm/events", "ARM_AWAY via MQTT");
             } else {
                 mqttPublish("SF_Alarm/events", "ARM_AWAY failed (wrong PIN)");
@@ -93,7 +96,7 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
         }
         else if (strncmp(message, "MUTE", 4) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (alarmMuteSiren(pin)) {
+            if (globalCtx->alarmController->muteSiren(pin)) {
                 mqttPublish("SF_Alarm/events", "MUTE via MQTT");
             } else {
                 mqttPublish("SF_Alarm/events", "MUTE failed (wrong PIN)");
@@ -102,7 +105,8 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
     }
 }
 
-void mqttInit() {
+void mqttInit(SystemContext* ctx) {
+    globalCtx = ctx;
     if (mqttConfigMutex == NULL) {
         mqttConfigMutex = xSemaphoreCreateMutex();
     }
@@ -270,7 +274,7 @@ static void internalSyncState() {
     if (!client.connected()) return;
 
     // 1. Alarm State (only publish on change)
-    AlarmState st = alarmGetState();
+    AlarmState st = globalCtx->alarmController->getState();
     if ((int)st != lastPublishedState && (int)st <= 6) {
         client.publish("SF_Alarm/state", haStateMap[(int)st], true);
         lastPublishedState = (int)st;

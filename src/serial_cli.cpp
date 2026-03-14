@@ -15,6 +15,9 @@
 #include "logging.h"
 
 static const char* TAG = "CLI";
+#include "system_context.h"
+
+static SystemContext* globalCtx = nullptr;
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -41,7 +44,7 @@ static bool requirePin(cmd* c) {
         Serial.println("[CLI] ERROR: Sensitive command requires -pin <YOUR_PIN>");
         return false;
     }
-    if (!alarmValidatePin(argPin.getValue().c_str())) {
+    if (!globalCtx->alarmController->validatePin(argPin.getValue().c_str())) {
         Serial.println("[CLI] ACCESS DENIED: Invalid PIN");
         return false;
     }
@@ -60,7 +63,7 @@ static void cmdHelpCallback(cmd* c) {
 }
 
 static void cmdStatusCallback(cmd* c) {
-    alarmPrintStatus();
+    globalCtx->alarmController->printStatus();
     zonesPrintStatus();
     networkPrintStatus();
 }
@@ -110,22 +113,22 @@ static void cmdArmCallback(cmd* c) {
     if (!requirePin(c)) return;
     Command cmd(c);
     if (cmd.getArgument("home").isSet()) {
-        alarmArmHome(cmd.getArgument("pin").getValue().c_str());
+        globalCtx->alarmController->armHome(cmd.getArgument("pin").getValue().c_str());
     } else {
-        alarmArmAway(cmd.getArgument("pin").getValue().c_str());
+        globalCtx->alarmController->armAway(cmd.getArgument("pin").getValue().c_str());
     }
 }
 
 static void cmdDisarmCallback(cmd* c) {
     if (!requirePin(c)) return;
     Command cmd(c);
-    alarmDisarm(cmd.getArgument("pin").getValue().c_str());
+    globalCtx->alarmController->disarm(cmd.getArgument("pin").getValue().c_str());
 }
 
 static void cmdMuteCallback(cmd* c) {
     if (!requirePin(c)) return;
     Command cmd(c);
-    alarmMuteSiren(cmd.getArgument("pin").getValue().c_str());
+    globalCtx->alarmController->muteSiren(cmd.getArgument("pin").getValue().c_str());
 }
 
 static void cmdRebootCallback(cmd* c) {
@@ -219,7 +222,7 @@ static void cmdSetPinCallback(cmd* c) {
         return;
     }
 
-    if (alarmSetPin(currentPin.c_str(), newPin.c_str())) {
+    if (globalCtx->alarmController->setPin(currentPin.c_str(), newPin.c_str())) {
         Serial.println("PIN updated successfully.");
     } else {
         Serial.println("ERROR: Failed to update PIN.");
@@ -363,7 +366,8 @@ static void errorCallback(cmd_error* e) {
 // Initialization
 // ---------------------------------------------------------------------------
 
-void cliInit() {
+void cliInit(SystemContext* ctx) {
+    globalCtx = ctx;
     cli.setOnError(errorCallback);
 
     // Public Commands

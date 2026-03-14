@@ -153,34 +153,4 @@ private:
     void sirenOff();
 };
 
-// C Wrappers for legacy code
-void alarmInit();
-void alarmSetCallback(AlarmEventCallback cb);
-void alarmUpdate();
-bool alarmArmAway(const char* pin);
-bool alarmArmHome(const char* pin);
-bool alarmDisarm(const char* pin);
-bool alarmArmAwayInternal();
-bool alarmArmHomeInternal();
-bool alarmDisarmInternal();
-bool alarmMuteSiren(const char* pin);
-AlarmState alarmGetState();
-uint16_t alarmGetActiveAlarmMask();
-const char* alarmGetStateStr();
-uint16_t alarmGetDelayRemaining();
-bool alarmSetPin(const char* currentPin, const char* newPin);
-void alarmLoadPin(const char* pin);
-void alarmCopyPin(char* dest, size_t maxLen);
-bool alarmValidatePin(const char* pin);
-void alarmSetExitDelay(uint16_t seconds);
-void alarmSetEntryDelay(uint16_t seconds);
-uint16_t alarmGetExitDelay();
-uint16_t alarmGetEntryDelay();
-void alarmSetSirenDuration(uint16_t seconds);
-uint16_t alarmGetSirenDuration();
-void alarmSetSirenOutput(uint8_t channel);
-uint8_t alarmGetSirenOutput();
-void alarmPrintStatus();
-void alarmBroadcast(const char* message);
-
 #endif // SF_ALARM_CONTROLLER_H

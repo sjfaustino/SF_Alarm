@@ -23,9 +23,15 @@ static bool chipOk[4] = { false, false, false, false };
 static uint32_t chipRetryMs[4] = { 0, 0, 0, 0 };
 static const uint32_t CHIP_RETRY_INTERVAL_MS = 5000; // Retry once per 5 seconds
 
-static SemaphoreHandle_t i2cMutex = nullptr;
+#include "system_context.h"
+extern SystemContext* globalCtx;
+
 #define I2C_LOCK_TIMEOUT_READ  pdMS_TO_TICKS(10)  // 10ms: yield quick to preserve 50Hz loop
 #define I2C_LOCK_TIMEOUT_WRITE pdMS_TO_TICKS(500) // 500ms: sirens MUST fire even if bus is busy
+
+static SemaphoreHandle_t getI2cMutex() {
+    return (SemaphoreHandle_t)globalCtx->i2cBusMutex;
+}
 
 static void ioBusRecover()
 {
@@ -65,11 +71,9 @@ static void ioBusRecover()
 
 bool ioExpanderInit()
 {
-    if (i2cMutex == nullptr) {
-        i2cMutex = xSemaphoreCreateMutex();
-    }
-
-    if (xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return false;
+    SemaphoreHandle_t mutex = getI2cMutex();
+    if (mutex == nullptr) return false;
+    if (xSemaphoreTake(mutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return false;
 
     // --- PHYSICAL BUS RECOVERY (Bus Recovery Sequence) ---
     // If SDA is held low by a hung slave, we need to toggle SCL until it's released.
@@ -125,7 +129,7 @@ bool ioExpanderInit()
         pcfOut2.write8(0x00);
     }
 
-    xSemaphoreGive(i2cMutex);
+    xSemaphoreGive(mutex);
 
     currentOutputs = 0x0000;
 
@@ -151,7 +155,8 @@ bool ioExpanderReadInputs(uint16_t* mask)
     uint8_t low  = 0xFF;
     uint8_t high = 0xFF;
 
-    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_READ) != pdTRUE) {
+    SemaphoreHandle_t mutex = getI2cMutex();
+    if (mutex == nullptr || xSemaphoreTake(mutex, I2C_LOCK_TIMEOUT_READ) != pdTRUE) {
         return false; // Fail-Secure: Busy bus returns false, caller freezes state
     }
 
@@ -259,7 +264,7 @@ bool ioExpanderReadInputs(uint16_t* mask)
     // Combine into 16-bit value.
     uint16_t res = ((uint16_t)high << 8) | (uint16_t)low;
     *mask = ~res & 0xFFFF;
-    xSemaphoreGive(i2cMutex);
+    xSemaphoreGive(mutex);
     
     sysHealthReport(HB_BIT_I2C);
     // If we have partial failure (one chip down), we still return true but mask is missing half.
@@ -276,7 +281,8 @@ void ioExpanderWriteOutputs(uint16_t mask)
     currentOutputs = mask;
     portEXIT_CRITICAL(&ioMux);
 
-    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return;
+    SemaphoreHandle_t mutex = getI2cMutex();
+    if (mutex == nullptr || xSemaphoreTake(mutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return;
 
     if (chipOk[2]) {
         pcfOut1.write8((uint8_t)(mask & 0xFF));
@@ -284,7 +290,7 @@ void ioExpanderWriteOutputs(uint16_t mask)
     if (chipOk[3]) {
         pcfOut2.write8((uint8_t)((mask >> 8) & 0xFF));
     }
-    xSemaphoreGive(i2cMutex);
+    xSemaphoreGive(mutex);
     sysHealthReport(HB_BIT_I2C);
 }
 
@@ -301,7 +307,8 @@ void ioExpanderSetOutput(uint8_t channel, bool state)
     uint16_t mask = currentOutputs;
     portEXIT_CRITICAL(&ioMux);
 
-    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return;
+    SemaphoreHandle_t mutex = getI2cMutex();
+    if (mutex == nullptr || xSemaphoreTake(mutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return;
 
     // Call output writer without nested lock since we bypass ioExpanderWriteOutputs update
     if (chipOk[2]) {
@@ -310,7 +317,7 @@ void ioExpanderSetOutput(uint8_t channel, bool state)
     if (chipOk[3]) {
         pcfOut2.write8((uint8_t)((mask >> 8) & 0xFF));
     }
-    xSemaphoreGive(i2cMutex);
+    xSemaphoreGive(mutex);
     sysHealthReport(HB_BIT_I2C);
 }
 
@@ -351,6 +358,7 @@ bool ioExpanderIsTampered()
 
 TaskHandle_t ioExpanderGetLockOwner()
 {
-    if (i2cMutex == nullptr) return nullptr;
-    return xSemaphoreGetMutexHolder(i2cMutex);
+    SemaphoreHandle_t mutex = getI2cMutex();
+    if (mutex == nullptr) return nullptr;
+    return xSemaphoreGetMutexHolder(mutex);
 }

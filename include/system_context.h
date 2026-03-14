@@ -23,6 +23,7 @@ struct SystemContext {
     
     // System status flags
     volatile uint8_t*    taskHeartbeatBits;
+    void*                i2cBusMutex; // SemaphoreHandle_t
 };
 
 #endif // SF_ALARM_SYSTEM_CONTEXT_H

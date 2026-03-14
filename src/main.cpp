@@ -56,6 +56,8 @@ static SemaphoreHandle_t bootLock = NULL;
 
 static void restartTask(int index);
 
+static SystemContext* globalCtx = nullptr;
+
 // Alerts are now managed by NotificationManager
 
 // ---------------------------------------------------------------------------
@@ -71,7 +73,7 @@ static void onAlarmEvent(const AlarmEventInfo& info)
 // ---------------------------------------------------------------------------
 void alarmQueueReply(const char* phone, const char* message)
 {
-    notificationQueueReply(phone, message);
+    sysCtx.notificationManager->queueReply(phone, message);
 }
 
 // ---------------------------------------------------------------------------
@@ -100,11 +102,11 @@ static void zoneTask(void* pvParameters)
         zonesUpdate(inputs);
 
         bool currentAllClear = zonesAllClear();
-        AlarmState st = alarmGetState();
+        AlarmState st = ctx->alarmController->getState();
         bool isArmedOrActive = (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME ||
                                 st == ALARM_TRIGGERED  || st == ALARM_ENTRY_DELAY);
         if (currentAllClear && !lastAllClear && isArmedOrActive) {
-            alarmBroadcast(smsCmdGetRecoveryText());
+            ctx->alarmController->broadcast(smsCmdGetRecoveryText());
         }
         lastAllClear = currentAllClear;
 
@@ -189,7 +191,8 @@ static void heartbeatTask(void* pvParameters)
         sysHealthReport(HB_BIT_VIBE); 
 
         if (configGetHeartbeatEnabled()) {
-            AlarmState st = alarmGetState();
+            SystemContext* ctx = globalCtx; // Using globalCtx for heartbeatTask for now
+            AlarmState st = ctx->alarmController->getState();
             if (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME) {
                 digitalWrite(HEARTBEAT_LED_PIN, HIGH);
                 digitalWrite(HEARTBEAT_BUZZER_PIN, HIGH);
@@ -214,19 +217,20 @@ static void schedulerTask(void* pvParameters)
                 configGetSchedule(timeinfo.tm_wday, aHr, aMin, dHr, dMin);
 
                 if (aHr != -1 && aMin != -1 && timeinfo.tm_hour == aHr && currentMin == aMin) {
-                    AlarmState st = alarmGetState();
+                    SystemContext* ctx = globalCtx; // Using globalCtx for schedulerTask
+                    AlarmState st = ctx->alarmController->getState();
                     if (st == ALARM_DISARMED) {
                         LOG_INFO(TAG, "Auto-Arming (%02d:%02d)", aHr, aMin);
-                        if (configGetScheduleMode() == ALARM_ARMED_HOME) alarmArmHomeInternal();
-                        else alarmArmAwayInternal();
+                        if (configGetScheduleMode() == ALARM_ARMED_HOME) globalCtx->alarmController->armHomeInternal();
+                        else globalCtx->alarmController->armAwayInternal();
                         lastFiredMin = currentMin;
                     }
                 }
                 else if (dHr != -1 && dMin != -1 && timeinfo.tm_hour == dHr && currentMin == dMin) {
-                    AlarmState st = alarmGetState();
+                    AlarmState st = globalCtx->alarmController->getState();
                     if (st != ALARM_DISARMED) {
                         LOG_INFO(TAG, "Auto-Disarming (%02d:%02d)", dHr, dMin);
-                        alarmDisarmInternal();
+                        globalCtx->alarmController->disarmInternal();
                         lastFiredMin = currentMin;
                     }
                 }
@@ -263,8 +267,8 @@ void setup()
         recoveryMode = true;
         // In recovery mode, we MUST still init I/O for CLI to work safely
         ioExpanderInit();
-        configInit();
-        cliInit();
+        configInit(&sysCtx);
+        cliInit(&sysCtx);
         while(true) {
             cliUpdate();
             // Slow "Distress" blink
@@ -285,11 +289,13 @@ void setup()
     Serial.println("========================================");
 
     // Initialize System Context
+    sysCtx.i2cBusMutex = xSemaphoreCreateMutex();
+    globalCtx = &sysCtx;
     sysCtx.notificationManager = &notifMgr;
     sysCtx.alarmController = &almCtrl;
     sysCtx.taskHeartbeatBits = &taskHeartbeatBits;
 
-    configInit();
+    configInit(&sysCtx);
     sysCtx.notificationManager->init();
 
     pinMode(HEARTBEAT_LED_PIN, OUTPUT);
@@ -310,7 +316,7 @@ void setup()
     }
 
     // CRITICAL: Load config BEFORE initializing alarm logic
-    configLoad();
+    configLoad(&sysCtx);
     
     // Initialize Alarm Logic
     sysCtx.alarmController->init(&sysCtx);
@@ -319,11 +325,13 @@ void setup()
     smsGatewayInit(DEFAULT_ROUTER_IP, DEFAULT_ROUTER_USER, DEFAULT_ROUTER_PASS);
     // TODO: activeGateway is still a global in sms_gateway.cpp, but we can wrap it
     
-    smsCmdInit();
+    smsCmdInit(&sysCtx);
     networkInit();
-    webServerInit();
-    cliInit();
-    mqttInit();
+    whatsappInit(&sysCtx);
+    webServerInit(&sysCtx);
+    cliInit(&sysCtx);
+    mqttInit(&sysCtx);
+    telegramInit(&sysCtx);
     onvifInit();
 
     xTaskCreatePinnedToCore(zoneTask, "ZoneTask", 3072, &sysCtx, 5, &taskHandles[0], 1);
@@ -383,7 +391,7 @@ static void restartTask(int index)
 void loop()
 {
     uint32_t now = millis();
-    alarmUpdate();
+    sysCtx.alarmController->update();
     networkUpdate();
 
     if (now - lastGlobalHeartbeatCheck >= 3000) {

@@ -3,10 +3,8 @@
 
 #include <Arduino.h>
 
-/**
- * @brief Initialize the MQTT client
- */
-void mqttInit();
+struct SystemContext;
+void mqttInit(SystemContext* ctx);
 
 /**
  * @brief Run the MQTT client loop (call in main loop)
