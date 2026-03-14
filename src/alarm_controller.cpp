@@ -36,10 +36,11 @@ static uint32_t delayStartMs     = 0;
 static uint32_t sirenStartMs     = 0;
 static uint8_t  triggeringZone   = 0xFF; // First zone that tripped
 
-// RTC_NOINIT_ATTR: persists across soft-reset and WDT reboots.
+// Persistent indicators: persisted to NVS periodically and survived reboots.
 // This ensures the noise ordinance window doesn't restart after a reboot
 // in TRIGGERED state, preventing municipal fines on flicker.
-RTC_NOINIT_ATTR static uint32_t firstTriggerMs;
+static uint32_t sirenAccumulatedSec = 0;
+static uint32_t lastSirenUpdateMs   = 0;
 
 uint16_t alarmGetActiveAlarmMask() { return activeAlarmMask; }
 
@@ -101,13 +102,9 @@ static void sirenOn(int8_t zoneId, const char* name)
         sirenActive  = true;
         sirenMuted   = false;
         
-        // Strict Noise Ordinance Compliance: 
-        // firstTriggerMs is set at the start of the TRIGGERED state and 
-        // NEVER reset until DISARMED, ensuring total siren duration doesn't restart.
-        if (firstTriggerMs == 0) {
-            firstTriggerMs = millis();
-            LOG_INFO(TAG, "Strict noise ordinance window started");
-        }
+        // Use the accumulated timer for ordinance compliance. 
+        // Reset only on a clean DISARM.
+        lastSirenUpdateMs = millis();
         
         sirenStartMs = millis();
         ioExpanderSetOutput(sirenOutputChannel, true);
@@ -120,7 +117,7 @@ static void sirenOff()
 {
     if (sirenActive) {
         sirenActive = false;
-        // Note: firstTriggerMs is NOT reset here. It persists until Disarm.
+        // sirenAccumulatedSec persists until Disarm.
         ioExpanderSetOutput(sirenOutputChannel, false);
         LOG_INFO(TAG, "Siren: OFF");
         fireEvent(EVT_SIREN_OFF, -1, "Manual or Timeout");
@@ -151,6 +148,8 @@ static bool validatePin(const char* pin)
 
     if (pinEquals(pin, alarmPin)) {
         failedAttempts = 0;
+        lockedOut = false;
+        configSaveSecurityState(failedAttempts, lockedOut);
         return true;
     } else {
         failedAttempts++;
@@ -159,6 +158,7 @@ static bool validatePin(const char* pin)
             lockoutStartMs = millis();
             LOG_ERROR(TAG, "SECURITY: Too many failed attempts! Locked out for %lu minutes.", LOCKOUT_DURATION_MS / 60000);
         }
+        configSaveSecurityState(failedAttempts, lockedOut);
         return false;
     }
 }
@@ -189,7 +189,11 @@ static void setState(AlarmState newState)
             LOG_INFO(TAG, "State: %s -> %s", oldStr, alarmGetStateStrInternal());
             
             if (newState == ALARM_DISARMED) {
-                firstTriggerMs = 0; // Clear RTC noise timer on clean disarm
+                sirenAccumulatedSec = 0; // Clear noise timer on clean disarm
+                configSaveSirenAccum(0);
+                failedAttempts = 0;
+                lockedOut = false;
+                configSaveSecurityState(0, false);
             }
             stateChanged = true;
         }
@@ -317,29 +321,28 @@ void alarmInit()
 
     // Restore persistent state from NVS
     AlarmState savedState = configLoadAlarmState();
+    configLoadSecurityState(failedAttempts, lockedOut);
+    sirenAccumulatedSec = configLoadSirenAccum();
+
+    if (lockedOut) {
+        lockoutStartMs = millis(); // Penalize the full lockout duration from boot
+        LOG_WARN(TAG, "SECURITY: PIN entries locked due to persistent brute-force protection.");
+    }
+
     if (savedState == ALARM_ARMED_AWAY || savedState == ALARM_ARMED_HOME || savedState == ALARM_TRIGGERED) {
         currentState = savedState;
         LOG_INFO(TAG, "Restored state from NVS: %s", alarmGetStateStrInternal());
         
-        // If we restored TRIGGERED, physically resume the siren.
-        // IMPORTANT: this MUST come after sirenActive is cleared above so
-        // the assignment here is not immediately undone.
         if (savedState == ALARM_TRIGGERED) {
             activeAlarmMask = 0xFFFF; // Mark as "recovered alarm"
             sirenActive = true;
+            lastSirenUpdateMs = millis();
             ioExpanderSetOutput(sirenOutputChannel, true);
             LOG_WARN(TAG, "Siren: RESUMED on boot (Triggered state restored)");
-            if (firstTriggerMs == 0) {
-                firstTriggerMs = millis();
-                LOG_WARN(TAG, "Noise ordinance timer reset (cold restore).");
-            }
-        } else {
-            // If armed but not triggered, ensure the ordinance timer is zeroed
-            firstTriggerMs = 0;
         }
     } else {
         currentState = ALARM_DISARMED;
-        firstTriggerMs = 0; // Guard against RTC amnesia garbage
+        sirenAccumulatedSec = 0;
     }
     
     LOG_INFO(TAG, "Controller initialized — %s", alarmGetStateStr());
@@ -391,25 +394,32 @@ void alarmUpdate()
         }
 
         case ALARM_TRIGGERED: {
+            // Ordinance timer update
+            if (sirenActive) {
+                uint32_t nowTrigger = millis();
+                if (nowTrigger - lastSirenUpdateMs >= 1000) {
+                    sirenAccumulatedSec += (nowTrigger - lastSirenUpdateMs) / 1000;
+                    lastSirenUpdateMs = nowTrigger;
+                    configSaveSirenAccum(sirenAccumulatedSec);
+                }
+            }
+
             // Auto-silence siren after strict duration (Noise Ordinance Compliance)
-            if (sirenDurationSec > 0 && firstTriggerMs > 0) {
-                uint32_t elapsed = now - firstTriggerMs;
-                if (elapsed >= (uint32_t)sirenDurationSec * 1000) {
-                    sirenOff();
-                    LOG_INFO(TAG, "Siren auto-silenced after strict duration timeout.");
-                    activeAlarmMask = 0;
-                    triggeringZone = 0xFF;
+            if (sirenDurationSec > 0 && sirenAccumulatedSec >= sirenDurationSec) {
+                sirenOff();
+                LOG_INFO(TAG, "Siren auto-silenced after strict duration timeout.");
+                activeAlarmMask = 0;
+                triggeringZone = 0xFF;
 
-                    // Re-arm system gracefully
-                    setState(returnState);
+                // Re-arm system gracefully
+                setState(returnState);
 
-                    if (returnState == ALARM_ARMED_AWAY) {
-                        fireEvent(EVT_ARMED_AWAY, -1, "Auto-Restore");
-                    } else if (returnState == ALARM_ARMED_HOME) {
-                        fireEvent(EVT_ARMED_HOME, -1, "Auto-Restore");
-                    } else {
-                        fireEvent(EVT_DISARMED, -1, "Auto-Restore");
-                    }
+                if (returnState == ALARM_ARMED_AWAY) {
+                    fireEvent(EVT_ARMED_AWAY, -1, "Auto-Restore");
+                } else if (returnState == ALARM_ARMED_HOME) {
+                    fireEvent(EVT_ARMED_HOME, -1, "Auto-Restore");
+                } else {
+                    fireEvent(EVT_DISARMED, -1, "Auto-Restore");
                 }
             }
             break;

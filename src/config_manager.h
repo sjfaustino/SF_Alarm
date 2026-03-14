@@ -68,4 +68,10 @@ void configPrint();
 void configSaveAlarmState(AlarmState state);
 AlarmState configLoadAlarmState();
 
+void configSaveSecurityState(uint8_t failedAttempts, bool lockedOut);
+void configLoadSecurityState(uint8_t &failedAttempts, bool &lockedOut);
+
+void configSaveSirenAccum(uint32_t seconds);
+uint32_t configLoadSirenAccum();
+
 #endif // SF_ALARM_CONFIG_MANAGER_H

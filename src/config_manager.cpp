@@ -652,6 +652,58 @@ AlarmState configLoadAlarmState()
     return state;
 }
 
+void configSaveSecurityState(uint8_t failedAttempts, bool lockedOut)
+{
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        Preferences p;
+        if (p.begin(NVS_NAMESPACE, false)) {
+            p.putUChar("failedAtts", failedAttempts);
+            p.putBool("isLocked", lockedOut);
+            p.end();
+        }
+        xSemaphoreGive(configMutex);
+    }
+}
+
+void configLoadSecurityState(uint8_t &failedAttempts, bool &lockedOut)
+{
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        Preferences p;
+        if (p.begin(NVS_NAMESPACE, true)) {
+            failedAttempts = p.getUChar("failedAtts", 0);
+            lockedOut      = p.getBool("isLocked", false);
+            p.end();
+        }
+        xSemaphoreGive(configMutex);
+    }
+}
+
+void configSaveSirenAccum(uint32_t seconds)
+{
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        Preferences p;
+        if (p.begin(NVS_NAMESPACE, false)) {
+            p.putUInt("sirenAcc", seconds);
+            p.end();
+        }
+        xSemaphoreGive(configMutex);
+    }
+}
+
+uint32_t configLoadSirenAccum()
+{
+    uint32_t seconds = 0;
+    if (xSemaphoreTake(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        Preferences p;
+        if (p.begin(NVS_NAMESPACE, true)) {
+            seconds = p.getUInt("sirenAcc", 0);
+            p.end();
+        }
+        xSemaphoreGive(configMutex);
+    }
+    return seconds;
+}
+
 void configFactoryReset()
 {
     LOG_INFO(TAG, "Factory reset — clearing NVS...");
