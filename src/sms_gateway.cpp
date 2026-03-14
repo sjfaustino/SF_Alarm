@@ -9,7 +9,7 @@
 #include "logging.h"
 #include <esp_task_wdt.h>
 #include "string_utils.h"
-#include "string_utils.h"
+#include "html_utils.h"
 
 static const char* TAG = "SMS";
 
@@ -79,33 +79,21 @@ static void buildUrlStr(const char* path, char* dest, size_t maxLen)
 }
 
 
-/// Robustly extract a value from a named hidden input tag.
-/// Handles unordered attributes and ensures parsing stays within tag boundaries.
 static String extractHiddenField(const String& page, const char* fieldName)
 {
-    String searchName = String("name=\"") + fieldName + "\"";
-    int pos = page.indexOf(searchName);
-    if (pos < 0) return "";
-
-    // Strictly locate the start and end of the containing <input tag
-    String lowerPage = page;
-    lowerPage.toLowerCase();
-    int tagStart = lowerPage.lastIndexOf("<input", pos);
-    int tagEnd = lowerPage.indexOf(">", pos);
-    
-    // Boundary check: ensure the search name is actually inside THIS input tag
-    if (tagStart < 0 || tagEnd < 0 || pos < tagStart || pos > tagEnd) return "";
-
-    String inputTag = page.substring(tagStart, tagEnd + 1);
-    
-    // Within this specific, isolated tag, find value="..."
-    // Use tag-aware extraction to ensure we don't bleed into next element
-    String val = extractBetween(inputTag, "value=\"", "\"");
-    
-    // Security check: Tokens shouldn't be empty or absurdly long
-    if (val.length() == 0 || val.length() > 256) return "";
-    
-    return val;
+    int pos = 0;
+    int tagStart, tagEnd;
+    while (HtmlUtils::findTag(page, "input", tagStart, tagEnd, pos)) {
+        String tag = page.substring(tagStart, tagEnd + 1);
+        if (HtmlUtils::getAttribute(tag, "name") == fieldName) {
+            String val = HtmlUtils::getAttribute(tag, "value");
+            // Security check: Tokens shouldn't be absurdly long
+            if (val.length() > 256) return "";
+            return val;
+        }
+        pos = tagEnd + 1;
+    }
+    return "";
 }
 
 /// Extract the CSRF token from a LuCI HTML page.
@@ -195,15 +183,21 @@ bool smsGatewayLogin()
             buffer[bufPos++] = (char)c;
             buffer[bufPos] = '\0';
             
-            // Search for tokens in isolated input tags
-            // We search for tokens in the sliding window. 
-            // Clearing bufPos on every '>' is too aggressive if tokens cross boundaries.
-            // Instead, we just let the overlapping window handle it.
-            if (_csrf == "" && strcasestr(buffer, "name=\"_csrf\"")) _csrf = extractBetween(buffer, "value=\"", "\"");
-            if (salt == "" && strcasestr(buffer, "name=\"salt\""))  salt  = extractBetween(buffer, "value=\"", "\"");
-            if (token == "" && strcasestr(buffer, "name=\"token\"")) token = extractBetween(buffer, "value=\"", "\"");
-            if (zonename == "" && strcasestr(buffer, "name=\"zonename\"")) zonename = extractBetween(buffer, "value=\"", "\"");
-            if (timeclock == "" && strcasestr(buffer, "name=\"timeclock\"")) timeclock = extractBetween(buffer, "value=\"", "\"");
+            if (c == '>') {
+                // Buffer likely contains a full tag (or at least the end of it)
+                int tStart, tEnd;
+                if (HtmlUtils::findTag(buffer, "input", tStart, tEnd)) {
+                    String tagStr = String(buffer).substring(tStart, tEnd + 1);
+                    String name = HtmlUtils::getAttribute(tagStr, "name");
+                    String value = HtmlUtils::getAttribute(tagStr, "value");
+                    
+                    if (name == "_csrf") _csrf = value;
+                    else if (name == "salt") salt = value;
+                    else if (name == "token") token = value;
+                    else if (name == "zonename") zonename = value;
+                    else if (name == "timeclock") timeclock = value;
+                }
+            }
 
             // HARDENING: Prevent heap detonation by malformed/maliciously large tags
             if (_csrf.length() > 256) _csrf = "";
@@ -351,20 +345,10 @@ bool smsGatewayLogin()
         String body = http3.getString();
         Serial.printf("[SMS] SMS page size: %d bytes\n", body.length());
 
-        // Try extracting "token" field first, then "_csrf"
-        csrfToken = extractCsrfToken(body);
+        // Use robust field extraction
+        csrfToken = extractHiddenField(body, "token");
         if (csrfToken.length() == 0) {
-            // Try _csrf field instead
-            String searchName = "name=\"_csrf\"";
-            int pos = body.indexOf(searchName);
-            if (pos >= 0) {
-                int inputStart = body.lastIndexOf("<input", pos);
-                int inputEnd = body.indexOf(">", pos);
-                if (inputStart >= 0 && inputEnd >= 0) {
-                    String inputTag = body.substring(inputStart, inputEnd + 1);
-                    csrfToken = extractBetween(inputTag, "value=\"", "\"");
-                }
-            }
+            csrfToken = extractHiddenField(body, "_csrf");
         }
 
         if (csrfToken.length() > 0) {
