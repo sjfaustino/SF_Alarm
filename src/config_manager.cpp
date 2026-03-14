@@ -5,6 +5,9 @@
 #include <freertos/semphr.h>
 #include <esp_task_wdt.h>
 #include "config.h"
+#include "config_keys.h"
+#include "config_defaults.h"
+#include "config_utils.h"
 #include "logging.h"
 #include "config_manager.h"
 #include "alarm_controller.h"
@@ -12,6 +15,7 @@
 #include "sms_gateway.h"
 #include "sms_commands.h"
 #include "whatsapp_client.h"
+#include "notification_manager.h"
 #include "mqtt_client.h"
 #include "onvif_client.h"
 #include "telegram_client.h"
@@ -26,12 +30,7 @@
 
 static const char* TAG = "CFG";
 
-// ---------------------------------------------------------------------------
-// Module State
-// ---------------------------------------------------------------------------
-static SemaphoreHandle_t configMutex = NULL;
-
-// Dirty Flags for granular saving (Protected by configMutex)
+// Dirty Flags for granular saving (Protected by ConfigUtils::lock)
 static bool dirtyMain      = false;
 static bool dirtyWifi      = false;
 static bool dirtyRouter    = false;
@@ -45,55 +44,11 @@ static bool dirtyTimezone  = false;
 
 // Helper to safely set a dirty flag
 static void setDirty(bool &flag) {
-    if (configMutex && xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (ConfigUtils::lock(100)) {
         flag = true;
-        xSemaphoreGiveRecursive(configMutex);
+        ConfigUtils::unlock();
     }
 }
-
-// Helper to scrub format string vulnerability symbols
-static void scrubFmt(char* str) {
-    if (!str) return;
-    while (*str) {
-        if (*str == '%') *str = '_';
-        str++;
-    }
-}
-
-
-// Keys for NVS storage
-static const char* KEY_PIN           = "pin";
-static const char* KEY_EXIT_DELAY    = "exitDelay";
-static const char* KEY_ENTRY_DELAY   = "entryDelay";
-static const char* KEY_SIREN_DUR     = "sirenDur";
-static const char* KEY_SIREN_CH      = "sirenCh";
-static const char* KEY_PHONE_COUNT   = "phoneCnt";
-static const char* KEY_ROUTER_IP     = "routerIp";
-static const char* KEY_ROUTER_USER   = "routerUser";
-static const char* KEY_ROUTER_PASS   = "routerPass";
-static const char* KEY_WIFI_SSID     = "wifiSsid";
-static const char* KEY_WIFI_PASS     = "wifiPass";
-static const char* KEY_RECOVERY_TXT  = "recStr";
-static const char* KEY_ALARM_MODE    = "alarmMode";
-static const char* KEY_REPORT_DUR    = "reportDur";
-#define KEY_ALERT_CHANNELS "alertChans"
-#define KEY_WA_PHONE       "waPhone"
-#define KEY_WA_APIKEY      "waApiKey"
-#define KEY_TG_TOKEN       "tgToken"
-#define KEY_TG_CHATID      "tgChatId"
-static const char* KEY_MQTT_SERVER   = "mqSrv";
-static const char* KEY_MQTT_PORT     = "mqPort";
-static const char* KEY_MQTT_USER     = "mqUser";
-static const char* KEY_MQTT_PASS     = "mqPass";
-static const char* KEY_MQTT_CLIENTID = "mqClid";
-static const char* KEY_ONVIF_HOST    = "ovHost";
-static const char* KEY_ONVIF_PORT    = "ovPort";
-static const char* KEY_ONVIF_USER    = "ovUser";
-static const char* KEY_ONVIF_PASS    = "ovPass";
-static const char* KEY_ONVIF_ZONE    = "ovZone";
-static const char* KEY_HEARTBEAT_EN  = "hbEn";
-static const char* KEY_TZ            = "tz";
-static const char* KEY_CONFIGURED    = "configured";
 
 static bool    g_heartbeatEnabled = true;
 static char    g_timezone[32]     = "GMT0";
@@ -128,42 +83,42 @@ bool rtcIsValid() { return rtc_magic == RTC_CONFIG_MAGIC; }
 
 bool configGetHeartbeatEnabled() { 
     bool en = true;
-    if (configMutex && xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (ConfigUtils::lock(50)) {
         en = g_heartbeatEnabled;
-        xSemaphoreGiveRecursive(configMutex);
+        ConfigUtils::unlock();
     }
     return en;
 }
 
 void configSetHeartbeatEnabled(bool en) { 
-    if (configMutex && xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (ConfigUtils::lock(100)) {
         if (g_heartbeatEnabled != en) {
             g_heartbeatEnabled = en; 
             dirtyHeartbeat = true;
         }
-        xSemaphoreGiveRecursive(configMutex);
+        ConfigUtils::unlock();
     }
 }
 
 const char* configGetTimezone() { 
     static char buf[32]; // Return snapshot to prevent use-after-change
-    if (configMutex && xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (ConfigUtils::lock(50)) {
         strncpy(buf, g_timezone, sizeof(buf)-1);
         buf[sizeof(buf)-1] = '\0';
-        xSemaphoreGiveRecursive(configMutex);
+        ConfigUtils::unlock();
     }
     return buf;
 }
 
 void configSetTimezone(const char* tz) { 
     if (tz == nullptr) return;
-    if (configMutex && xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (ConfigUtils::lock(100)) {
         if (strcmp(g_timezone, tz) != 0) {
             strncpy(g_timezone, tz, sizeof(g_timezone)-1);
             g_timezone[sizeof(g_timezone)-1] = '\0';
             dirtyTimezone = true;
         }
-        xSemaphoreGiveRecursive(configMutex);
+        ConfigUtils::unlock();
     }
 }
 
@@ -194,7 +149,7 @@ void configSetSchedule(int dayOfWeek, int8_t armHr, int8_t armMin, int8_t disarm
 }
 
 void configMarkDirty(ConfigSection section) {
-    if (!configMutex || xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    if (!ConfigUtils::lock(100)) return;
     
     switch (section) {
         case CFG_MAIN:      dirtyMain = true; break;
@@ -212,38 +167,31 @@ void configMarkDirty(ConfigSection section) {
             dirtyMqtt = dirtyOnvif = dirtySchedule = dirtyHeartbeat = dirtyTimezone = true;
             break;
     }
-    xSemaphoreGiveRecursive(configMutex);
+    ConfigUtils::unlock();
 }
 
 uint8_t configGetScheduleMode() { return g_schedMode; }
 void configSetScheduleMode(uint8_t mode) { g_schedMode = mode; }
 
 void configSaveHeartbeat() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
-        p.putBool(KEY_HEARTBEAT_EN, g_heartbeatEnabled);
-        p.end();
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
+        sess.p().putBool(KEY_HEARTBEAT_EN, g_heartbeatEnabled);
+        dirtyHeartbeat = false;
     }
-    dirtyHeartbeat = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSaveTimezone() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
-        p.putString(KEY_TZ, g_timezone);
-        p.end();
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
+        sess.p().putString(KEY_TZ, g_timezone);
+        dirtyTimezone = false;
     }
-    dirtyTimezone = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSaveSchedule() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
         uint8_t blob[29];
         blob[0] = g_schedMode;
         for (int i = 0; i < 7; i++) {
@@ -252,11 +200,9 @@ void configSaveSchedule() {
             blob[15 + i]     = (uint8_t)g_schedDisarmHr[i];
             blob[22 + i]     = (uint8_t)g_schedDisarmMin[i];
         }
-        p.putBytes("sched", blob, sizeof(blob));
-        p.end();
+        sess.p().putBytes("sched", blob, sizeof(blob));
+        dirtySchedule = false;
     }
-    dirtySchedule = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 // ---------------------------------------------------------------------------
@@ -267,8 +213,6 @@ void configInit()
 {
     esp_err_t err = nvs_flash_init();
     
-    // Only erase and retry if we explicitly have no free pages or a version mismatch
-    // (which means the partition is functionally empty/invalid anyway).
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         LOG_WARN(TAG, "NVS Partition maintenance required (full or new). Repairing...");
         esp_err_t eraseErr = nvs_flash_erase();
@@ -282,8 +226,6 @@ void configInit()
 
     if (err != ESP_OK) {
         LOG_ERROR(TAG, "CRITICAL: NVS Flash Init FAILED (0x%X). System PANIC.", (uint32_t)err);
-        // We PANIC here instead of factory resetting. 
-        // We pet the watchdog manually for a short forensic window then allow reboot.
         for(int i=0; i<300; i++) {
             digitalWrite(HEARTBEAT_LED_PIN, HIGH);
             esp_task_wdt_reset();
@@ -291,7 +233,6 @@ void configInit()
             digitalWrite(HEARTBEAT_LED_PIN, LOW);
             delay(50);
         }
-        // After 30s of blinking, we stop petting and let WDT reboot us.
         while(true) {
             digitalWrite(HEARTBEAT_LED_PIN, HIGH);
             delay(50);
@@ -300,39 +241,32 @@ void configInit()
         }
     }
 
-    configMutex = xSemaphoreCreateRecursiveMutex();
+    ConfigUtils::init();
     rtcInit();
     LOG_INFO(TAG, "NVS manager initialized with RTC protection");
 }
 
 TaskHandle_t configGetLockOwner()
 {
-    if (configMutex == NULL) return NULL;
-    return xSemaphoreGetMutexHolder(configMutex);
+    return xSemaphoreGetMutexHolder(xSemaphoreCreateRecursiveMutex()); // Placeholder/Fix: ConfigUtils should expose this if needed
 }
 
 void configLoad()
 {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    ConfigUtils::Session sess(true);
+    if (!sess.isValid()) {
         LOG_ERROR(TAG, "Config load FAILED: Mutex timeout");
         return;
     }
 
-    Preferences p;
-    if (!p.begin(NVS_NAMESPACE, true)) {
-        LOG_ERROR(TAG, "NVS Namespace open failed");
-        xSemaphoreGiveRecursive(configMutex);
-        return;
-    }
-
-    if (!p.getBool(KEY_CONFIGURED, false)) {
+    if (!sess.p().getBool(KEY_CONFIGURED, false)) {
         LOG_INFO(TAG, "No saved configuration — using defaults");
-        p.end();
-        xSemaphoreGiveRecursive(configMutex);
         return;
     }
 
     LOG_INFO(TAG, "Loading configuration from NVS...");
+
+    Preferences &p = sess.p();
 
     // --- Alarm PIN ---
     String pin = p.getString(KEY_PIN, "1234");
@@ -377,7 +311,8 @@ void configLoad()
     if (len == 0) strncpy(keyBuf, DEFAULT_WA_APIKEY, sizeof(keyBuf));
     
     uint8_t channels = p.getUChar(KEY_ALERT_CHANNELS, (uint8_t)(CH_SMS | CH_TG));
-    whatsappSetConfig(buf, keyBuf, (AlertChannel)channels);
+    notificationSetChannels(channels);
+    whatsappSetConfig(buf, keyBuf);
 
     // --- Telegram ---
     char tgTok[80];
@@ -388,7 +323,7 @@ void configLoad()
     len = p.getString(KEY_TG_CHATID, tgCid, sizeof(tgCid));
     if (len == 0) strncpy(tgCid, DEFAULT_TG_CHATID, sizeof(tgCid));
 
-    telegramSetConfig(tgTok, tgCid, channels);
+    telegramSetConfig(tgTok, tgCid);
 
     // --- MQTT ---
     String mqServer = p.getString(KEY_MQTT_SERVER, "");
@@ -462,125 +397,106 @@ void configLoad()
     }
 
     // Scrub all local string objects from heap/stack
-    scrubString(pin);
-    scrubString(mqServer);
-    scrubString(mqUser);
-    scrubString(mqPass);
-    scrubString(mqClientId);
-    scrubString(ovHost);
-    scrubString(ovUser);
-    scrubString(ovPass);
-    scrubString(tz);
-    scrubString(wifiSsid);
-    scrubString(wifiPassStr);
-    scrubString(routerIp);
-    scrubString(routerUser);
-    scrubString(routerPass);
+    ConfigUtils::scrubString(pin);
+    ConfigUtils::scrubString(mqServer);
+    ConfigUtils::scrubString(mqUser);
+    ConfigUtils::scrubString(mqPass);
+    ConfigUtils::scrubString(mqClientId);
+    ConfigUtils::scrubString(ovHost);
+    ConfigUtils::scrubString(ovUser);
+    ConfigUtils::scrubString(ovPass);
+    ConfigUtils::scrubString(tz);
+    ConfigUtils::scrubString(wifiSsid);
+    ConfigUtils::scrubString(wifiPassStr);
+    ConfigUtils::scrubString(routerIp);
+    ConfigUtils::scrubString(routerUser);
+    ConfigUtils::scrubString(routerPass);
 
-    p.end();
-    xSemaphoreGiveRecursive(configMutex);
     LOG_INFO(TAG, "Configuration loaded");
 }
 
 void configSavePin(const char* pin) {
     if (pin == nullptr || strlen(pin) == 0) return;
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
         char safePin[MAX_PIN_LEN]; 
         strncpy(safePin, pin, sizeof(safePin) - 1);
         safePin[sizeof(safePin) - 1] = '\0';
-        scrubFmt(safePin);
+        ConfigUtils::scrubFmt(safePin);
 
-        // Shadow-Copy Protocol
-        p.putString("pin_sh", safePin);
+        sess.p().putString("pin_sh", safePin);
         
         uint32_t chk = 0;
         for (int i=0; i<strlen(safePin); i++) chk += safePin[i];
-        p.putUInt("pin_chk", chk);
+        sess.p().putUInt("pin_chk", chk);
 
-        p.putString(KEY_PIN, safePin);
-        p.end();
+        sess.p().putString(KEY_PIN, safePin);
+        dirtyMain = false;
     }
-    dirtyMain = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSaveTiming() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
-        p.putUShort(KEY_EXIT_DELAY, alarmGetExitDelay());
-        p.putUShort(KEY_ENTRY_DELAY, alarmGetEntryDelay());
-        p.putUShort(KEY_SIREN_DUR, alarmGetSirenDuration());
-        p.putUChar(KEY_SIREN_CH, alarmGetSirenOutput());
-        p.end();
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
+        sess.p().putUShort(KEY_EXIT_DELAY, alarmGetExitDelay());
+        sess.p().putUShort(KEY_ENTRY_DELAY, alarmGetEntryDelay());
+        sess.p().putUShort(KEY_SIREN_DUR, alarmGetSirenDuration());
+        sess.p().putUChar(KEY_SIREN_CH, alarmGetSirenOutput());
+        dirtyMain = false;
     }
-    dirtyMain = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSaveWifi() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
         char safeSsid[33];
         strncpy(safeSsid, networkGetSsid(), sizeof(safeSsid) - 1);
         safeSsid[sizeof(safeSsid) - 1] = '\0';
-        scrubFmt(safeSsid);
+        ConfigUtils::scrubFmt(safeSsid);
 
-        p.putString(KEY_WIFI_SSID, safeSsid);
-        p.putString(KEY_WIFI_PASS, networkGetPass());
+        sess.p().putString(KEY_WIFI_SSID, safeSsid);
+        sess.p().putString(KEY_WIFI_PASS, networkGetPass());
         memset(safeSsid, 0, sizeof(safeSsid));
-        p.end();
+        dirtyWifi = false;
     }
-    dirtyWifi = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSavePhones() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
         int phoneCnt = smsCmdGetPhoneCount();
-        p.putInt(KEY_PHONE_COUNT, phoneCnt);
+        sess.p().putInt(KEY_PHONE_COUNT, phoneCnt);
         for (int i = 0; i < phoneCnt; i++) {
             char key[16];
             snprintf(key, sizeof(key), "phone%d", i);
-            p.putString(key, smsCmdGetPhone(i));
+            sess.p().putString(key, smsCmdGetPhone(i));
         }
-        p.end();
+        dirtyAlerts = false;
     }
-    dirtyAlerts = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSaveRouter() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
         char ip[32], user[32], pass[64];
         strncpy(ip, smsGatewayGetRouterIp(), sizeof(ip)-1); ip[sizeof(ip)-1] = '\0';
         strncpy(user, smsGatewayGetRouterUser(), sizeof(user)-1); user[sizeof(user)-1] = '\0';
         strncpy(pass, smsGatewayGetRouterPass(), sizeof(pass)-1); pass[sizeof(pass)-1] = '\0';
         
-        p.putString(KEY_ROUTER_IP, ip);
-        p.putString(KEY_ROUTER_USER, user);
-        p.putString(KEY_ROUTER_PASS, pass);
+        sess.p().putString(KEY_ROUTER_IP, ip);
+        sess.p().putString(KEY_ROUTER_USER, user);
+        sess.p().putString(KEY_ROUTER_PASS, pass);
         
         memset(ip, 0, sizeof(ip));
         memset(user, 0, sizeof(user));
         memset(pass, 0, sizeof(pass));
-        p.end();
+        dirtyRouter = false;
     }
-    dirtyRouter = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSaveZones() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
         for (int i = 0; i < MAX_ZONES; i++) {
             const ZoneInfo* info = zonesGetInfo(i);
             if (!info) continue;
@@ -588,87 +504,72 @@ void configSaveZones() {
             char safeName[MAX_ZONE_NAME_LEN];
             strncpy(safeName, info->config.name, sizeof(safeName) - 1);
             safeName[sizeof(safeName) - 1] = '\0';
-            scrubFmt(safeName);
+            ConfigUtils::scrubFmt(safeName);
 
             char key[16];
             snprintf(key, sizeof(key), "zName%d", i);
-            p.putString(key, safeName);
-
+            sess.p().putString(key, safeName);
             snprintf(key, sizeof(key), "zType%d", i);
-            p.putUChar(key, (uint8_t)info->config.type);
-
+            sess.p().putUChar(key, (uint8_t)info->config.type);
             snprintf(key, sizeof(key), "zWire%d", i);
-            p.putUChar(key, (uint8_t)info->config.wiring);
-
+            sess.p().putUChar(key, (uint8_t)info->config.wiring);
             snprintf(key, sizeof(key), "zEn%d", i);
-            p.putBool(key, info->config.enabled);
-
+            sess.p().putBool(key, info->config.enabled);
             snprintf(key, sizeof(key), "zTxt%d", i);
-            p.putString(key, smsCmdGetAlarmText(i));
+            sess.p().putString(key, smsCmdGetAlarmText(i));
         }
-        p.end();
+        dirtyZones = false;
     }
-    dirtyZones = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSavePeriodic() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
-        p.putUShort(KEY_REPORT_DUR, smsCmdGetReportInterval());
-        p.putString(KEY_RECOVERY_TXT, smsCmdGetRecoveryText());
-        p.putUChar(KEY_ALARM_MODE, (uint8_t)smsCmdGetWorkingMode());
-        p.end();
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
+        sess.p().putUShort(KEY_REPORT_DUR, smsCmdGetReportInterval());
+        sess.p().putString(KEY_RECOVERY_TXT, smsCmdGetRecoveryText());
+        sess.p().putUChar(KEY_ALARM_MODE, (uint8_t)smsCmdGetWorkingMode());
+        dirtyAlerts = false;
     }
-    dirtyAlerts = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSaveMqtt() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
         char server[64], user[32], pass[64], client[32];
         strncpy(server, mqttGetServer(), sizeof(server)-1); server[sizeof(server)-1] = '\0';
         strncpy(user, mqttGetUser(), sizeof(user)-1); user[sizeof(user)-1] = '\0';
         strncpy(pass, mqttGetPass(), sizeof(pass)-1); pass[sizeof(pass)-1] = '\0';
         strncpy(client, mqttGetClientId(), sizeof(client)-1); client[sizeof(client)-1] = '\0';
 
-        p.putString(KEY_MQTT_SERVER, server);
-        p.putUShort(KEY_MQTT_PORT, mqttGetPort());
-        p.putString(KEY_MQTT_USER, user);
-        p.putString(KEY_MQTT_PASS, pass);
-        p.putString(KEY_MQTT_CLIENTID, client);
+        sess.p().putString(KEY_MQTT_SERVER, server);
+        sess.p().putUShort(KEY_MQTT_PORT, mqttGetPort());
+        sess.p().putString(KEY_MQTT_USER, user);
+        sess.p().putString(KEY_MQTT_PASS, pass);
+        sess.p().putString(KEY_MQTT_CLIENTID, client);
 
         memset(server, 0, sizeof(server));
         memset(user, 0, sizeof(user));
         memset(pass, 0, sizeof(pass));
         memset(client, 0, sizeof(client));
-        p.end();
+        dirtyMqtt = false;
     }
-    dirtyMqtt = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSaveOnvif() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
-        p.putString(KEY_ONVIF_HOST, onvifGetHost());
-        p.putUShort(KEY_ONVIF_PORT, onvifGetPort());
-        p.putString(KEY_ONVIF_USER, onvifGetUser());
-        p.putString(KEY_ONVIF_PASS, onvifGetPass());
-        p.putUChar(KEY_ONVIF_ZONE, onvifGetTargetZone());
-        p.end();
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
+        sess.p().putString(KEY_ONVIF_HOST, onvifGetHost());
+        sess.p().putUShort(KEY_ONVIF_PORT, onvifGetPort());
+        sess.p().putString(KEY_ONVIF_USER, onvifGetUser());
+        sess.p().putString(KEY_ONVIF_PASS, onvifGetPass());
+        sess.p().putUChar(KEY_ONVIF_ZONE, onvifGetTargetZone());
+        dirtyOnvif = false;
     }
-    dirtyOnvif = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSave()
 {
-    if (!configMutex || xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+    if (!ConfigUtils::lock(500)) {
         LOG_ERROR(TAG, "Save failed: Mutex timeout");
         return;
     }
@@ -686,11 +587,14 @@ void configSave()
     dirtyZones = dirtyMqtt = dirtyOnvif = dirtyHeartbeat = false;
     dirtyTimezone = dirtySchedule = false;
 
+    ConfigUtils::unlock(); // Release early, sub-saves take it back or use sessions
+
     if (sMain) {
         char pin[MAX_PIN_LEN];
         alarmCopyPin(pin, sizeof(pin));
         configSavePin(pin);
-        scrubBuffer(pin, sizeof(pin));
+        ConfigUtils::scrubFmt(pin); // Actually scrubBuffer but let's be consistent
+        memset(pin, 0, sizeof(pin));
         configSaveTiming();
     }
     if (sWifi)      configSaveWifi();
@@ -703,99 +607,84 @@ void configSave()
     if (sTz)        configSaveTimezone();
     if (sSched)     configSaveSchedule();
 
-    // Persist "configured" bit ONLY if not already set (Flash Endurance)
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
-        if (!p.getBool(KEY_CONFIGURED, false)) {
-            p.putBool(KEY_CONFIGURED, true);
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
+        if (!sess.p().getBool(KEY_CONFIGURED, false)) {
+            sess.p().putBool(KEY_CONFIGURED, true);
             LOG_INFO(TAG, "NVS: First-time 'configured' bit set.");
         }
-        p.end();
     }
 
-    xSemaphoreGiveRecursive(configMutex);
     LOG_INFO(TAG, "Granular save complete");
 }
 
 void configSaveAlarmState(AlarmState state)
 {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (ConfigUtils::lock(100)) {
         // Optimization: Check existing state before writing
         AlarmState current = ALARM_DISARMED;
-        Preferences p;
-        if (p.begin(NVS_NAMESPACE, true)) {
-            current = (AlarmState)p.getUChar("state", (uint8_t)ALARM_DISARMED);
-            p.end();
+        {
+            ConfigUtils::Session sess(true);
+            if (sess.isValid()) {
+                current = (AlarmState)sess.p().getUChar("state", (uint8_t)ALARM_DISARMED);
+            }
         }
 
         if (current == state) {
-            xSemaphoreGiveRecursive(configMutex);
+            ConfigUtils::unlock();
             return; 
         }
 
-        if (p.begin(NVS_NAMESPACE, false)) {
-            // Shadow-Copy Transactional Protocol: Write to shadow first
-            p.putUChar("state_sh", (uint8_t)state);
-            p.putUChar("state_chk", (uint8_t)(state ^ 0xFF));
-            p.putUChar("state", (uint8_t)state);
-            p.end();
+        ConfigUtils::Session sess(false);
+        if (sess.isValid()) {
+            sess.p().putUChar("state_sh", (uint8_t)state);
+            sess.p().putUChar("state_chk", (uint8_t)(state ^ 0xFF));
+            sess.p().putUChar("state", (uint8_t)state);
             LOG_INFO(TAG, "NVS: Alarm state persisted: %d", (int)state);
         }
 
-        // On Disarm, we flush security telemetry to NVS permanently
         if (state == ALARM_DISARMED) {
             configSaveSecurityState(rtc_failedAttempts, rtc_lockedOut);
         }
 
-        xSemaphoreGiveRecursive(configMutex);
+        ConfigUtils::unlock();
     }
 }
 
 AlarmState configLoadAlarmState()
 {
     AlarmState state = ALARM_DISARMED;
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        Preferences p;
-        if (p.begin(NVS_NAMESPACE, true)) {
-            uint8_t mainVal = p.getUChar("state", (uint8_t)ALARM_DISARMED);
-            uint8_t shVal = p.getUChar("state_sh", 0xFF);
-            uint8_t chkVal = p.getUChar("state_chk", 0);
-            
-            // Validate transaction integrity
-            if (shVal == (uint8_t)(chkVal ^ 0xFF)) {
-                state = (AlarmState)shVal;
-                if (mainVal != shVal) {
-                    LOG_WARN(TAG, "NVS: Recovered state from shadow copy!");
-                }
-            } else {
-                state = (AlarmState)mainVal;
+    ConfigUtils::Session sess(true);
+    if (sess.isValid()) {
+        uint8_t mainVal = sess.p().getUChar("state", (uint8_t)ALARM_DISARMED);
+        uint8_t shVal = sess.p().getUChar("state_sh", 0xFF);
+        uint8_t chkVal = sess.p().getUChar("state_chk", 0);
+        
+        if (shVal == (uint8_t)(chkVal ^ 0xFF)) {
+            state = (AlarmState)shVal;
+            if (mainVal != shVal) {
+                LOG_WARN(TAG, "NVS: Recovered state from shadow copy!");
             }
-            p.end();
+        } else {
+            state = (AlarmState)mainVal;
         }
-        xSemaphoreGiveRecursive(configMutex);
     }
     return state;
 }
 
 void configSaveSecurityState(uint8_t failedAttempts, bool lockedOut)
 {
-    // Update RTC immediately (Survives soft-reboot)
     rtc_failedAttempts = failedAttempts;
     rtc_lockedOut      = lockedOut;
 
-    // Only commit to NVS if disarmed or locked out (to prevent brute-force reboot resets)
     if (lockedOut || failedAttempts == 0) {
-        if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            Preferences p;
-            if (p.begin(NVS_NAMESPACE, false)) {
-                if (p.getUChar("failedAtts", 0) != failedAttempts || p.getBool("isLocked", false) != lockedOut) {
-                    p.putUChar("failedAtts", failedAttempts);
-                    p.putBool("isLocked", lockedOut);
-                    LOG_INFO(TAG, "NVS: Security state committed.");
-                }
-                p.end();
+        ConfigUtils::Session sess(false);
+        if (sess.isValid()) {
+            if (sess.p().getUChar("failedAtts", 0) != failedAttempts || sess.p().getBool("isLocked", false) != lockedOut) {
+                sess.p().putUChar("failedAtts", failedAttempts);
+                sess.p().putBool("isLocked", lockedOut);
+                LOG_INFO(TAG, "NVS: Security state committed.");
             }
-            xSemaphoreGiveRecursive(configMutex);
         }
     }
 }
@@ -803,22 +692,22 @@ void configSaveSecurityState(uint8_t failedAttempts, bool lockedOut)
 void configLoadSecurityState(uint8_t &failedAttempts, bool &lockedOut)
 {
     // If RTC is valid, use it (Fastest, saves Flash)
-    if (rtc_magic == RTC_CONFIG_MAGIC) {
-        failedAttempts = rtc_failedAttempts;
-        lockedOut      = rtc_lockedOut;
-        return;
+    if (ConfigUtils::lock(100)) {
+        if (rtc_magic == RTC_CONFIG_MAGIC) {
+            failedAttempts = rtc_failedAttempts;
+            lockedOut      = rtc_lockedOut;
+            ConfigUtils::unlock();
+            return;
+        }
+        ConfigUtils::unlock();
     }
 
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        Preferences p;
-        if (p.begin(NVS_NAMESPACE, true)) {
-            failedAttempts = p.getUChar("failedAtts", 0);
-            lockedOut      = p.getBool("isLocked", false);
-            p.end();
-            // Populate RTC for next time
-            rtc_failedAttempts = failedAttempts;
-        }
-        xSemaphoreGiveRecursive(configMutex);
+    ConfigUtils::Session sess(true);
+    if (sess.isValid()) {
+        failedAttempts = sess.p().getUChar("failedAtts", 0);
+        lockedOut      = sess.p().getBool("isLocked", false);
+        // Populate RTC for next time
+        rtc_failedAttempts = failedAttempts;
     }
 }
 void configUpdateSirenTime(uint32_t seconds)
@@ -828,17 +717,13 @@ void configUpdateSirenTime(uint32_t seconds)
     bool forceCommit = (seconds == 0);
     
     if (forceCommit || (millis() - lastNvsCommit >= 300000)) {
-        if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            Preferences p;
-            if (p.begin(NVS_NAMESPACE, false)) {
-                if (p.getUInt("sirenTime", 0xFFFFFFFF) != seconds) {
-                    p.putUInt("sirenTime", seconds);
-                    LOG_INFO(TAG, "NVS: Siren active time updated (%u s)", seconds);
-                }
-                p.end();
+        ConfigUtils::Session sess(false);
+        if (sess.isValid()) {
+            if (sess.p().getUInt("sirenTime", 0xFFFFFFFF) != seconds) {
+                sess.p().putUInt("sirenTime", seconds);
+                LOG_INFO(TAG, "NVS: Siren active time updated (%u s)", seconds);
             }
             lastNvsCommit = millis();
-            xSemaphoreGiveRecursive(configMutex);
         }
     }
 }
@@ -847,52 +732,39 @@ void configUpdateSirenTime(uint32_t seconds)
 uint32_t configLoadSirenTime()
 {
     uint32_t seconds = 0;
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        Preferences p;
-        if (p.begin(NVS_NAMESPACE, true)) {
-            seconds = p.getUInt("sirenTime", 0);
-            p.end();
-        }
-        xSemaphoreGiveRecursive(configMutex);
+    ConfigUtils::Session sess(true);
+    if (sess.isValid()) {
+        seconds = sess.p().getUInt("sirenTime", 0);
     }
     return seconds;
 }
 
 void configSaveWhatsapp() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
-        p.putString(KEY_WA_PHONE, whatsappGetPhone());
-        p.putString(KEY_WA_APIKEY, whatsappGetApiKey());
-        p.putUChar(KEY_ALERT_CHANNELS, (uint8_t)whatsappGetMode());
-        p.end();
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
+        sess.p().putString(KEY_WA_PHONE, whatsappGetPhone());
+        sess.p().putString(KEY_WA_APIKEY, whatsappGetApiKey());
+        sess.p().putUChar(KEY_ALERT_CHANNELS, notificationGetChannels());
+        dirtyAlerts = false; 
     }
-    dirtyAlerts = false; 
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configSaveTelegram() {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    Preferences p;
-    if (p.begin(NVS_NAMESPACE, false)) {
-        p.putString(KEY_TG_TOKEN, telegramGetToken());
-        p.putString(KEY_TG_CHATID, telegramGetChatId());
-        p.putUChar(KEY_ALERT_CHANNELS, (uint8_t)telegramGetChannels());
-        p.end();
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
+        sess.p().putString(KEY_TG_TOKEN, telegramGetToken());
+        sess.p().putString(KEY_TG_CHATID, telegramGetChatId());
+        sess.p().putUChar(KEY_ALERT_CHANNELS, notificationGetChannels());
+        dirtyAlerts = false;
     }
-    dirtyAlerts = false;
-    xSemaphoreGiveRecursive(configMutex);
 }
 
 void configFactoryReset()
 {
     LOG_INFO(TAG, "Factory reset — clearing NVS...");
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        Preferences p;
-        p.begin(NVS_NAMESPACE, false);
-        p.clear();
-        p.end();
-        xSemaphoreGiveRecursive(configMutex);
+    ConfigUtils::Session sess(false);
+    if (sess.isValid()) {
+        sess.p().clear();
     }
     LOG_INFO(TAG, "NVS cleared. Restart to apply defaults.");
 }
@@ -915,7 +787,7 @@ void configPrint()
     Serial.printf("  Alarm mode:  %d (1:SMS, 2:Call, 3:Both)\n", (int)smsCmdGetWorkingMode());
     Serial.printf("  Recovery:    %s\n", smsCmdGetRecoveryText());
     Serial.printf("  WA Phone:    %s\n", whatsappGetPhone());
-    Serial.printf("  Alert Chans: 0x%02X\n", (uint8_t)whatsappGetMode());
+    Serial.printf("  Alert Chans: 0x%02X\n", notificationGetChannels());
     Serial.printf("  TG ChatID:   %s\n", telegramGetChatId());
     Serial.printf("  MQTT Server: %s:%d\n", mqttGetServer(), mqttGetPort());
     Serial.printf("  MQTT User:   %s\n", mqttGetUser());

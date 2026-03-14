@@ -58,6 +58,7 @@
 
 /// Initialize the SMS command processor.
 void smsCmdInit();
+bool smsCmdSendWrapper(const char* message);
 
 /// Main update loop for periodic reports. Call from background task.
 void smsCmdUpdate();

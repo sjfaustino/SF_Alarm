@@ -8,6 +8,7 @@ static const char* TAG = "SMSC";
 #include "mqtt_client.h"
 #include <ArduinoJson.h>
 #include "alarm_controller.h"
+#include "notification_manager.h"
 #include "alarm_zones.h"
 #include "config.h"
 #include <string.h>
@@ -492,8 +493,7 @@ static bool parseAlertChannel(const char* body, const char* sender)
     int m = body[3] - '0';
     if (m < 0 || m > 15) return false; // Extended for future bits
 
-    whatsappSetConfig(whatsappGetPhone(), whatsappGetApiKey(), (AlertChannel)m);
-    telegramSetConfig(telegramGetToken(), telegramGetChatId(), (uint8_t)m);
+    notificationSetChannels((uint8_t)m);
 
     char reply[120];
     snprintf(reply, sizeof(reply), "SF_Alarm: Alert bitmask set to 0x%02X (SMS:%s, WA:%s, TG:%s)", 
@@ -535,7 +535,7 @@ static bool parseSetWhatsApp(const char* body, const char* sender)
     
     if (!tokenize(body, 2, fields, sizes)) return false;
 
-    whatsappSetConfig(phone, key, whatsappGetMode());
+    whatsappSetConfig(phone, key);
     configSaveWhatsapp();
     sendReply(sender, "SF_Alarm: WhatsApp configuration updated");
     return true;
@@ -550,7 +550,7 @@ static bool parseSetTelegram(const char* body, const char* sender)
 
     if (!tokenize(body, 2, fields, sizes)) return false;
 
-    telegramSetConfig(tok, chat, (uint8_t)whatsappGetMode());
+    telegramSetConfig(tok, chat);
     configSaveTelegram();
     sendReply(sender, "SF_Alarm: Telegram configuration updated");
     return true;
@@ -726,6 +726,9 @@ void smsCmdInit()
     if (smsStateMutex == NULL) {
         smsStateMutex = xSemaphoreCreateMutex();
     }
+    
+    notificationRegisterProvider(CH_SMS, "SMS", smsCmdSendWrapper);
+
     xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     phoneCount = 0;
     memset(phoneNumbers, 0, sizeof(phoneNumbers));
@@ -828,6 +831,17 @@ void smsCmdSendAlert(const char* message)
             smsGatewaySend(phoneNumbers[i], message);
         }
     }
+}
+
+bool smsCmdSendWrapper(const char* message) {
+    if (smsCmdGetWorkingMode() == MODE_CALL) {
+        char voiceMsg[180];
+        snprintf(voiceMsg, sizeof(voiceMsg), "[VOICE CALL] %s", message);
+        smsCmdSendAlert(voiceMsg);
+    } else {
+        smsCmdSendAlert(message);
+    }
+    return true; 
 }
 
 const char* smsCmdGetAlarmText(int zoneIndex)

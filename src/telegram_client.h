@@ -1,9 +1,8 @@
 #ifndef SF_ALARM_TELEGRAM_CLIENT_H
 #define SF_ALARM_TELEGRAM_CLIENT_H
 
-#include "whatsapp_client.h"
-
-// AlertChannel bitmask is defined in whatsapp_client.h
+#include <Arduino.h>
+#include "notification_manager.h"
 
 /**
  * @brief Initialize the Telegram client
@@ -20,10 +19,8 @@ void telegramInit();
  */
 bool telegramSend(const char* token, const char* chatId, const char* message);
 
-/**
- * @brief Set the global Telegram configuration
- */
-void telegramSetConfig(const char* token, const char* chatId, uint8_t channels);
+void telegramSetConfig(const char* token, const char* chatId);
+bool telegramSendWrapper(const char* message);
 
 /**
  * @brief Get the Telegram Token
@@ -35,9 +32,6 @@ const char* telegramGetToken();
  */
 const char* telegramGetChatId();
 
-/**
- * @brief Get the Telegram mode
- */
-uint8_t telegramGetChannels();
+// Channels managed by NotificationManager
 
 #endif // SF_ALARM_TELEGRAM_CLIENT_H

@@ -1,9 +1,10 @@
 #include "web_server.h"
-#include "web_ui.h"
+#include <LittleFS.h>
 #include "config.h"
 #include "io_expander.h"
 #include "alarm_zones.h"
 #include "alarm_controller.h"
+#include "notification_manager.h"
 #include "sms_commands.h"
 #include "whatsapp_client.h"
 #include "mqtt_client.h"
@@ -16,6 +17,7 @@
 
 #include <PsychicHttp.h>
 #include <PsychicStreamResponse.h>
+#include <PsychicFileResponse.h>
 
 static const char* TAG = "WEB";
 #include <ArduinoJson.h>
@@ -100,7 +102,11 @@ static const char* zoneTypeStr(ZoneType t)
 // ---------------------------------------------------------------------------
 static esp_err_t handleRoot(PsychicRequest* request, PsychicResponse* response)
 {
-    return response->send(200, "text/html", WEB_UI_HTML);
+    if (!LittleFS.exists("/index.html")) {
+        return response->send(404, "text/plain", "File Not Found: /index.html. Did you upload the data folder?");
+    }
+    PsychicFileResponse* fileResponse = new PsychicFileResponse(response, LittleFS, "/index.html");
+    return fileResponse->send();
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +161,7 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
 
     // --- Alerts/WhatsApp (Safe status only) ---
     JsonObject alerts = doc["alerts"].to<JsonObject>();
-    alerts["mode"] = (int)whatsappGetMode();
+    alerts["mode"] = (int)notificationGetChannels();
 
     // --- MQTT (Safe status only) ---
     JsonObject mqtt = doc["mqtt"].to<JsonObject>();
@@ -197,7 +203,7 @@ static esp_err_t handleApiGetSettings(PsychicRequest* request, PsychicResponse* 
     reply["ok"] = true;
 
     JsonObject alerts = reply["alerts"].to<JsonObject>();
-    alerts["mode"] = (uint8_t)whatsappGetMode();
+    alerts["mode"] = notificationGetChannels();
     alerts["waPhone"] = whatsappGetPhone();
     alerts["waApiKey"] = whatsappGetApiKey();
     alerts["tgToken"] = telegramGetToken();
@@ -248,13 +254,14 @@ static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* resp
     const char* phone = doc["phone"];
     const char* apikey = doc["apikey"];
 
-    whatsappSetConfig(phone, apikey, (AlertChannel)channels);
+    notificationSetChannels(channels);
+    whatsappSetConfig(phone, apikey);
     configSaveWhatsapp();
 
     const char* tgToken = doc["tgToken"] | "";
     const char* tgChatId = doc["tgChatId"] | "";
     
-    telegramSetConfig(tgToken, tgChatId, channels);
+    telegramSetConfig(tgToken, tgChatId);
     configSaveTelegram();
     doc.clear(); // Scavenge
 
@@ -537,6 +544,10 @@ static esp_err_t handleApiOutput(PsychicRequest* request, PsychicResponse* respo
 // ---------------------------------------------------------------------------
 void webServerInit()
 {
+    if (!LittleFS.begin(true)) {
+        LOG_ERROR(TAG, "LittleFS Mount Failed");
+    }
+
     // Increase max URI handlers — we have 8 endpoints
     server.config.max_uri_handlers = 20;
 

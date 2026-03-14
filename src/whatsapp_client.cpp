@@ -1,4 +1,5 @@
 #include "whatsapp_client.h"
+#include "notification_manager.h"
 #include <HTTPClient.h>
 #include "logging.h"
 #include "network.h"
@@ -26,17 +27,17 @@ static size_t urlEncodeTo(const char* src, char* dest, size_t destSize) {
 
 static char waPhone[32] = "";
 static char waApiKey[32] = "";
-static AlertChannel waMode = CH_SMS;
 static SemaphoreHandle_t waMutex = NULL;
 
 void whatsappInit() {
     if (waMutex == NULL) {
         waMutex = xSemaphoreCreateMutex();
     }
+    notificationRegisterProvider(CH_WA, "WhatsApp", whatsappSendWrapper);
     LOG_INFO(TAG, "WhatsApp client initialized");
 }
 
-void whatsappSetConfig(const char* phone, const char* apiKey, AlertChannel mode) {
+void whatsappSetConfig(const char* phone, const char* apiKey) {
     if (waMutex && xSemaphoreTake(waMutex, portMAX_DELAY) == pdTRUE) {
         if (phone) {
             strncpy(waPhone, phone, sizeof(waPhone) - 1);
@@ -46,15 +47,16 @@ void whatsappSetConfig(const char* phone, const char* apiKey, AlertChannel mode)
             strncpy(waApiKey, apiKey, sizeof(waApiKey) - 1);
             waApiKey[sizeof(waApiKey) - 1] = '\0';
         }
-        waMode = mode;
         xSemaphoreGive(waMutex);
     }
-    LOG_INFO(TAG, "Config updated: Phone=%s, Channels=0x%02X", waPhone, (int)waMode);
+    LOG_INFO(TAG, "Config updated: Phone=%s", waPhone);
 }
 
 const char* whatsappGetPhone() { return waPhone; }
 const char* whatsappGetApiKey() { return waApiKey; }
-AlertChannel whatsappGetMode() { return waMode; }
+bool whatsappSendWrapper(const char* message) {
+    return whatsappSend(waPhone, waApiKey, message);
+}
 
 bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
     if (!phone || strlen(phone) == 0 || !apiKey || strlen(apiKey) == 0) {

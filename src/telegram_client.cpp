@@ -7,17 +7,17 @@ static const char* TAG = "TG";
 
 static char tgToken[64] = "";
 static char tgChatId[32] = "";
-static uint8_t tgChannels = CH_NONE;
 static SemaphoreHandle_t tgMutex = NULL;
 
 void telegramInit() {
     if (tgMutex == NULL) {
         tgMutex = xSemaphoreCreateMutex();
     }
+    notificationRegisterProvider(CH_TG, "Telegram", telegramSendWrapper);
     LOG_INFO(TAG, "Telegram client initialized");
 }
 
-void telegramSetConfig(const char* token, const char* chatId, uint8_t channels) {
+void telegramSetConfig(const char* token, const char* chatId) {
     if (tgMutex && xSemaphoreTake(tgMutex, portMAX_DELAY) == pdTRUE) {
         if (token) {
             strncpy(tgToken, token, sizeof(tgToken) - 1);
@@ -27,15 +27,16 @@ void telegramSetConfig(const char* token, const char* chatId, uint8_t channels) 
             strncpy(tgChatId, chatId, sizeof(tgChatId) - 1);
             tgChatId[sizeof(tgChatId) - 1] = '\0';
         }
-        tgChannels = channels;
         xSemaphoreGive(tgMutex);
     }
-    LOG_INFO(TAG, "Config updated: Token=***, ChatID=%s, Channels=0x%02X", tgChatId, (int)tgChannels);
+    LOG_INFO(TAG, "Config updated: ChatID=%s", tgChatId);
 }
 
 const char* telegramGetToken() { return tgToken; }
 const char* telegramGetChatId() { return tgChatId; }
-uint8_t telegramGetChannels() { return tgChannels; }
+bool telegramSendWrapper(const char* message) {
+    return telegramSend(tgToken, tgChatId, message);
+}
 
 bool telegramSend(const char* token, const char* chatId, const char* message) {
     if (!token || strlen(token) == 0 || !chatId || strlen(chatId) == 0) {

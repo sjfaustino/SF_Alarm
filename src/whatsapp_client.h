@@ -6,12 +6,7 @@
 /**
  * @brief WhatsApp alert mode
  */
-enum AlertChannel {
-    CH_NONE = 0x00,
-    CH_SMS  = 0x01,
-    CH_WA   = 0x02,
-    CH_TG   = 0x04
-};
+#include "notification_manager.h"
 
 /**
  * @brief Initialize the WhatsApp client
@@ -28,10 +23,8 @@ void whatsappInit();
  */
 bool whatsappSend(const char* phone, const char* apiKey, const char* message);
 
-/**
- * @brief Set the global WhatsApp configuration
- */
-void whatsappSetConfig(const char* phone, const char* apiKey, AlertChannel mode);
+void whatsappSetConfig(const char* phone, const char* apiKey);
+bool whatsappSendWrapper(const char* message);
 
 /**
  * @brief Get the WhatsApp phone number
@@ -43,9 +36,6 @@ const char* whatsappGetPhone();
  */
 const char* whatsappGetApiKey();
 
-/**
- * @brief Get the WhatsApp mode
- */
-AlertChannel whatsappGetMode();
+// Channels are now managed by NotificationManager
 
 #endif // SF_ALARM_WHATSAPP_CLIENT_H

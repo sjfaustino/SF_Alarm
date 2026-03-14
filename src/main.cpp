@@ -16,6 +16,7 @@
 #include <esp_task_wdt.h>
 #include "logging.h"
 #include "system_health.h"
+#include "notification_manager.h"
 
 static const char* TAG = "MAIN";
 
@@ -50,176 +51,27 @@ static SemaphoreHandle_t bootLock = NULL;
 
 static void restartTask(int index);
 
-// Alert Queue for non-blocking broadcasts
-#include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
-
-struct PendingAlert {
-    char message[128];
-    char targetPhone[24]; // Zero for broadcast
-};
-static QueueHandle_t rtosAlertQueue = NULL; 
-static uint32_t lastAlertProcessedMs = 0;
-static const uint32_t ALERT_PROCESS_INTERVAL_MS = 1000; // Small gap between alerts
+// Alerts are now managed by NotificationManager
 
 // ---------------------------------------------------------------------------
 // Alarm Event Handler — sends SMS alerts
 // ---------------------------------------------------------------------------
-static uint32_t lastZoneAlertMs[16] = {0};
 static void onAlarmEvent(const AlarmEventInfo& info)
 {
-    char msg[160];
-    const char* details = info.details ? info.details : "";
-
-    switch (info.event) {
-        case EVT_ALARM_TRIGGERED:
-            if (info.zoneId >= 0 && info.zoneId < 16) {
-                if (millis() - lastZoneAlertMs[info.zoneId] < 60000) {
-                    LOG_INFO(TAG, "Throttling redundant alert for Zone %d", info.zoneId + 1);
-                    return;
-                }
-                lastZoneAlertMs[info.zoneId] = millis();
-            }
-            snprintf(msg, sizeof(msg), "SF_Alarm ALERT: %s", details);
-            alarmBroadcast(msg);
-            break;
-
-        case EVT_ARMED_AWAY:
-            alarmBroadcast("SF_Alarm: System ARMED (Away)");
-            break;
-
-        case EVT_ARMED_HOME:
-            alarmBroadcast("SF_Alarm: System ARMED (Home)");
-            break;
-
-        case EVT_DISARMED:
-            alarmBroadcast("SF_Alarm: System DISARMED");
-            break;
-
-        case EVT_TAMPER:
-            snprintf(msg, sizeof(msg), "SF_Alarm TAMPER: %s", details);
-            alarmBroadcast(msg);
-            break;
-
-        case EVT_ENTRY_DELAY:
-            LOG_INFO(TAG, "Entry delay: %s", details);
-            break;
-
-        case EVT_EXIT_DELAY:
-            LOG_INFO(TAG, "Exit delay: %s", details);
-            break;
-
-        case EVT_ZONE_TRIGGERED:
-            LOG_INFO(TAG, "Zone triggered: %s", details);
-            break;
-
-        case EVT_ZONE_RESTORED:
-            LOG_INFO(TAG, "Zone restored: %s", details);
-            break;
-
-        case EVT_SIREN_ON:
-        case EVT_SIREN_OFF:
-            LOG_INFO(TAG, "Siren: %s", details);
-            break;
-        
-        default: break;
-    }
-
-    // High-latency MQTT events handled asynchronosly via worker thread
-    switch (info.event) {
-        case EVT_ALARM_TRIGGERED:
-        case EVT_TAMPER:
-        case EVT_ARMED_AWAY:
-        case EVT_ARMED_HOME:
-        case EVT_DISARMED: {
-            char logMsg[128];
-            snprintf(logMsg, sizeof(logMsg), "EVENT:%d Z:%d | %s", (int)info.event, info.zoneId, details);
-            mqttPublish("SF_Alarm/events", logMsg); 
-            break;
-        }
-        default: break;
-    }
+    notificationDispatch(info);
 }
 
 // ---------------------------------------------------------------------------
 // Non-Blocking Alert Dispatcher
 // ---------------------------------------------------------------------------
-
 void alarmBroadcast(const char* message)
 {
-    if (!rtosAlertQueue) return;
-    PendingAlert alert;
-    memset(&alert, 0, sizeof(PendingAlert)); 
-    
-    strncpy(alert.message, message, sizeof(alert.message) - 1);
-    alert.message[sizeof(alert.message) - 1] = '\0';
-    alert.targetPhone[0] = '\0'; 
-    
-    if (xQueueSend(rtosAlertQueue, &alert, 0) == pdTRUE) {
-        LOG_INFO(TAG, "Alert queued");
-    } else {
-        LOG_ERROR(TAG, "Alert queue full!");
-    }
+    notificationBroadcast(message);
 }
 
 void alarmQueueReply(const char* phone, const char* message)
 {
-    if (!rtosAlertQueue) return;
-    PendingAlert alert;
-    memset(&alert, 0, sizeof(PendingAlert)); 
-    
-    strncpy(alert.message, message, sizeof(alert.message) - 1);
-    alert.message[sizeof(alert.message) - 1] = '\0';
-    strncpy(alert.targetPhone, phone, sizeof(alert.targetPhone) - 1);
-    alert.targetPhone[sizeof(alert.targetPhone) - 1] = '\0';
-
-    if (xQueueSend(rtosAlertQueue, &alert, 0) == pdTRUE) {
-        LOG_INFO(TAG, "Targeted reply queued");
-    } else {
-        LOG_ERROR(TAG, "Alert queue full!");
-    }
-}
-
-static void processAlertQueue()
-{
-    uint32_t now = millis();
-    if (now - lastAlertProcessedMs < ALERT_PROCESS_INTERVAL_MS) return;
-
-    if (!rtosAlertQueue) return;
-
-    PendingAlert alert;
-    if (xQueueReceive(rtosAlertQueue, &alert, 0) == pdTRUE) {
-        lastAlertProcessedMs = now;
-        
-        if (strlen(alert.targetPhone) > 0) {
-            LOG_INFO(TAG, "Targeted reply to %s: %s", alert.targetPhone, alert.message);
-            smsGatewaySend(alert.targetPhone, alert.message);
-        } else {
-            // Get consolidated alert channels (bitmask)
-            uint8_t channels = (uint8_t)whatsappGetMode();
-            
-            // Check Telegram (0x04)
-            if (channels & CH_TG) {
-                telegramSend(telegramGetToken(), telegramGetChatId(), alert.message);
-            }
-
-            // Check WhatsApp (0x02)
-            if (channels & CH_WA) {
-                whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), alert.message);
-            }
-
-            // Check SMS (0x01)
-            if (channels & CH_SMS) {
-                if (smsCmdGetWorkingMode() == MODE_CALL) {
-                    char voiceMsg[180];
-                    snprintf(voiceMsg, sizeof(voiceMsg), "[VOICE CALL] %s", alert.message);
-                    smsCmdSendAlert(voiceMsg);
-                } else {
-                    smsCmdSendAlert(alert.message);
-                }
-            }
-        }
-    }
+    notificationQueueReply(phone, message);
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +176,7 @@ static void alertWorkerTask(void* pvParameters)
 
         sysHealthReport(HB_BIT_ALERT); 
 
-        processAlertQueue(); 
+        notificationUpdate(); 
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
@@ -431,7 +283,7 @@ void setup()
     Serial.println("========================================");
 
     configInit();
-    rtosAlertQueue = xQueueCreate(ALERT_QUEUE_SIZE, sizeof(PendingAlert));
+    notificationInit();
 
     pinMode(HEARTBEAT_LED_PIN, OUTPUT);
     digitalWrite(HEARTBEAT_LED_PIN, LOW);
