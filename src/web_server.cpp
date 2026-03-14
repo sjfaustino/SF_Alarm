@@ -177,13 +177,18 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
 static esp_err_t handleApiGetSettings(PsychicRequest* request, PsychicResponse* response)
 {
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, request->body());
+    DeserializationError err = deserializeJson(doc, request->body(), DeserializationOption::NestingLimit(10));
     if (err) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
     const char* pin = doc["pin"] | "";
-    if (!alarmValidatePin(pin)) {
+    bool valid = alarmValidatePin(pin);
+    // Scrub PIN buffer if it exists in doc overhead
+    if (doc["pin"].is<JsonVariant>()) doc["pin"] = "****"; 
+
+    if (!valid) {
+        doc.clear(); // Explicitly clear to zero-out internal pointers/refs
         return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"ACCESS DENIED: PIN required\"}");
     }
 
@@ -211,6 +216,7 @@ static esp_err_t handleApiGetSettings(PsychicRequest* request, PsychicResponse* 
 
     String out;
     serializeJson(reply, out);
+    doc.clear(); // Scavenge
     return response->send(200, "application/json", out.c_str());
 }
 
@@ -221,14 +227,17 @@ static esp_err_t handleApiGetSettings(PsychicRequest* request, PsychicResponse* 
 static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* response)
 {
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, request->body());
+    DeserializationError err = deserializeJson(doc, request->body(), DeserializationOption::NestingLimit(10));
     if (err) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
     // PIN required — changing alert destination is a security-sensitive operation
     const char* pin = doc["pin"] | "";
-    if (!alarmValidatePin(pin)) {
+    bool valid = (strlen(pin) > 0 && alarmValidatePin(pin));
+    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
+
+    if (!valid) {
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
 
@@ -242,6 +251,7 @@ static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* resp
 
     whatsappSetConfig(phone, apikey, mode);
     configSaveWhatsapp();
+    doc.clear(); // Scavenge
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Alert settings saved\"}");
 }
@@ -253,14 +263,17 @@ static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* resp
 static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* response)
 {
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, request->body());
+    DeserializationError err = deserializeJson(doc, request->body(), DeserializationOption::NestingLimit(10));
     if (err) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
     // PIN required — changing broker redirects all alarm events
     const char* pin = doc["pin"] | "";
-    if (!alarmValidatePin(pin)) {
+    bool valid = (strlen(pin) > 0 && alarmValidatePin(pin));
+    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
+
+    if (!valid) {
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
 
@@ -283,14 +296,17 @@ static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* respon
 static esp_err_t handlePostOnvif(PsychicRequest* request, PsychicResponse* response)
 {
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, request->body());
+    DeserializationError err = deserializeJson(doc, request->body(), DeserializationOption::NestingLimit(10));
     if (err) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
     // PIN required — changing camera config affects motion detection source
     const char* pin = doc["pin"] | "";
-    if (!alarmValidatePin(pin)) {
+    bool valid = (strlen(pin) > 0 && alarmValidatePin(pin));
+    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
+
+    if (!valid) {
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
 
@@ -317,9 +333,9 @@ static esp_err_t handleApiArm(PsychicRequest* request, PsychicResponse* response
     }
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, request->body());
+    DeserializationError err = deserializeJson(doc, request->body(), DeserializationOption::NestingLimit(10));
     if (err) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
     const char* pin  = doc["pin"] | "";
@@ -328,9 +344,8 @@ static esp_err_t handleApiArm(PsychicRequest* request, PsychicResponse* response
     bool ok = false;
     uint32_t remoteIp = request->client()->remoteIP();
 
-    if (!checkRateLimit(remoteIp)) {
-        return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts.\"}");
-    }
+    bool valid = alarmValidatePin(pin);
+    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (strcmp(mode, "home") == 0) {
         ok = alarmArmHome(pin);
@@ -341,8 +356,10 @@ static esp_err_t handleApiArm(PsychicRequest* request, PsychicResponse* response
     recordAttempt(remoteIp, ok);
 
     if (ok) {
+        doc.clear();
         return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"System arming\"}");
     } else {
+        doc.clear();
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"Failed — wrong PIN or zones not clear\"}");
     }
 }
@@ -358,9 +375,9 @@ static esp_err_t handleApiDisarm(PsychicRequest* request, PsychicResponse* respo
     }
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, request->body());
+    DeserializationError err = deserializeJson(doc, request->body(), DeserializationOption::NestingLimit(10));
     if (err) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
     const char* pin = doc["pin"] | "";
@@ -370,12 +387,15 @@ static esp_err_t handleApiDisarm(PsychicRequest* request, PsychicResponse* respo
         return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts. Wait 1 minute.\"}");
     }
 
-    bool ok = alarmDisarm(pin);
-    recordAttempt(remoteIp, ok);
+    bool valid = alarmDisarm(pin);
+    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
+    recordAttempt(remoteIp, valid);
 
-    if (ok) {
+    if (valid) {
+        doc.clear();
         return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"System disarmed\"}");
     } else {
+        doc.clear();
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"Wrong PIN\"}");
     }
 }
@@ -390,9 +410,9 @@ static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* respons
     }
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, request->body());
+    DeserializationError err = deserializeJson(doc, request->body(), DeserializationOption::NestingLimit(10));
     if (err) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
     const char* pin = doc["pin"] | "";
@@ -402,10 +422,11 @@ static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* respons
         return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts.\"}");
     }
 
-    bool ok = alarmMuteSiren(pin);
-    recordAttempt(remoteIp, ok);
+    bool valid = alarmMuteSiren(pin);
+    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
+    recordAttempt(remoteIp, valid);
 
-    if (ok) {
+    if (valid) {
         return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Siren muted\"}");
     } else {
         return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"ACCESS DENIED: PIN required\"}");
@@ -423,9 +444,9 @@ static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* respo
     }
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, request->body());
+    DeserializationError err = deserializeJson(doc, request->body(), DeserializationOption::NestingLimit(10));
     if (err) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
     // Require PIN for zone bypass/unbypass
@@ -437,6 +458,7 @@ static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* respo
     }
 
     bool pinOk = (strlen(pin) > 0 && alarmValidatePin(pin));
+    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
     recordAttempt(remoteIp, pinOk);
 
     if (!pinOk) {
@@ -477,14 +499,17 @@ static esp_err_t handleApiOutputs(PsychicRequest* request, PsychicResponse* resp
 static esp_err_t handleApiOutput(PsychicRequest* request, PsychicResponse* response)
 {
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, request->body());
+    DeserializationError err = deserializeJson(doc, request->body(), DeserializationOption::NestingLimit(10));
     if (err) {
-        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid JSON\"}");
+        return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
     // Require PIN for output control
     const char* pin = doc["pin"] | "";
-    if (strlen(pin) == 0 || !alarmValidatePin(pin)) {
+    bool valid = (strlen(pin) > 0 && alarmValidatePin(pin));
+    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
+
+    if (!valid) {
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
 

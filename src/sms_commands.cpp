@@ -25,6 +25,7 @@ static char     alarmTexts[MAX_ZONES][80];
 
 // Periodic report interval in minutes (GA09: %#Txx)
 static uint16_t reportIntervalMin = DEFAULT_REPORT_INTERVAL_MIN;
+static SemaphoreHandle_t smsStateMutex = NULL;
 
 static SemaphoreHandle_t htmlMutex = NULL;
 #define MAX_SMS_TEXT_LEN 160
@@ -42,30 +43,33 @@ static uint32_t lastReportMs = 0;
 
 static bool isAuthorized(const char* sender)
 {
-    if (phoneCount == 0) return false;
-
     // Security: Require meaningful length to prevent spoofing/collisions
     int senderLen = strnlen(sender, MAX_PHONE_LEN + 10);
     const int MIN_MATCH_DIGITS = 10; // Stepped up from 9 for better entropy
 
-    for (int i = 0; i < phoneCount; i++) {
-        // Exact match (Safe)
-        if (strcmp(sender, phoneNumbers[i]) == 0) return true;
+    bool authorized = false;
+    if (smsStateMutex && xSemaphoreTake(smsStateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (int i = 0; i < phoneCount; i++) {
+            // Exact match (Safe)
+            if (strcmp(sender, phoneNumbers[i]) == 0) { authorized = true; break; }
 
-        // Partial match for varying country code formats (+351 vs 00351 vs local)
-        int storedLen = strlen(phoneNumbers[i]);
-        if (senderLen >= MIN_MATCH_DIGITS && storedLen >= MIN_MATCH_DIGITS) {
-            // Strict length delta check (prevent prepending spam to match suffix)
-            int lenDiff = (senderLen > storedLen) ? (senderLen - storedLen) : (storedLen - senderLen);
-            if (lenDiff <= 5) {
-                if (strcmp(sender + senderLen - MIN_MATCH_DIGITS,
-                           phoneNumbers[i] + storedLen - MIN_MATCH_DIGITS) == 0) {
-                    return true;
+            // Partial match for varying country code formats (+351 vs 00351 vs local)
+            int storedLen = strlen(phoneNumbers[i]);
+            if (senderLen >= MIN_MATCH_DIGITS && storedLen >= MIN_MATCH_DIGITS) {
+                // Strict length delta check (prevent prepending spam to match suffix)
+                int lenDiff = (senderLen > storedLen) ? (senderLen - storedLen) : (storedLen - senderLen);
+                if (lenDiff <= 5) {
+                    if (strcmp(sender + senderLen - MIN_MATCH_DIGITS,
+                               phoneNumbers[i] + storedLen - MIN_MATCH_DIGITS) == 0) {
+                        authorized = true; 
+                        break;
+                    }
                 }
             }
         }
+        xSemaphoreGive(smsStateMutex);
     }
-    return false;
+    return authorized;
 }
 
 static void sendReply(const char* sender, const char* message)
@@ -153,11 +157,12 @@ static bool parseSetPhone(const char* body, const char* sender)
     if (end) {
         int len = end - start;
         if (len >= MAX_PHONE_LEN) len = MAX_PHONE_LEN - 1;
+        if (len < 0) return false; // Guard against negative math
         strncpy(phone, start, len);
         phone[len] = '\0';
     } else {
-        strncpy(phone, start, MAX_PHONE_LEN - 1);
-        phone[MAX_PHONE_LEN - 1] = '\0';
+        // Strict Boundary Hardening: Reject if trailing # is missing to prevent walk-off
+        return false;
     }
 
     if (strlen(phone) == 0) {
@@ -337,8 +342,7 @@ static bool parseArmDisarm(const char* body, const char* sender)
         } else {
             // It was just ARM <pin>
             p = rollback; // The second word is actually the pin
-            const char* pin = (*p == '\0') ? "AUTO" : p;
-            if (alarmArmAway(pin)) {
+            if (alarmArmAway(p)) {
                 sendReply(sender, "SF_Alarm: Arming AWAY. Exit delay started.");
             } else {
                 sendReply(sender, "SF_Alarm: ARM failed. Check PIN/zones.");
@@ -346,8 +350,7 @@ static bool parseArmDisarm(const char* body, const char* sender)
             return true;
         }
     } else if (strcmp(cmd1, "DISARM") == 0) {
-        const char* pin = (*p == '\0') ? "AUTO" : p;
-        if (alarmDisarm(pin)) {
+        if (alarmDisarm(p)) {
             sendReply(sender, "SF_Alarm: System DISARMED.");
         } else {
             sendReply(sender, "SF_Alarm: DISARM failed. Invalid PIN.");
@@ -610,6 +613,12 @@ static const int COMMAND_TABLE_SIZE = sizeof(COMMAND_TABLE) / sizeof(CommandEntr
 
 void smsCmdProcess(const char* sender, const char* body)
 {
+    // Logic Bomb Prevention: Inhibit remote commands during critical hardware failure
+    if (alarmGetState() == ALARM_TRIGGERED) {
+        LOG_WARN(TAG, "SMS Command ignored while in PANIC state.");
+        return;
+    }
+
     char upperBody[32];
     strncpy(upperBody, body, sizeof(upperBody)-1);
     upperBody[sizeof(upperBody)-1] = '\0';
@@ -684,6 +693,10 @@ void smsCmdInit()
     if (htmlMutex == NULL) {
         htmlMutex = xSemaphoreCreateMutex();
     }
+    if (smsStateMutex == NULL) {
+        smsStateMutex = xSemaphoreCreateMutex();
+    }
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     phoneCount = 0;
     memset(phoneNumbers, 0, sizeof(phoneNumbers));
 
@@ -691,25 +704,33 @@ void smsCmdInit()
         snprintf(alarmTexts[i], sizeof(alarmTexts[i]),
                  "ALARM Zone %d triggered!", i + 1);
     }
+    xSemaphoreGive(smsStateMutex);
 
     LOG_INFO(TAG, "SMS command processor initialized (GA09 compatible)");
 }
 
 int smsCmdAddPhone(const char* phone)
 {
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     if (phoneCount >= MAX_PHONE_NUMBERS) {
+        xSemaphoreGive(smsStateMutex);
         LOG_WARN(TAG, "Phone list full");
         return -1;
     }
 
     for (int i = 0; i < phoneCount; i++) {
-        if (strcmp(phoneNumbers[i], phone) == 0) return i;
+        if (strcmp(phoneNumbers[i], phone) == 0) {
+            xSemaphoreGive(smsStateMutex);
+            return i;
+        }
     }
 
     strncpy(phoneNumbers[phoneCount], phone, MAX_PHONE_LEN - 1);
     phoneNumbers[phoneCount][MAX_PHONE_LEN - 1] = '\0';
     int slot = phoneCount;
     phoneCount++;
+    xSemaphoreGive(smsStateMutex);
+
     LOG_INFO(TAG, "Added phone [%d]: %s", slot + 1, phone);
     return slot;
 }
@@ -718,10 +739,11 @@ bool smsCmdSetPhone(int slot, const char* phone)
 {
     if (slot < 0 || slot >= MAX_PHONE_NUMBERS) return false;
 
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     strncpy(phoneNumbers[slot], phone, MAX_PHONE_LEN - 1);
     phoneNumbers[slot][MAX_PHONE_LEN - 1] = '\0';
-
     if (slot >= phoneCount) phoneCount = slot + 1;
+    xSemaphoreGive(smsStateMutex);
 
     LOG_INFO(TAG, "Phone [%02d] = %s", slot + 1, phone);
     return true;
@@ -729,6 +751,7 @@ bool smsCmdSetPhone(int slot, const char* phone)
 
 bool smsCmdRemovePhone(const char* phone)
 {
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     for (int i = 0; i < phoneCount; i++) {
         if (strcmp(phoneNumbers[i], phone) == 0) {
             for (int j = i; j < phoneCount - 1; j++) {
@@ -737,10 +760,12 @@ bool smsCmdRemovePhone(const char* phone)
             }
             phoneCount--;
             memset(phoneNumbers[phoneCount], 0, MAX_PHONE_LEN);
+            xSemaphoreGive(smsStateMutex);
             LOG_INFO(TAG, "Removed phone: %s (%d remaining)", phone, phoneCount);
             return true;
         }
     }
+    xSemaphoreGive(smsStateMutex);
     return false;
 }
 
@@ -752,7 +777,10 @@ int smsCmdGetPhoneCount()
 const char* smsCmdGetPhone(int index)
 {
     if (index < 0 || index >= MAX_PHONE_NUMBERS) return "";
-    return phoneNumbers[index];
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
+    const char* p = phoneNumbers[index];
+    xSemaphoreGive(smsStateMutex);
+    return p;
 }
 
 void smsCmdClearPhones()
@@ -781,20 +809,27 @@ const char* smsCmdGetAlarmText(int zoneIndex)
 void smsCmdSetAlarmText(int zoneIndex, const char* text)
 {
     if (zoneIndex < 0 || zoneIndex >= MAX_ZONES) return;
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     strncpy(alarmTexts[zoneIndex], text, sizeof(alarmTexts[zoneIndex]) - 1);
     alarmTexts[zoneIndex][sizeof(alarmTexts[zoneIndex]) - 1] = '\0';
     encodeHtml(alarmTexts[zoneIndex], sizeof(alarmTexts[zoneIndex]));
+    xSemaphoreGive(smsStateMutex);
     LOG_INFO(TAG, "Zone %d alarm text: \"%s\"", zoneIndex + 1, alarmTexts[zoneIndex]);
 }
 
 uint16_t smsCmdGetReportInterval()
 {
-    return reportIntervalMin;
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
+    uint16_t r = reportIntervalMin;
+    xSemaphoreGive(smsStateMutex);
+    return r;
 }
 
 void smsCmdSetReportInterval(uint16_t minutes)
 {
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     reportIntervalMin = minutes;
+    xSemaphoreGive(smsStateMutex);
     LOG_INFO(TAG, "Report interval set to %d minutes", minutes);
 }
 
@@ -805,9 +840,11 @@ const char* smsCmdGetRecoveryText()
 
 void smsCmdSetRecoveryText(const char* text)
 {
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     strncpy(recoveryText, text, sizeof(recoveryText) - 1);
     recoveryText[sizeof(recoveryText) - 1] = '\0';
     encodeHtml(recoveryText, sizeof(recoveryText));
+    xSemaphoreGive(smsStateMutex);
     LOG_INFO(TAG, "Recovery text: \"%s\"", recoveryText);
 }
 
@@ -818,16 +855,22 @@ WorkingMode smsCmdGetWorkingMode()
 
 void smsCmdSetWorkingMode(WorkingMode mode)
 {
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     currentMode = mode;
+    xSemaphoreGive(smsStateMutex);
     LOG_INFO(TAG, "Working mode: %d", (int)mode);
 }
 
 void smsCmdUpdate()
 {
     uint32_t now = millis();
-    if (reportIntervalMin > 0) {
+    xSemaphoreTake(smsStateMutex, portMAX_DELAY);
+    uint16_t interval = reportIntervalMin;
+    xSemaphoreGive(smsStateMutex);
+
+    if (interval > 0) {
         if (lastReportMs == 0) lastReportMs = now;
-        if (now - lastReportMs >= (uint32_t)reportIntervalMin * 60 * 1000) {
+        if (now - lastReportMs >= (uint32_t)interval * 60 * 1000) {
             lastReportMs = now;
             char buf[160];
             uint16_t triggered = zonesGetTriggeredMask();

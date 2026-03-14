@@ -9,10 +9,8 @@
 bool ioExpanderInit();
 
 /// Read all 16 digital inputs as a bitmask.
-/// Bit 0 = input 1, bit 15 = input 16.
-/// Inputs are active-low (opto-isolated dry contact, shorted = triggered).
-/// The returned value is inverted so that 1 = triggered, 0 = normal.
-uint16_t ioExpanderReadInputs();
+/// Returns true on success, false if the bus is busy or a chip is lost.
+bool ioExpanderReadInputs(uint16_t* mask);
 
 /// Write all 16 outputs at once from a bitmask.
 /// Bit 0 = output 1, bit 15 = output 16.

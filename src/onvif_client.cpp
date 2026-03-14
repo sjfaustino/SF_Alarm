@@ -7,7 +7,9 @@
 #include "logging.h"
 #include <mbedtls/sha1.h>
 #include <base64.h>
+#include <base64.h>
 #include "string_utils.h"
+#include <esp_sntp.h>
 
 static const char* TAG = "ONVIF";
 
@@ -53,18 +55,17 @@ static void onvifTask(void* pvParameters);
 // ---------------------------------------------------------------------------
 
 static String getTimestamp() {
-    // We use the ESP32 internal SNTP/RTC time if synchronized, 
-    // otherwise we fallback to the hardcoded base + uptime logic for a valid ISO string.
     time_t now;
     struct tm timeinfo;
     time(&now);
     gmtime_r(&now, &timeinfo);
     
-    // If the year is very low (e.g. 1970), it means NTP hasn't synced yet.
-    // We apply our offset 1772956800ULL (2026-03-08) to make it "legal" for camera digest auth.
-    if (timeinfo.tm_year < (2020 - 1900)) {
-        now += 1772956800ULL;
-        gmtime_r(&now, &timeinfo);
+    // NTP Maturity: Instead of magic 1970/2026 offsets, check the official SNTP sync status.
+    // If not synced, we return a blank string, which triggers a retry in the caller rather 
+    // than sending a "faked" timestamp that might cause auth rejection.
+    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET) {
+        LOG_WARN(TAG, "NTP not synced. Postponing auth.");
+        return "";
     }
 
     char buf[32];
@@ -96,22 +97,29 @@ static String getAuthHeader() {
     
     String nonceB64 = base64::encode(rawNonce, 20);
     String created = getTimestamp();
+    if (created.length() == 0) return ""; // Postpone until NTP sync
+
     String digest = generateDigest((const char*)rawNonce, created.c_str(), state.pass);
 
-    String header;
-    header.reserve(512); // Pre-allocate to prevent heap fragmentation
-    header = "<s:Header>";
-    header += "<Security s:mustUnderstand=\"1\" xmlns=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\">";
-    header += "<UsernameToken><Username>";
-    header += state.user;
-    header += "</Username><Password Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\">";
-    header += digest;
-    header += "</Password><Nonce EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\">";
-    header += nonceB64;
-    header += "</Nonce><Created xmlns=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\">";
-    header += created;
-    header += "</Created></UsernameToken></Security></s:Header>";
-    return header;
+    char headerBuf[512];
+    snprintf(headerBuf, sizeof(headerBuf),
+        "<s:Header><Security s:mustUnderstand=\"1\" xmlns=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\">"
+        "<UsernameToken><Username>%s</Username>"
+        "<Password Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\">%s</Password>"
+        "<Nonce EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\">%s</Nonce>"
+        "<Created xmlns=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\">%s</Created>"
+        "</UsernameToken></Security></s:Header>",
+        state.user, digest.c_str(), nonceB64.c_str(), created.c_str());
+
+    String result(headerBuf);
+    
+    // Scrub intermediate buffers
+    memset(headerBuf, 0, sizeof(headerBuf));
+    memset(rawNonce, 0, sizeof(rawNonce));
+    digest = ""; 
+    nonceB64 = "";
+
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,14 +136,19 @@ static bool createSubscription() {
     http.setTimeout(2500); // Prevent initial connection stall (dead camera)
     http.addHeader("Content-Type", "application/soap+xml; charset=utf-8");
 
+    String auth = getAuthHeader();
     String body;
-    body.reserve(1024); // Pre-allocate to prevent heap fragmentation
+    body.reserve(1024);
     body = SOAP_ENV_START;
-    body += getAuthHeader();
+    body += auth;
     body += "<s:Body><e:CreatePullPointSubscription/></s:Body>";
     body += SOAP_ENV_END;
 
     int code = http.POST(body);
+    
+    // Scrub body which contains the auth digest
+    body = "";
+    auth = "";
     if (code == 200) {
         WiFiClient* stream = http.getStreamPtr();
         if (stream) {
@@ -158,8 +171,9 @@ static bool createSubscription() {
                         }
                     }
 
+                    // TAG BOMB PROTECTION: Prevent malformed tags from overflowing the 512B buffer
                     if (bufPos >= (int)sizeof(buffer) - 1) {
-                        const int OVERLAP = 128; // Large enough for <tt:Address>...</tt:Address>
+                        const int OVERLAP = 128; 
                         memmove(buffer, buffer + (sizeof(buffer) - OVERLAP - 1), OVERLAP);
                         bufPos = OVERLAP;
                         buffer[bufPos] = '\0';
@@ -179,6 +193,11 @@ static bool createSubscription() {
 
     LOG_WARN(TAG, "Subscription failed, code: %d", code);
     http.end();
+    
+    // State Scavenging: Prevent stale addresses from lingering
+    scrubString(state.subscriptionAddress);
+    state.connected = false;
+
     return false;
 }
 
@@ -190,14 +209,17 @@ static void pollMessages() {
     http.addHeader("Content-Type", "application/soap+xml; charset=utf-8");
     http.setTimeout(5000); // 5s timeout for PullMessages
 
+    String auth = getAuthHeader();
     String body;
-    body.reserve(1024); // Pre-allocate to prevent heap fragmentation
+    body.reserve(1024);
     body = SOAP_ENV_START;
-    body += getAuthHeader();
+    body += auth;
     body += "<s:Body><e:PullMessages><e:Timeout>PT2S</e:Timeout><e:MessageLimit>10</e:MessageLimit></e:PullMessages></s:Body>";
     body += SOAP_ENV_END;
 
     int code = http.POST(body);
+    body = "";
+    auth = "";
     if (code == 200) {
         // --- THE XML HEAP DETONATOR FIX ---
         // DO NOT DO: String res = http.getString();
@@ -239,6 +261,7 @@ static void pollMessages() {
 
                 // If buffer is full, shift it to keep the last 128 bytes (overlapping window)
                 // This ensures we never miss a keyword split across the 512-byte boundary.
+                // TAG BOMB PROTECTION included.
                 if (bufferPos >= (int)sizeof(buffer) - 1) {
                     const int OVERLAP = 128;
                     memmove(buffer, buffer + bufferPos - OVERLAP, OVERLAP);
@@ -272,6 +295,15 @@ static void pollMessages() {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+void onvifDisconnect() {
+    if (state.connected) {
+        LOG_INFO(TAG, "Unsubscribing and disconnecting...");
+        state.connected = false;
+        // Deep memory scrubbing: Erase the password on disconnect
+        scrubBuffer(state.pass, sizeof(state.pass));
+    }
+}
 
 void onvifInit() {
     state.port = 80;

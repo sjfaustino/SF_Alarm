@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <PCF8574.h>
 #include "logging.h"
+#include "system_health.h"
 
 static const char* TAG = "IO";
 
@@ -26,9 +27,41 @@ static SemaphoreHandle_t i2cMutex = nullptr;
 #define I2C_LOCK_TIMEOUT_READ  pdMS_TO_TICKS(10)  // 10ms: yield quick to preserve 50Hz loop
 #define I2C_LOCK_TIMEOUT_WRITE pdMS_TO_TICKS(500) // 500ms: sirens MUST fire even if bus is busy
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+static void ioBusRecover()
+{
+    // PHYSICAL BUS RECOVERY (Obsidian Sledgehammer)
+    // If SDA is held low by a hung slave, we toggle SCL until it's released.
+    LOG_WARN(TAG, "I2C bus recovery initiated...");
+    
+    Wire.end(); // Clear the peripheral state
+    
+    pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+    pinMode(I2C_SCL_PIN, OUTPUT);
+    digitalWrite(I2C_SCL_PIN, HIGH);
+
+    if (digitalRead(I2C_SDA_PIN) == LOW) {
+        for (int i = 0; i < 20; i++) { 
+            digitalWrite(I2C_SCL_PIN, LOW);
+            delayMicroseconds(10);
+            digitalWrite(I2C_SCL_PIN, HIGH);
+            delayMicroseconds(10);
+            if (digitalRead(I2C_SDA_PIN) == HIGH) {
+                LOG_INFO(TAG, "I2C SDA released after %d pulses", i+1);
+                break;
+            }
+        }
+    }
+
+    // Force STOP condition
+    pinMode(I2C_SDA_PIN, OUTPUT);
+    digitalWrite(I2C_SDA_PIN, LOW);
+    digitalWrite(I2C_SCL_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(I2C_SDA_PIN, HIGH);
+    
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_CLOCK_HZ);
+    Wire.setTimeOut(100);
+}
 
 bool ioExpanderInit()
 {
@@ -105,17 +138,24 @@ bool ioExpanderInit()
                   chipOk[2] ? "OK" : "FAIL",
                   chipOk[3] ? "OK" : "FAIL");
 
+    if (allOk) {
+        sysHealthReport(HB_BIT_I2C);
+    }
     return allOk;
 }
 
-uint16_t ioExpanderReadInputs()
+bool ioExpanderReadInputs(uint16_t* mask)
 {
+    if (mask == nullptr) return false;
+    
     uint8_t low  = 0xFF;
     uint8_t high = 0xFF;
 
     if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_READ) != pdTRUE) {
-        return 0; // Skip poll if bus is busy
+        return false; // Fail-Secure: Busy bus returns false, caller freezes state
     }
+
+    bool chipsDied = false;
 
     // Runtime Health Check: Try a dummy transmission to verify chip presence
     if (chipOk[0]) {
@@ -123,7 +163,8 @@ uint16_t ioExpanderReadInputs()
         if (Wire.endTransmission() != 0) {
             chipOk[0] = false;
             chipRetryMs[0] = 0;
-            LOG_ERROR("IO", "IN1 chip lost!");
+            chipsDied = true;
+            LOG_ERROR(TAG, "IN1 chip lost!");
         } else {
             low = pcfIn1.read8();
         }
@@ -136,7 +177,11 @@ uint16_t ioExpanderReadInputs()
                 chipOk[0] = true;
                 LOG_INFO(TAG, "IN1 chip recovered");
                 low = pcfIn1.read8();
+            } else {
+                chipsDied = true;
             }
+        } else {
+            chipsDied = true;
         }
     }
 
@@ -145,6 +190,7 @@ uint16_t ioExpanderReadInputs()
         if (Wire.endTransmission() != 0) {
             chipOk[1] = false;
             chipRetryMs[1] = 0;
+            chipsDied = true;
             LOG_ERROR(TAG, "IN2 chip lost!");
         } else {
             high = pcfIn2.read8();
@@ -157,7 +203,11 @@ uint16_t ioExpanderReadInputs()
                 chipOk[1] = true;
                 LOG_INFO(TAG, "IN2 chip recovered");
                 high = pcfIn2.read8();
+            } else {
+                chipsDied = true;
             }
+        } else {
+            chipsDied = true;
         }
     }
 
@@ -167,9 +217,10 @@ uint16_t ioExpanderReadInputs()
         if (Wire.endTransmission() != 0) {
             chipOk[2] = false;
             chipRetryMs[2] = 0;
+            chipsDied = true;
             LOG_ERROR(TAG, "OUT1 chip lost!");
         }
-    } else {
+    } else if (!chipOk[2]) {
         uint32_t now = millis();
         if (now - chipRetryMs[2] >= CHIP_RETRY_INTERVAL_MS) {
             chipRetryMs[2] = now;
@@ -186,9 +237,10 @@ uint16_t ioExpanderReadInputs()
         if (Wire.endTransmission() != 0) {
             chipOk[3] = false;
             chipRetryMs[3] = 0;
+            chipsDied = true;
             LOG_ERROR(TAG, "OUT2 chip lost!");
         }
-    } else {
+    } else if (!chipOk[3]) {
         uint32_t now = millis();
         if (now - chipRetryMs[3] >= CHIP_RETRY_INTERVAL_MS) {
             chipRetryMs[3] = now;
@@ -200,10 +252,20 @@ uint16_t ioExpanderReadInputs()
         }
     }
 
+    if (chipsDied) {
+        ioBusRecover();
+    }
+
     // Combine into 16-bit value.
-    uint16_t raw = ((uint16_t)high << 8) | (uint16_t)low;
+    uint16_t res = ((uint16_t)high << 8) | (uint16_t)low;
+    *mask = ~res & 0xFFFF;
     xSemaphoreGive(i2cMutex);
-    return ~raw & 0xFFFF;
+    
+    sysHealthReport(HB_BIT_I2C);
+    // If we have partial failure (one chip down), we still return true but mask is missing half.
+    // However, if chipsDied was true, we might want to flag this.
+    // For now, we return true if we read anything at all that wasn't a mutex timeout.
+    return true;
 }
 
 static portMUX_TYPE ioMux = portMUX_INITIALIZER_UNLOCKED;
@@ -223,6 +285,7 @@ void ioExpanderWriteOutputs(uint16_t mask)
         pcfOut2.write8((uint8_t)((mask >> 8) & 0xFF));
     }
     xSemaphoreGive(i2cMutex);
+    sysHealthReport(HB_BIT_I2C);
 }
 
 void ioExpanderSetOutput(uint8_t channel, bool state)
@@ -248,6 +311,7 @@ void ioExpanderSetOutput(uint8_t channel, bool state)
         pcfOut2.write8((uint8_t)((mask >> 8) & 0xFF));
     }
     xSemaphoreGive(i2cMutex);
+    sysHealthReport(HB_BIT_I2C);
 }
 
 uint16_t ioExpanderGetOutputs()

@@ -45,6 +45,7 @@ static uint8_t restartCount[6] = { 0, 0, 0, 0, 0, 0 };
 RTC_NOINIT_ATTR uint32_t bootCount;
 RTC_NOINIT_ATTR uint32_t lastKnownSystemTime; // Persistent system time (seconds since 1970 if synced, else uptime)
 static bool recoveryMode = false;
+static SemaphoreHandle_t bootLock = NULL;
 
 static void restartTask(int index);
 
@@ -221,9 +222,18 @@ static void zoneTask(void* pvParameters)
     const TickType_t period = pdMS_TO_TICKS(INPUT_SCAN_INTERVAL_MS);
 
     while (true) {
+        // Wait for Boot Lock (Core 0 must finish setup)
+        if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
+        if (bootLock) xSemaphoreGive(bootLock); // Release again for other tasks
+
         sysHealthReport(HB_BIT_ZONE); 
 
-        uint16_t inputs = ioExpanderReadInputs();
+        uint16_t inputs = 0;
+        if (!ioExpanderReadInputs(&inputs)) {
+            // Bus busy or faulted: skip update to fail-secure
+            vTaskDelayUntil(&lastWakeTime, period);
+            continue;
+        }
         zonesUpdate(inputs);
 
         bool currentAllClear = zonesAllClear();
@@ -242,6 +252,10 @@ static void zoneTask(void* pvParameters)
 static void netWorkerTask(void* pvParameters)
 {
     while (true) {
+        // Wait for Boot Lock
+        if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
+        if (bootLock) xSemaphoreGive(bootLock);
+
         sysHealthReport(HB_BIT_NET); 
 
         smsGatewayUpdate(); 
@@ -259,6 +273,10 @@ static void netWorkerTask(void* pvParameters)
 static void mqttWorkerTask(void* pvParameters)
 {
     while (true) {
+        // Wait for Boot Lock
+        if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
+        if (bootLock) xSemaphoreGive(bootLock);
+
         sysHealthReport(HB_BIT_MQTT); 
 
         uint32_t now = millis();
@@ -276,6 +294,10 @@ static void mqttWorkerTask(void* pvParameters)
 static void cliWorkerTask(void* pvParameters)
 {
     while (true) {
+        // Wait for Boot Lock
+        if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
+        if (bootLock) xSemaphoreGive(bootLock);
+
         sysHealthReport(HB_BIT_CLI); 
 
         cliUpdate();
@@ -286,6 +308,10 @@ static void cliWorkerTask(void* pvParameters)
 static void alertWorkerTask(void* pvParameters)
 {
     while (true) {
+        // Wait for Boot Lock
+        if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
+        if (bootLock) xSemaphoreGive(bootLock);
+
         sysHealthReport(HB_BIT_ALERT); 
 
         processAlertQueue(); 
@@ -327,8 +353,8 @@ static void schedulerTask(void* pvParameters)
                     AlarmState st = alarmGetState();
                     if (st == ALARM_DISARMED) {
                         LOG_INFO(TAG, "Auto-Arming (%02d:%02d)", aHr, aMin);
-                        if (configGetScheduleMode() == ALARM_ARMED_HOME) alarmArmHome("AUTO");
-                        else alarmArmAway("AUTO");
+                        if (configGetScheduleMode() == ALARM_ARMED_HOME) alarmArmHomeInternal();
+                        else alarmArmAwayInternal();
                         lastFiredMin = currentMin;
                     }
                 }
@@ -336,7 +362,7 @@ static void schedulerTask(void* pvParameters)
                     AlarmState st = alarmGetState();
                     if (st != ALARM_DISARMED) {
                         LOG_INFO(TAG, "Auto-Disarming (%02d:%02d)", dHr, dMin);
-                        alarmDisarm("AUTO");
+                        alarmDisarmInternal();
                         lastFiredMin = currentMin;
                     }
                 }
@@ -354,6 +380,8 @@ void setup()
 {
     esp_task_wdt_init(15, true); 
     esp_task_wdt_add(NULL);      
+
+    bootLock = xSemaphoreCreateBinary(); // Boot Lock (Atomic Startup Sync)
 
     logInit();
 
@@ -427,6 +455,8 @@ void setup()
     mqttInit();
     onvifInit();
 
+    xSemaphoreGive(bootLock); // Release workers (Total Sync achieved)
+    networkDiscoveryInit();   // Enable .local discovery
     LOG_INFO(TAG, "Startup complete!");
 
     // Final Aegis: Print dropped logs if any during startup
@@ -467,8 +497,8 @@ static void restartTask(int index)
         case 1: xTaskCreatePinnedToCore(netWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
         case 2: xTaskCreatePinnedToCore(mqttWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
         case 3: xTaskCreatePinnedToCore(heartbeatTask, names[index], 2048, NULL, 1, &taskHandles[index], 1); break;
-        case 4: xTaskCreatePinnedToCore(cliWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 1); break;
-        case 5: xTaskCreatePinnedToCore(alertWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 1); break;
+        case 4: xTaskCreatePinnedToCore(cliWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
+        case 5: xTaskCreatePinnedToCore(alertWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
     }
 }
 

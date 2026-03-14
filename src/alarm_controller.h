@@ -14,6 +14,7 @@ enum AlarmState : uint8_t {
     ALARM_ARMED_HOME  = 3,   // Perimeter only (24H + instant)
     ALARM_ENTRY_DELAY = 4,   // Entry delay countdown
     ALARM_TRIGGERED   = 5,   // Alarm active — siren on, SMS sent
+    ALARM_BUSY        = 6,   // Mutex contention / system syncing
 };
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,11 @@ bool alarmArmHome(const char* pin);
 /// Disarm the system. Returns false if PIN is wrong.
 bool alarmDisarm(const char* pin);
 
+/// Internal use only: Arm/Disarm without PIN (for scheduler/automated tasks).
+bool alarmArmAwayInternal();
+bool alarmArmHomeInternal();
+bool alarmDisarmInternal();
+
 /// Mute/silence the siren without disarming. Returns false if PIN is wrong.
 bool alarmMuteSiren(const char* pin);
 
@@ -85,8 +91,11 @@ const char* alarmGetStateStr();
 /// Get the remaining delay time (entry or exit), in seconds.
 uint16_t alarmGetDelayRemaining();
 
-/// Set the alarm PIN code.
-void alarmSetPin(const char* pin);
+/// Set the alarm PIN code. Requires current PIN for authorization.
+bool alarmSetPin(const char* currentPin, const char* newPin);
+
+/// Internal use only: Load PIN from NVS on boot without validation.
+void alarmLoadPin(const char* pin);
 
 /// Securely copy the current alarm PIN code into the destination buffer
 void alarmCopyPin(char* dest, size_t maxLen);

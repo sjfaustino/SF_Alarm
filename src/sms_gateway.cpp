@@ -16,13 +16,14 @@ static const char* TAG = "SMS";
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
-static char routerIp[64]   = "";
-static char routerUser[32] = "";
-static char routerPass[64] = "";
-
 static String sysauthCookie = "";   // LuCI sysauth cookie
 static String csrfToken     = "";   // LuCI CSRF token (from HTML pages)
 static bool   loggedIn      = false;
+static SemaphoreHandle_t smsMutex = NULL; // Protects lastError and session state
+
+static char routerIp[64]   = "";
+static char routerUser[32] = "";
+static char routerPass[64] = "";
 
 static size_t urlEncodeTo(const char* src, char* dest, size_t destSize) {
     static const char *hexChars = "0123456789ABCDEF";
@@ -54,16 +55,19 @@ static const int    RETRY_DELAY_MS  = 2000;
 
 static void setError(const char* fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(lastError, sizeof(lastError), fmt, args);
-    va_end(args);
+    if (smsMutex && xSemaphoreTake(smsMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(lastError, sizeof(lastError), fmt, args);
+        va_end(args);
+        xSemaphoreGive(smsMutex);
+    }
     LOG_ERROR(TAG, "%s", lastError);
 }
 
-static String buildUrl(const char* path)
+static void buildUrlStr(const char* path, char* dest, size_t maxLen)
 {
-    return String("http://") + routerIp + path;
+    snprintf(dest, maxLen, "http://%s%s", routerIp, path);
 }
 
 
@@ -143,8 +147,9 @@ bool smsGatewayLogin()
     // Note: Cudy LT500D returns the login page with HTTP 403 status.
     // We accept both 200 and 403 as valid responses.
     HTTPClient http;
-    String loginPageUrl = buildUrl("/cgi-bin/luci/");
-    LOG_INFO(TAG, "Fetching login page: %s", loginPageUrl.c_str());
+    char loginPageUrl[128];
+    buildUrlStr("/cgi-bin/luci/", loginPageUrl, sizeof(loginPageUrl));
+    LOG_INFO(TAG, "Fetching login page: %s", loginPageUrl);
 
     http.begin(loginPageUrl);
     http.setTimeout(10000);
@@ -190,6 +195,11 @@ bool smsGatewayLogin()
             if (salt == "" && strcasestr(buffer, "name=\"salt\""))  salt  = extractBetween(buffer, "value=\"", "\"");
             if (token == "" && strcasestr(buffer, "name=\"token\"")) token = extractBetween(buffer, "value=\"", "\"");
 
+            // HARDENING: Prevent heap detonation by malformed/maliciously large tags
+            if (_csrf.length() > 256) _csrf = "";
+            if (salt.length() > 256) salt = "";
+            if (token.length() > 256) token = "";
+
             // If buffer is full, shift it to keep the last 128 bytes (overlapping window)
             if (bufPos >= (int)sizeof(buffer) - 1) {
                 const int OVERLAP = 128;
@@ -217,20 +227,27 @@ bool smsGatewayLogin()
     // finalHash = SHA256(hash1 + token)
     String finalHash = sha256Hex(hashVal1 + token);
 
-    LOG_INFO(TAG, "Login factors: _csrf=%.8s... token=%.8s... salt=%.8s...",
-                   _csrf.c_str(), token.c_str(), salt.c_str());
+    LOG_INFO(TAG, "Login factors extracted (Scrubbing intermediates...)");
+    
+    // Scrub intermediate hashes and tokens
+    scrubString(hashVal1);
+    scrubString(token);
 
     Serial.printf("[SMS] Password hashed OK\n");
 
     // --- Step 3: POST login ---
     // NOTE: LuCI uses Referer as an additional CSRF check.
     // A missing or wrong Referer header causes a 403 even with a valid token.
-    String loginUrl = buildUrl("/cgi-bin/luci/");
+    char loginUrl[128];
+    buildUrlStr("/cgi-bin/luci/", loginUrl, sizeof(loginUrl));
     HTTPClient http2;
     http2.begin(loginUrl);
     http2.addHeader("Content-Type", "application/x-www-form-urlencoded");
     http2.addHeader("Referer", loginUrl);  // Required by LuCI CSRF guard
-    http2.addHeader("Origin", String("http://") + routerIp);
+    
+    char originUrl[128];
+    snprintf(originUrl, sizeof(originUrl), "http://%s", routerIp);
+    http2.addHeader("Origin", originUrl);
     http2.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     http2.setTimeout(10000);
 
@@ -241,11 +258,15 @@ bool smsGatewayLogin()
     urlEncodeTo(_csrf.c_str(), encCsrf, sizeof(encCsrf));
     
     // Minimal POST body — only the fields Cudy LuCI actually requires
-    String postData = String("_csrf=") + encCsrf +
-                      "&luci_username=" + routerUser +
-                      "&luci_password=" + finalHash;
+    // Minimal POST body — only the fields Cudy LuCI actually requires
+    char postData[1024];
+    snprintf(postData, sizeof(postData), 
+             "_csrf=%s&luci_username=%s&luci_password=%s",
+             encCsrf, routerUser, finalHash.c_str());
+    
+    scrubString(finalHash); // Absolute final scrub of the credential hash
 
-    LOG_INFO(TAG, "Login POST to %s (body len=%d)", loginUrl.c_str(), postData.length());
+    LOG_INFO(TAG, "Login POST to %s (body len=%d)", loginUrl, strlen(postData));
     // SECURITY: Do NOT log CSRF token, password hash, or credentials.
 
     int postCode = http2.POST(postData);
@@ -293,7 +314,8 @@ bool smsGatewayLogin()
 
     // --- Step 4: Fetch SMS page to get the page-level CSRF token ---
     HTTPClient http3;
-    String smsUrl = buildUrl("/cgi-bin/luci/admin/network/gcom/sms?iface=4g");
+    char smsUrl[128];
+    buildUrlStr("/cgi-bin/luci/admin/network/gcom/sms?iface=4g", smsUrl, sizeof(smsUrl));
     http3.begin(smsUrl);
     http3.addHeader("Cookie", String("sysauth=") + sysauthCookie);
     http3.setTimeout(10000);
@@ -336,6 +358,14 @@ bool smsGatewayLogin()
     return true;
 }
 
+static void smsGatewayCleanup()
+{
+    // Deep Memory Scrubbing: Leave no trace of session credentials in heap fragments
+    scrubString(sysauthCookie);
+    scrubString(csrfToken);
+    loggedIn = false;
+}
+
 // ---------------------------------------------------------------------------
 // Send SMS
 // ---------------------------------------------------------------------------
@@ -349,11 +379,11 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
     }
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        // Step 1: GET the smsnew page to extract its CSRF token
         HTTPClient httpGet;
-        String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms/smsnew?nomodal=&iface=4g");
+        char getterUrl[128];
+        buildUrlStr("/cgi-bin/luci/admin/network/gcom/sms/smsnew?nomodal=&iface=4g", getterUrl, sizeof(getterUrl));
 
-        httpGet.begin(url);
+        httpGet.begin(getterUrl);
         httpGet.addHeader("Cookie", String("sysauth=") + sysauthCookie);
         httpGet.setTimeout(3000); // Fast timeout for local router access
         
@@ -364,7 +394,7 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
             setError("Send GET error: %d (attempt %d)", getCode, attempt + 1);
             httpGet.end();
             if (getCode == 401) {
-                loggedIn = false;
+                smsGatewayCleanup();
                 if (smsGatewayLogin()) continue;
                 return false;
             }
@@ -402,9 +432,6 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
                 }
             }
         }
-        httpGet.end();
-
-
         if (sendToken.length() == 0) {
             setError("No token on smsnew page (attempt %d)", attempt + 1);
             if (attempt < MAX_RETRIES - 1) vTaskDelay(pdMS_TO_TICKS(100));
@@ -415,41 +442,39 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
 
         // Step 2: POST the SMS
         HTTPClient httpPost;
-        httpPost.begin(url);
+        char targetUrl[128];
+        buildUrlStr("/cgi-bin/luci/admin/network/gcom/sms/smsnew?nomodal=&iface=4g", targetUrl, sizeof(targetUrl));
+        httpPost.begin(targetUrl);
         httpPost.addHeader("Content-Type", "application/x-www-form-urlencoded");
         httpPost.addHeader("Cookie", String("sysauth=") + sysauthCookie);
         httpPost.setTimeout(5000); // 5s is plenty for a local POST
 
+        char sendTokenSnapshot[128];
+        strncpy(sendTokenSnapshot, sendToken.c_str(), sizeof(sendTokenSnapshot) - 1);
+        sendTokenSnapshot[sizeof(sendTokenSnapshot) - 1] = '\0';
+        scrubString(sendToken); // Scrub the original transient token
+
         esp_task_wdt_reset(); // Reset watchdog before blocking call
         
         // URL-encode message (form encoding) - Robust Citadel Implementation
-        String encodedMsg = "";
-        encodedMsg.reserve(strlen(message) * 3);
-        const char* hex = "0123456789ABCDEF";
-        for (unsigned int i = 0; i < strlen(message); i++) {
-            unsigned char c = (unsigned char)message[i];
-            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-                encodedMsg += (char)c;
-            } else if (c == ' ') {
-                encodedMsg += '+';
-            } else {
-                encodedMsg += '%';
-                encodedMsg += hex[c >> 4];
-                encodedMsg += hex[c & 0x0F];
+        char encodedMsg[1024];
+        urlEncodeTo(message, encodedMsg, sizeof(encodedMsg));
+        
+        // Manual form encoding adjustment (replace %20 with + for standard form POST)
+        for (int i = 0; encodedMsg[i] != '\0'; i++) {
+            if (encodedMsg[i] == '%' && encodedMsg[i+1] == '2' && encodedMsg[i+2] == '0') {
+                encodedMsg[i] = '+';
+                // shift remainder left
+                memmove(&encodedMsg[i+1], &encodedMsg[i+3], strlen(&encodedMsg[i+3]) + 1);
             }
         }
 
-        if (encodedMsg.length() > 1024) {
-            setError("Payload too large after URL encoding (%d bytes)", (int)encodedMsg.length());
-            httpPost.end();
-            return false;
-        }
-
-        String postData = String("token=") + sendToken +
-                          "&cbid.smsnew.1.phone=" + phoneNumber +
-                          "&cbid.smsnew.1.content=" + encodedMsg +
-                          "&cbi.submit=1" +
-                          "&cbid.smsnew.1.send=Send";
+        char postData[2048];
+        snprintf(postData, sizeof(postData), 
+                 "token=%s&cbid.smsnew.1.phone=%s&cbid.smsnew.1.content=%s&cbi.submit=1&cbid.smsnew.1.send=Send",
+                 sendTokenSnapshot, phoneNumber, encodedMsg);
+        
+        memset(sendTokenSnapshot, 0, sizeof(sendTokenSnapshot)); // Scrub
 
         int httpCode = httpPost.POST(postData);
         Serial.printf("[SMS] Send POST response: %d\n", httpCode);
@@ -460,14 +485,10 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
             return true;
         } else if (httpCode == 403 || httpCode == 401) {
             httpPost.end();
-            loggedIn = false;
+            smsGatewayCleanup();
             if (smsGatewayLogin()) continue;
             return false;
-        } else {
-            setError("Send HTTP error: %d (attempt %d)", httpCode, attempt + 1);
-            httpPost.end();
         }
-
         if (attempt < MAX_RETRIES - 1) {
             // Replaced delay() with non-blocking yield to keep netWorkerTask alive
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -488,9 +509,10 @@ static int smsGatewayPollMessages(SmsMessage* msgs, int maxMessages, const char*
 
     HTTPClient http;
     String pathStr = String("/cgi-bin/luci/admin/network/gcom/sms/smslist?smsbox=") + boxParam + "&iface=4g";
-    String url = buildUrl(pathStr.c_str());
-
-    http.begin(url);
+    char pollUrl[128];
+    buildUrlStr(pathStr.c_str(), pollUrl, sizeof(pollUrl));
+    
+    http.begin(pollUrl);
     http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
     http.setConnectTimeout(2000);
     http.setTimeout(3000);
@@ -499,9 +521,9 @@ static int smsGatewayPollMessages(SmsMessage* msgs, int maxMessages, const char*
 
     if (httpCode == 403 || httpCode == 401) {
         http.end();
-        loggedIn = false;
+        smsGatewayCleanup();
         if (smsGatewayLogin()) {
-            http.begin(url);
+            http.begin(pollUrl);
             http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
             http.setConnectTimeout(2000);
             http.setTimeout(3000); 
@@ -641,8 +663,8 @@ bool smsGatewayDeleteMessage(int messageId)
     snprintf(cfgBuf, sizeof(cfgBuf), "cfg%06x", (unsigned int)messageId);
 
     HTTPClient http;
-    String url = buildUrl("/cgi-bin/luci/admin/network/gcom/sms/delsms?iface=4g&cfg=");
-    url += cfgBuf;
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s/cgi-bin/luci/admin/network/gcom/sms/delsms?iface=4g&cfg=%s", routerIp, cfgBuf);
 
     http.begin(url);
     http.addHeader("Cookie", String("sysauth=") + sysauthCookie);
@@ -656,8 +678,8 @@ bool smsGatewayDeleteMessage(int messageId)
         loggedIn = false;
         if (smsGatewayLogin()) {
             HTTPClient http2;
-            String url2 = buildUrl("/cgi-bin/luci/admin/network/gcom/sms/delsms?iface=4g&cfg=");
-            url2 += cfgBuf;
+            char url2[128];
+            snprintf(url2, sizeof(url2), "http://%s/cgi-bin/luci/admin/network/gcom/sms/delsms?iface=4g&cfg=%s", routerIp, cfgBuf);
             http2.begin(url2);
             http2.addHeader("Cookie", String("sysauth=") + sysauthCookie);
             http2.setTimeout(10000);
@@ -718,23 +740,40 @@ void smsGatewayInit(const char* ip, const char* user, const char* pass)
     routerUser[sizeof(routerUser) - 1] = '\0';
     strncpy(routerPass, pass, sizeof(routerPass) - 1);
     routerPass[sizeof(routerPass) - 1] = '\0';
-    loggedIn = false;
     sysauthCookie = "";
     csrfToken = "";
+    loggedIn = false;
+    
+    if (smsMutex == NULL) {
+        smsMutex = xSemaphoreCreateMutex();
+    }
+
     Serial.printf("[SMS] Gateway init — router: %s\n", routerIp);
 }
 
 void smsGatewaySetCredentials(const char* ip, const char* user, const char* pass)
 {
-    strncpy(routerIp, ip, sizeof(routerIp) - 1);
-    routerIp[sizeof(routerIp) - 1] = '\0';
-    strncpy(routerUser, user, sizeof(routerUser) - 1);
-    routerUser[sizeof(routerUser) - 1] = '\0';
-    strncpy(routerPass, pass, sizeof(routerPass) - 1);
-    routerPass[sizeof(routerPass) - 1] = '\0';
-    loggedIn = false;
+    // Scrub old sensitive data
+    memset(routerIp, 0, sizeof(routerIp));
+    memset(routerUser, 0, sizeof(routerUser));
+    memset(routerPass, 0, sizeof(routerPass));
     sysauthCookie = "";
     csrfToken = "";
+    loggedIn = false;
+
+    if (ip) {
+        strncpy(routerIp, ip, sizeof(routerIp) - 1);
+        routerIp[sizeof(routerIp) - 1] = '\0';
+    }
+    if (user) {
+        strncpy(routerUser, user, sizeof(routerUser) - 1);
+        routerUser[sizeof(routerUser) - 1] = '\0';
+    }
+    if (pass) {
+        strncpy(routerPass, pass, sizeof(routerPass) - 1);
+        routerPass[sizeof(routerPass) - 1] = '\0';
+    }
+    
     Serial.printf("[SMS] Credentials updated — router: %s\n", routerIp);
 }
 

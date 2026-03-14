@@ -70,7 +70,8 @@ static void cmdZonesCallback(cmd* c) {
 }
 
 static void cmdInputsCallback(cmd* c) {
-    uint16_t inputs = ioExpanderReadInputs();
+    uint16_t inputs = 0;
+    ioExpanderReadInputs(&inputs);
     Serial.printf("Inputs: 0x%04X (", inputs);
     for (int i = 15; i >= 0; i--) {
         Serial.print((inputs >> i) & 1);
@@ -203,6 +204,25 @@ static void cmdZoneUpdateCallback(cmd* c) {
     if (changed) {
         configSave();
         Serial.printf("Zone %d updated.\n", zoneNum);
+    }
+}
+
+static void cmdSetPinCallback(cmd* c) {
+    if (!requirePin(c)) return;
+    Command cmd(c);
+    
+    String currentPin = cmd.getArgument("pin").getValue();
+    String newPin = cmd.getArgument("new").getValue();
+    
+    if (newPin.length() == 0) {
+        Serial.println("ERROR: Must provide -new <NEW_PIN>");
+        return;
+    }
+
+    if (alarmSetPin(currentPin.c_str(), newPin.c_str())) {
+        Serial.println("PIN updated successfully.");
+    } else {
+        Serial.println("ERROR: Failed to update PIN.");
     }
 }
 
@@ -410,6 +430,10 @@ void cliInit() {
     cmdRouter.addArgument("pass", "");
     cmdRouter.addArgument("pin", "");
 
+    Command cmdSetPin = cli.addCommand("setpin", cmdSetPinCallback);
+    cmdSetPin.addArgument("pin", "");
+    cmdSetPin.addArgument("new", "");
+
     LOG_INFO(TAG, "Serial Interface Initialized. Type 'help' for command list.");
     printPrompt();
 }
@@ -429,13 +453,10 @@ void cliUpdate() {
             printPrompt();
             return;
         }
-        uint16_t inputs = ioExpanderReadInputs();
+        uint16_t inputs = 0;
+        ioExpanderReadInputs(&inputs);
         if (inputs != lastMonitorInputs) {
-            Serial.printf("  Inputs: 0x%04X |", inputs);
-            for (int i = 0; i < 16; i++) {
-                Serial.printf(" %d:%d", i + 1, (inputs >> i) & 1);
-            }
-            Serial.println();
+            Serial.printf("  Inputs: 0x%04X\n", inputs);
             lastMonitorInputs = inputs;
         }
         return; 
@@ -445,6 +466,8 @@ void cliUpdate() {
 
     // --- Normal CLI processing ---
     static String inputStr = "";
+    inputStr.reserve(256); // Pre-allocate
+
     while (Serial.available()) {
         char c = (char)Serial.read();
         
@@ -454,6 +477,10 @@ void cliUpdate() {
             Serial.println();
             if (inputStr.length() > 0) {
                 cli.parse(inputStr); // Pass to SimpleCLI
+                // Deep Memory Scrubbing: Exorcise the static buffer immediately (Obsidian Aegis)
+                for (size_t i = 0; i < inputStr.length(); i++) {
+                    ((volatile char*)inputStr.c_str())[i] = 0;
+                }
                 inputStr = "";
             }
             printPrompt();
@@ -463,8 +490,11 @@ void cliUpdate() {
                   Serial.print("\b \b");
              }
         } else if (isPrintable(c)) {
-             inputStr += c;
-             Serial.print(c);
+             // HARDENING: Strictly cap input length to prevent heap DoS
+             if (inputStr.length() < 256) {
+                 inputStr += c;
+                 Serial.print(c);
+             }
         }
     }
 }

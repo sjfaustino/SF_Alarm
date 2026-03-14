@@ -47,8 +47,10 @@ void logPrintf(const char* level, const char* tag, const char* fmt, ...) {
     vsnprintf(log.msg, sizeof(log.msg), fmt, args);
     va_end(args);
 
-    // Strictly non-blocking to protect real-time loops (e.g. Zone Polling).
-    if (xQueueSend(logQueue, &log, 0) != pdTRUE) {
+    // Strictly non-blocking: Submit-and-go. 
+    // If the queue is full (e.g. during a boot storm), we drop the log 
+    // rather than starving real-time tasks like Zone Polling.
+    if (xQueueSend(logQueue, &log, (TickType_t)0) != pdTRUE) {
         droppedLogs++;
     }
 }

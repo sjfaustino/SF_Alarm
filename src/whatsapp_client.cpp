@@ -27,21 +27,28 @@ static size_t urlEncodeTo(const char* src, char* dest, size_t destSize) {
 static char waPhone[32] = "";
 static char waApiKey[32] = "";
 static WhatsAppMode waMode = WA_MODE_SMS;
+static SemaphoreHandle_t waMutex = NULL;
 
 void whatsappInit() {
+    if (waMutex == NULL) {
+        waMutex = xSemaphoreCreateMutex();
+    }
     LOG_INFO(TAG, "WhatsApp client initialized");
 }
 
 void whatsappSetConfig(const char* phone, const char* apiKey, WhatsAppMode mode) {
-    if (phone) {
-        strncpy(waPhone, phone, sizeof(waPhone) - 1);
-        waPhone[sizeof(waPhone) - 1] = '\0';
+    if (waMutex && xSemaphoreTake(waMutex, portMAX_DELAY) == pdTRUE) {
+        if (phone) {
+            strncpy(waPhone, phone, sizeof(waPhone) - 1);
+            waPhone[sizeof(waPhone) - 1] = '\0';
+        }
+        if (apiKey) {
+            strncpy(waApiKey, apiKey, sizeof(waApiKey) - 1);
+            waApiKey[sizeof(waApiKey) - 1] = '\0';
+        }
+        waMode = mode;
+        xSemaphoreGive(waMutex);
     }
-    if (apiKey) {
-        strncpy(waApiKey, apiKey, sizeof(waApiKey) - 1);
-        waApiKey[sizeof(waApiKey) - 1] = '\0';
-    }
-    waMode = mode;
     LOG_INFO(TAG, "Config updated: Phone=%s, Mode=%d", waPhone, (int)waMode);
 }
 
@@ -60,20 +67,41 @@ bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
         return false;
     }
 
-    // Stack-allocated buffers (Zero-Heap architecture)
-    char url[768];
-    char encodedMsg[512];
-    
-    urlEncodeTo(message, encodedMsg, sizeof(encodedMsg));
-    
-    snprintf(url, sizeof(url), 
-             "https://api.callmebot.com/whatsapp.php?phone=%s&text=%s&apikey=%s",
-             phone, encodedMsg, apiKey);
+    // Strictly non-blocking: Submit-and-go. 
+    // Truncation Guard: 400 chars is max for CallMeBot API safety.
+    if (strlen(message) > 400) {
+        LOG_ERROR(TAG, "Message too large (%d). Truncating.", (int)strlen(message));
+    }
 
-    LOG_INFO(TAG, "Dispatching alert to %s...", phone);
+    // Stack-allocated buffers (Zero-Heap architecture)
+    char encodedMsg[768]; // Buffer for the encoded message
+    urlEncodeTo(message, encodedMsg, sizeof(encodedMsg)); // Re-entrant urlEncodeTo
+
+    char stackPhone[32];
+    char stackApiKey[32];
     
+    bool credsOk = false;
+    if (waMutex && xSemaphoreTake(waMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        strncpy(stackPhone, waPhone, sizeof(stackPhone)-1);
+        stackPhone[sizeof(stackPhone)-1] = '\0';
+        strncpy(stackApiKey, waApiKey, sizeof(stackApiKey)-1);
+        stackApiKey[sizeof(stackApiKey)-1] = '\0';
+        credsOk = (strlen(stackPhone) > 0 && strlen(stackApiKey) > 0);
+        xSemaphoreGive(waMutex);
+    }
+
+    if (!credsOk) {
+        LOG_ERROR(TAG, "Credentials not valid in mutex cycle");
+        return false;
+    }
+
+    char fullUrl[1024];
+    snprintf(fullUrl, sizeof(fullUrl),
+             "https://api.callmebot.com/whatsapp.php?phone=%s&text=%s&apikey=%s",
+             stackPhone, encodedMsg, stackApiKey);
+
     HTTPClient http;
-    http.begin(url);
+    http.begin(fullUrl);
     http.setTimeout(3000); // Strict 3s timeout to prevent queue starvation
     
     int code = http.GET();

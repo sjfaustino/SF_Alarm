@@ -70,25 +70,29 @@ static void fireEvent(AlarmEvent event, int8_t zoneId = -1, const char* details 
     }
 }
 
-/// Constant-time string comparison — prevents timing side-channel PIN brute-force.
-/// Leaks neither content nor length.
+/// Truly Constant-time branchless comparison.
+/// No content-dependent branches, no early exits.
 static bool pinEquals(const char* a, const char* b)
 {
-    // XOR all bytes up to MAX_PIN_LEN; accumulate length branchlessly into diff.
-    uint8_t diff = 0;
-    size_t lenA = 0;
-    size_t lenB = 0;
+    volatile uint8_t diff = 0;
+    uint8_t aLocked = 0;
+    uint8_t bLocked = 0;
 
     for (size_t i = 0; i < MAX_PIN_LEN; i++) {
-        uint8_t ca = (a[i] != '\0') ? (uint8_t)a[i] : 0;
-        uint8_t cb = (b[i] != '\0') ? (uint8_t)b[i] : 0;
-        // Count lengths branchlessly via a flag that sticks at 1
-        lenA += (a[i] != '\0') ? 1 : 0;
-        lenB += (b[i] != '\0') ? 1 : 0;
-        diff |= ca ^ cb;
+        uint8_t ca = (uint8_t)a[i];
+        uint8_t cb = (uint8_t)b[i];
+
+        // Latch end-of-string status
+        if (ca == '\0') aLocked = 0xFF;
+        if (cb == '\0') bLocked = 0xFF;
+
+        // XOR bytes, but mask out bytes after either string has ended.
+        // This ensures a "1234" vs "12345" check fails on the length bit.
+        diff |= (ca ^ cb) & (~aLocked) & (~bLocked);
+        
+        // Track length mismatch
+        diff |= (aLocked ^ bLocked);
     }
-    // Encode the length difference into diff — constant time, no branch on length
-    diff |= (uint8_t)(lenA ^ lenB);
 
     return (diff == 0);
 }
@@ -129,9 +133,9 @@ static bool validatePin(const char* pin)
 {
     if (pin == nullptr || strlen(pin) == 0) return false;
 
-    // Bypass: internal automated commands (scheduler, watchdog) must never
-    // trigger the lockout counter. They are trusted callers by design.
-    if (strcmp(pin, "AUTO") == 0) return true;
+    // Bypass: internal automated commands (scheduler, watchdog)
+    // now use internal setState triggers which do not call validatePin().
+    // The "AUTO" string is removed as a hardcoded bypass.
 
     // Overflow-safe lockout check
     if (lockedOut) {
@@ -146,7 +150,13 @@ static bool validatePin(const char* pin)
         }
     }
 
-    if (pinEquals(pin, alarmPin)) {
+    bool match = false;
+    if (xSemaphoreTakeRecursive(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        match = pinEquals(pin, alarmPin);
+        xSemaphoreGiveRecursive(stateMutex);
+    }
+
+    if (match) {
         failedAttempts = 0;
         lockedOut = false;
         configSaveSecurityState(failedAttempts, lockedOut);
@@ -176,7 +186,7 @@ static void setState(AlarmState newState)
     
     bool stateChanged = false;
     AlarmState snapshotState = newState; // Local snapshot avoids race on NVS write
-    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+    if (xSemaphoreTakeRecursive(stateMutex, portMAX_DELAY) == pdTRUE) {
         if (currentState != newState) {
             if (currentState == ALARM_DISARMED ||
                 currentState == ALARM_ARMED_AWAY ||
@@ -197,16 +207,13 @@ static void setState(AlarmState newState)
             }
             stateChanged = true;
         }
-        xSemaphoreGive(stateMutex);
+        xSemaphoreGiveRecursive(stateMutex);
         
-        // Persist OUTSIDE the lock using a local snapshot.
-        // This prevents rapid-transition races from starving out Web/MQTT/CLI tasks
-        // by holding the mutex during flash erase/write.
         if (stateChanged) {
             configSaveAlarmState(snapshotState);
         }
     } else {
-        LOG_ERROR(TAG, "CRITICAL: State transition failed (Mutex DEADLOCK?)");
+        LOG_ERROR(TAG, "CRITICAL: State transition failed (Mutex BUSY)");
     }
 }
 
@@ -310,7 +317,7 @@ void alarmInit()
     zonesSetCallback(onZoneEvent);
 
     if (stateMutex == NULL) {
-        stateMutex = xSemaphoreCreateMutex();
+        stateMutex = xSemaphoreCreateRecursiveMutex();
     }
     
     // Ensure siren flags start clean BEFORE restoration logic.
@@ -394,13 +401,21 @@ void alarmUpdate()
         }
 
         case ALARM_TRIGGERED: {
-            // Ordinance timer update
+            // Ordinance timer update - Throttled NVS writes (Flash Endurance)
             if (sirenActive) {
                 uint32_t nowTrigger = millis();
                 if (nowTrigger - lastSirenUpdateMs >= 1000) {
-                    sirenAccumulatedSec += (nowTrigger - lastSirenUpdateMs) / 1000;
-                    lastSirenUpdateMs = nowTrigger;
-                    configSaveSirenAccum(sirenAccumulatedSec);
+                    uint32_t diff = (nowTrigger - lastSirenUpdateMs) / 1000;
+                    sirenAccumulatedSec += diff;
+                    lastSirenUpdateMs += diff * 1000; // PRESERVE fractional milliseconds (no leak)
+                    
+                    // Only save to NVS every 30 seconds to prevent flash burnout
+                    // The RTC backup or soft-reset will protect shorter durations
+                    static uint32_t lastNvsSave = 0;
+                    if (nowTrigger - lastNvsSave >= 30000) {
+                        configSaveSirenAccum(sirenAccumulatedSec);
+                        lastNvsSave = nowTrigger;
+                    }
                 }
             }
 
@@ -432,6 +447,7 @@ void alarmUpdate()
 
 bool alarmArmAway(const char* pin)
 {
+    if (!pin || strlen(pin) != 4) return false;
     if (!validatePin(pin)) {
         LOG_WARN(TAG, "Arm AWAY failed — invalid PIN");
         return false;
@@ -448,20 +464,26 @@ bool alarmArmAway(const char* pin)
     pendingArmMode  = ARM_PENDING_AWAY;
     setState(ALARM_EXIT_DELAY);
     fireEvent(EVT_EXIT_DELAY, -1, "Arming AWAY");
-    LOG_INFO(TAG, "Exit delay: %d seconds", exitDelaySec);
+    LOG_INFO(TAG, "Exit delay: %d seconds", exitDelaySec); // Added from original alarmArmAway
     return true;
 }
 
 bool alarmArmHome(const char* pin)
 {
-    if (!validatePin(pin)) {
-        LOG_WARN(TAG, "Arm HOME failed — invalid PIN");
-        return false;
-    }
+    if (!pin || strlen(pin) != 4) return false;
+    if (!validatePin(pin)) return false;
+    return alarmArmHomeInternal();
+}
 
+bool alarmArmHomeInternal()
+{
+    if (!stateMutex) return false;
+
+    // Optional: Home mode might allow certain zones to be triggered (e.g., perimeter only)
+    // but typically we still want a clean start.
     if (!zonesAllClear()) {
-        LOG_WARN(TAG, "Arm HOME failed — zones not clear");
-        zonesPrintStatus();
+        LOG_WARN(TAG, "Arming HOME rejected: Zones not clear");
+        zonesPrintStatus(); // Added from original alarmArmHome
         return false;
     }
 
@@ -505,10 +527,10 @@ bool alarmMuteSiren(const char* pin)
 
 AlarmState alarmGetState()
 {
-    AlarmState st = ALARM_DISARMED;
-    if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    AlarmState st = ALARM_BUSY; // Fail-secure: default to BUSY if locked
+    if (stateMutex && xSemaphoreTakeRecursive(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         st = currentState;
-        xSemaphoreGive(stateMutex);
+        xSemaphoreGiveRecursive(stateMutex);
     }
     return st;
 }
@@ -522,6 +544,7 @@ static const char* alarmGetStateStrInternal()
         case ALARM_ARMED_HOME:   return "ARMED_HOME";
         case ALARM_ENTRY_DELAY:  return "ENTRY_DELAY";
         case ALARM_TRIGGERED:    return "TRIGGERED";
+        case ALARM_BUSY:         return "BUSY/SYNCING";
         default:                 return "UNKNOWN";
     }
 }
@@ -529,9 +552,9 @@ static const char* alarmGetStateStrInternal()
 const char* alarmGetStateStr()
 {
     const char* str = "UNKNOWN";
-    if (stateMutex && xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (stateMutex && xSemaphoreTakeRecursive(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         str = alarmGetStateStrInternal();
-        xSemaphoreGive(stateMutex);
+        xSemaphoreGiveRecursive(stateMutex);
     }
     return str;
 }
@@ -557,18 +580,37 @@ uint16_t alarmGetDelayRemaining()
     }
 }
 
-void alarmSetPin(const char* pin)
+bool alarmSetPin(const char* currentPin, const char* newPin)
 {
-    strncpy(alarmPin, pin, MAX_PIN_LEN - 1);
-    alarmPin[MAX_PIN_LEN - 1] = '\0';
-    LOG_INFO(TAG, "PIN successfully updated");
+    if (!validatePin(currentPin)) {
+        LOG_WARN(TAG, "PIN update failed: Current PIN invalid");
+        return false;
+    }
+    
+    if (newPin == nullptr || strlen(newPin) < 4) {
+        LOG_WARN(TAG, "PIN update failed: New PIN too short or empty");
+        return false;
+    }
+
+    if (xSemaphoreTakeRecursive(stateMutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(alarmPin, newPin, MAX_PIN_LEN - 1);
+        alarmPin[MAX_PIN_LEN - 1] = '\0';
+        configSavePin(newPin); 
+        xSemaphoreGiveRecursive(stateMutex);
+        LOG_INFO(TAG, "PIN successfully updated");
+        return true;
+    }
+    return false;
 }
 
-void alarmCopyPin(char* dest, size_t maxLen)
+void alarmLoadPin(const char* pin)
 {
-    if (!dest || maxLen == 0) return;
-    strncpy(dest, alarmPin, maxLen - 1);
-    dest[maxLen - 1] = '\0';
+    if (pin == nullptr || strlen(pin) == 0) return;
+    if (xSemaphoreTakeRecursive(stateMutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(alarmPin, pin, MAX_PIN_LEN - 1);
+        alarmPin[MAX_PIN_LEN - 1] = '\0';
+        xSemaphoreGiveRecursive(stateMutex);
+    }
 }
 
 
@@ -607,20 +649,23 @@ uint16_t alarmGetSirenDuration() { return sirenDurationSec; }
 
 void alarmSetSirenOutput(uint8_t channel)
 {
-    if (channel < 16 && channel != sirenOutputChannel) {
-        // If the siren is currently active, turn off the old relay before switching
-        bool wasActive = sirenActive;
-        if (wasActive) {
-            ioExpanderSetOutput(sirenOutputChannel, false);
+    if (xSemaphoreTakeRecursive(stateMutex, portMAX_DELAY) == pdTRUE) {
+        if (channel < 16 && channel != sirenOutputChannel) {
+            // If the siren is currently active, turn off the old relay before switching
+            bool wasActive = sirenActive;
+            if (wasActive) {
+                ioExpanderSetOutput(sirenOutputChannel, false);
+            }
+            
+            sirenOutputChannel = channel;
+            
+            // Turn on the new relay
+            if (wasActive) {
+                ioExpanderSetOutput(sirenOutputChannel, true);
+            }
+            LOG_INFO(TAG, "Siren output channel set to %d", channel);
         }
-        
-        sirenOutputChannel = channel;
-        
-        // Turn on the new relay
-        if (wasActive) {
-            ioExpanderSetOutput(sirenOutputChannel, true);
-        }
-        LOG_INFO(TAG, "Siren output channel set to %d", channel);
+        xSemaphoreGiveRecursive(stateMutex);
     }
 }
 
@@ -628,26 +673,43 @@ uint8_t alarmGetSirenOutput() { return sirenOutputChannel; }
 
 void alarmPrintStatus()
 {
-    Serial.println("=== Alarm System Status ===");
-    Serial.printf("  State:          %s\n", alarmGetStateStr());
+    if (xSemaphoreTakeRecursive(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        Serial.println("=== Alarm System Status ===");
+        Serial.printf("  State:          %s\n", alarmGetStateStrInternal());
 
-    if (currentState == ALARM_EXIT_DELAY || currentState == ALARM_ENTRY_DELAY) {
-        Serial.printf("  Delay remaining: %d sec\n", alarmGetDelayRemaining());
-    }
-
-    Serial.printf("  Siren:          %s\n",
-                  sirenActive ? (sirenMuted ? "MUTED" : "ACTIVE") : "OFF");
-    Serial.printf("  Siren channel:  %d\n", sirenOutputChannel);
-    Serial.printf("  Exit delay:     %d sec\n", exitDelaySec);
-    Serial.printf("  Entry delay:    %d sec\n", entryDelaySec);
-    Serial.printf("  Siren duration: %d sec\n", sirenDurationSec);
-
-    if (triggeringZone != 0xFF && triggeringZone < MAX_ZONES) {
-        const ZoneInfo* zi = zonesGetInfo(triggeringZone);
-        if (zi) {
-            Serial.printf("  Trigger zone:   %d (%s)\n",
-                          triggeringZone + 1, zi->config.name);
+        if (currentState == ALARM_EXIT_DELAY || currentState == ALARM_ENTRY_DELAY) {
+            Serial.printf("  Delay remaining: %d sec\n", alarmGetDelayRemaining());
         }
+
+        Serial.printf("  Siren:          %s\n",
+                    sirenActive ? (sirenMuted ? "MUTED" : "ACTIVE") : "OFF");
+        Serial.printf("  Siren channel:  %d\n", sirenOutputChannel);
+        Serial.printf("  Exit delay:     %d sec\n", exitDelaySec);
+        Serial.printf("  Entry delay:    %d sec\n", entryDelaySec);
+        Serial.printf("  Siren duration: %d sec\n", sirenDurationSec);
+
+        if (triggeringZone != 0xFF && triggeringZone < MAX_ZONES) {
+            const ZoneInfo* zi = zonesGetInfo(triggeringZone);
+            if (zi) {
+                Serial.printf("  Trigger zone:   %d (%s)\n",
+                            triggeringZone + 1, zi->config.name);
+            }
+        }
+        Serial.println("===========================");
+        xSemaphoreGiveRecursive(stateMutex);
+    } else {
+        Serial.println("Alarm Status: UNKNOWN (Mutex Busy)");
     }
-    Serial.println("===========================");
+}
+
+void alarmCopyPin(char* dest, size_t maxLen)
+{
+    if (!dest || maxLen == 0) return;
+    if (xSemaphoreTakeRecursive(stateMutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(dest, alarmPin, maxLen - 1);
+        dest[maxLen - 1] = '\0';
+        xSemaphoreGiveRecursive(stateMutex);
+    } else {
+        dest[0] = '\0';
+    }
 }

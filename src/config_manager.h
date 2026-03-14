@@ -33,7 +33,7 @@ void configSave();
 
 /// Modular NVS saves to prevent flash wear-out during web requests
 /// Modular NVS saves to prevent flash wear-out during web requests
-void configSavePin();
+void configSavePin(const char* pin);
 void configSaveTiming();
 void configSaveWifi();
 void configSavePhones();

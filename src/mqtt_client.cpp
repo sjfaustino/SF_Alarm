@@ -40,14 +40,12 @@ static unsigned long lastReconnectAttempt = 0;
 // SF_Alarm/output/N -> ON/OFF
 
 /// Parse "COMMAND:PIN" format safely without mutating the input buffer
-static char mqttPinBuffer[32];
-
-static const char* extractPin(const char* message) {
+static const char* extractPin(const char* message, char* outPin, size_t outSize) {
     const char* sep = strchr(message, ':');
     if (sep) {
-        strncpy(mqttPinBuffer, sep + 1, sizeof(mqttPinBuffer) - 1);
-        mqttPinBuffer[sizeof(mqttPinBuffer) - 1] = '\0';
-        return mqttPinBuffer;
+        strncpy(outPin, sep + 1, outSize - 1);
+        outPin[outSize - 1] = '\0';
+        return outPin;
     }
     return "";
 }
@@ -66,10 +64,11 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
     }
 
     if (strstr(topic, "/cmd")) {
+        char pinBuf[16];
         // All arm/disarm commands require PIN: "COMMAND:pin"
         // MUTE is non-destructive and allowed without PIN
         if (strncmp(message, "DISARM", 6) == 0) {
-            const char* pin = extractPin(message);
+            const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
             if (alarmDisarm(pin)) {
                 mqttPublish("SF_Alarm/events", "DISARMED via MQTT");
             } else {
@@ -77,7 +76,7 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
             }
         }
         else if (strncmp(message, "ARM_HOME", 8) == 0) {
-            const char* pin = extractPin(message);
+            const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
             if (alarmArmHome(pin)) {
                 mqttPublish("SF_Alarm/events", "ARM_HOME via MQTT");
             } else {
@@ -85,7 +84,7 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
             }
         }
         else if (strncmp(message, "ARM_AWAY", 8) == 0) {
-            const char* pin = extractPin(message);
+            const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
             if (alarmArmAway(pin)) {
                 mqttPublish("SF_Alarm/events", "ARM_AWAY via MQTT");
             } else {
@@ -93,7 +92,7 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
             }
         }
         else if (strncmp(message, "MUTE", 4) == 0) {
-            const char* pin = extractPin(message);
+            const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
             if (alarmMuteSiren(pin)) {
                 mqttPublish("SF_Alarm/events", "MUTE via MQTT");
             } else {
@@ -128,10 +127,19 @@ void mqttSetServer(const char* host, uint16_t port) {
 
 void mqttSetCredentials(const char* user, const char* pass) {
     xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
-    strncpy(mqttUser, user, sizeof(mqttUser) - 1);
-    mqttUser[sizeof(mqttUser) - 1] = '\0';
-    strncpy(mqttPass, pass, sizeof(mqttPass) - 1);
-    mqttPass[sizeof(mqttPass) - 1] = '\0';
+    
+    // Scrub old credentials before overwriting
+    memset(mqttUser, 0, sizeof(mqttUser));
+    memset(mqttPass, 0, sizeof(mqttPass));
+
+    if (user) {
+        strncpy(mqttUser, user, sizeof(mqttUser) - 1);
+        mqttUser[sizeof(mqttUser) - 1] = '\0';
+    }
+    if (pass) {
+        strncpy(mqttPass, pass, sizeof(mqttPass) - 1);
+        mqttPass[sizeof(mqttPass) - 1] = '\0';
+    }
     xSemaphoreGive(mqttConfigMutex);
 }
 
@@ -180,8 +188,13 @@ void mqttUpdate() {
 
     if (!client.connected()) {
         unsigned long now = millis();
-        if (now - lastReconnectAttempt > 5000) {
+        // PHYSICAL HARDENING: Add random jitter (1-5s) to prevent thundering herd
+        static uint32_t reconnectJitter = 0;
+        if (reconnectJitter == 0) reconnectJitter = 5000 + random(5000); 
+
+        if (now - lastReconnectAttempt > reconnectJitter) {
             lastReconnectAttempt = now;
+            reconnectJitter = 5000 + random(5000); // Reset for next fail
             
             xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
             Serial.printf("[MQTT] Attempting connection to %s:%d...\n", mqttServer, mqttPort);
@@ -240,7 +253,8 @@ static const char* haStateMap[] = {
     "armed_away", // MODE_ARMED_AWAY
     "armed_home", // MODE_ARMED_HOME
     "pending",    // MODE_ENTRY_DELAY
-    "triggered"   // MODE_TRIGGERED
+    "triggered",  // MODE_TRIGGERED
+    "unavailable" // ALARM_BUSY
 };
 
 // Change detection for MQTT sync
@@ -257,7 +271,7 @@ static void internalSyncState() {
 
     // 1. Alarm State (only publish on change)
     AlarmState st = alarmGetState();
-    if ((int)st != lastPublishedState && (int)st < 6) {
+    if ((int)st != lastPublishedState && (int)st <= 6) {
         client.publish("SF_Alarm/state", haStateMap[(int)st], true);
         lastPublishedState = (int)st;
     }

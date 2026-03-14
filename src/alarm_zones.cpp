@@ -90,8 +90,8 @@ void zonesSetCallback(ZoneEventCallback cb)
 void zonesUpdate(uint16_t inputBitmask)
 {
     uint32_t now = millis();
-
-    if (xSemaphoreTake(zoneMutex, 0) != pdTRUE) return; // Skip if busy (scanned 50 times/sec, overlap is fine to skip once)
+    
+    if (xSemaphoreTake(zoneMutex, 0) != pdTRUE) return; 
 
     for (uint8_t i = 0; i < MAX_ZONES; i++) {
         if (!zones[i].config.enabled) continue;
@@ -163,6 +163,7 @@ void zonesSetBypassed(uint8_t zoneIndex, bool bypassed)
 {
     if (zoneIndex >= MAX_ZONES) return;
 
+    xSemaphoreTake(zoneMutex, portMAX_DELAY);
     if (bypassed) {
         zones[zoneIndex].state = ZONE_BYPASSED;
         Serial.printf("[ZONE] Zone %d (%s) BYPASSED\n",
@@ -174,6 +175,7 @@ void zonesSetBypassed(uint8_t zoneIndex, bool bypassed)
         Serial.printf("[ZONE] Zone %d (%s) UN-BYPASSED\n",
                       zoneIndex + 1, zones[zoneIndex].config.name);
     }
+    xSemaphoreGive(zoneMutex);
 }
 
 void zonesSetVirtualInput(uint8_t zoneIndex, bool state)
@@ -192,22 +194,29 @@ void zonesSetVirtualInput(uint8_t zoneIndex, bool state)
 
 bool zonesAllClear()
 {
+    xSemaphoreTake(zoneMutex, portMAX_DELAY);
     for (uint8_t i = 0; i < MAX_ZONES; i++) {
         if (!zones[i].config.enabled) continue;
         if (zones[i].state == ZONE_BYPASSED) continue;
-        if (zones[i].state != ZONE_NORMAL) return false;
+        if (zones[i].state != ZONE_NORMAL) {
+            xSemaphoreGive(zoneMutex);
+            return false;
+        }
     }
+    xSemaphoreGive(zoneMutex);
     return true;
 }
 
 uint16_t zonesGetTriggeredMask()
 {
     uint16_t mask = 0;
+    xSemaphoreTake(zoneMutex, portMAX_DELAY);
     for (uint8_t i = 0; i < MAX_ZONES; i++) {
         if (zones[i].state == ZONE_TRIGGERED) {
             mask |= (1 << i);
         }
     }
+    xSemaphoreGive(zoneMutex);
     return mask;
 }
 

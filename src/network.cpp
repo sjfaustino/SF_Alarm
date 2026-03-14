@@ -2,6 +2,7 @@
 #include "config.h"
 #include <WiFi.h>
 #include <ETH.h>
+#include <ESPmDNS.h>
 #include "config_manager.h"
 #include "logging.h"
 
@@ -15,6 +16,7 @@ static char wifiSsid[64] = "";
 static char wifiPass[64] = "";
 static bool connecting    = false;
 static uint32_t lastReconnectAttempt = 0;
+static uint32_t lastValidIpMs        = 0;
 static bool ethConnected  = false;
 
 static void NetworkEvent(WiFiEvent_t event)
@@ -92,6 +94,9 @@ void networkSetWifi(const char* ssid, const char* password)
     lastReconnectAttempt = millis();
 
     LOG_INFO(TAG, "Wi-Fi credentials updated: %s (use 'save' to persist)", wifiSsid);
+    
+    // Explicit Credential Hygiene: scrubbing temporary String objects if called from web/cli
+    // (Actual scrubbing of global wifiSsid/wifiPass is handled on disconnect if sensitive)
 }
 
 void networkUpdate()
@@ -101,11 +106,22 @@ void networkUpdate()
     if (strlen(wifiSsid) == 0) return;
 
     if (WiFi.status() == WL_CONNECTED) {
-        if (connecting) {
-            connecting = false;
-            LOG_INFO(TAG, "WiFi Connected: %s  RSSI: %d dBm",
-                          WiFi.localIP().toString().c_str(),
-                          WiFi.RSSI());
+        if (WiFi.localIP().toString() != "0.0.0.0") {
+            lastValidIpMs = millis();
+            if (connecting) {
+                connecting = false;
+                LOG_INFO(TAG, "WiFi Connected: %s  RSSI: %d dBm",
+                              WiFi.localIP().toString().c_str(),
+                              WiFi.RSSI());
+            }
+        } else {
+            // Zombified Connection: Connected to AP but no IP (DHCP hang)
+            if (millis() - lastValidIpMs > 60000) { // 60s timeout
+                LOG_WARN(TAG, "Network Watchdog: DHCP Hang detected. Forcing reset...");
+                WiFi.disconnect();
+                lastValidIpMs = millis(); // Reset timer to prevent rapid cycling
+                connecting = true;
+            }
         }
     } else {
         if (!connecting && !ethConnected) {
@@ -168,3 +184,18 @@ void networkPrintStatus()
 
 const char* networkGetSsid() { return wifiSsid; }
 const char* networkGetPass() { return wifiPass; }
+
+void networkDiscoveryInit()
+{
+    if (!MDNS.begin("sf-alarm")) {
+        LOG_ERROR(TAG, "mDNS: Failed to start responder");
+    } else {
+        MDNS.addService("http", "tcp", 80);
+        LOG_INFO(TAG, "mDNS: Responder started as sf-alarm.local");
+    }
+}
+
+void networkDiscoveryStop()
+{
+    MDNS.end();
+}

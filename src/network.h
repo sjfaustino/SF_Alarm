@@ -30,4 +30,7 @@ const char* networkGetSsid();
 /// Get current WiFi password (for config persistence).
 const char* networkGetPass();
 
+void networkDiscoveryInit();
+void networkDiscoveryStop();
+
 #endif // SF_ALARM_NETWORK_H
