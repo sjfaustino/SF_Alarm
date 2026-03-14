@@ -33,6 +33,14 @@ bool parseSetMultiplePhones_Mock(const char* body) {
     return true;
 }
 
+void setUp(void) {
+    // set stuff up here
+}
+
+void tearDown(void) {
+    // clean stuff up here
+}
+
 void test_sms_multiple_phones_parsing() {
     TEST_ASSERT_TRUE(parseSetMultiplePhones_Mock("@#600111222#600333444#"));
     TEST_ASSERT_EQUAL(2, phoneCount);

@@ -30,6 +30,14 @@ void simulate_boot(TestState savedNvsState) {
     }
 }
 
+void setUp(void) {
+    // set stuff up here
+}
+
+void tearDown(void) {
+    // clean stuff up here
+}
+
 void test_chronos_warm_boot_resumption() {
     mock_rtc_valid = true;
     mock_rtc_delay = 15;

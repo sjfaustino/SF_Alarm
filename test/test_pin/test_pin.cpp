@@ -33,6 +33,14 @@ bool pinEquals(const char* a, const char* b)
     return (diff == 0);
 }
 
+void setUp(void) {
+    // set stuff up here
+}
+
+void tearDown(void) {
+    // clean stuff up here
+}
+
 void test_pin_exact_match() {
     TEST_ASSERT_TRUE(pinEquals("1234", "1234"));
 }
