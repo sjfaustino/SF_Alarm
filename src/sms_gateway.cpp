@@ -411,51 +411,56 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Global Instance & C Wrappers
+// SmsService Implementation
 // ---------------------------------------------------------------------------
-static LuciSmsGateway defaultGateway;
-static ISmsGateway* activeGateway = &defaultGateway;
+SmsService* SmsService::_instance = nullptr;
 
-void smsGatewayInit(const char* ip, const char* user, const char* pass) {
-    activeGateway->init(ip, user, pass);
+SmsService::SmsService() : _ctx(nullptr), _gateway(new LuciSmsGateway()) {
+    _instance = this;
 }
 
-void smsGatewaySetCredentials(const char* ip, const char* user, const char* pass) {
-    activeGateway->setCredentials(ip, user, pass);
+SmsService::~SmsService() {
+    delete _gateway;
 }
 
-bool smsGatewaySend(const char* phone, const char* msg) {
-    return activeGateway->send(phone, msg);
+void SmsService::init(SystemContext* ctx) {
+    _ctx = ctx;
+    // Initial credentials will be set by config or later
+    LOG_INFO(TAG, "SMS Service initialized");
 }
 
-int smsGatewayPollInbox(SmsMessage* msgs, int max) {
-    return activeGateway->pollInbox(msgs, max);
+void SmsService::update() {
+    _gateway->update();
 }
 
-int smsGatewayPollSent(SmsMessage* msgs, int max) {
-    return activeGateway->pollSent(msgs, max);
+void SmsService::setCredentials(const char* ip, const char* user, const char* pass) {
+    _gateway->setCredentials(ip, user, pass);
 }
 
-bool smsGatewayDeleteMessage(int id) {
-    return activeGateway->deleteMessage(id);
+bool SmsService::send(const char* phone, const char* msg) {
+    return _gateway->send(phone, msg);
 }
 
-void smsGatewayUpdate() {
-    activeGateway->update();
+int SmsService::pollInbox(SmsMessage* msgs, int max) {
+    return _gateway->pollInbox(msgs, max);
 }
 
-bool smsGatewayIsLoggedIn() {
-    return activeGateway->isReady();
+int SmsService::pollSent(SmsMessage* msgs, int max) {
+    return _gateway->pollSent(msgs, max);
 }
 
-const char* smsGatewayGetLastError() {
-    return activeGateway->getLastError();
+bool SmsService::deleteMessage(int id) {
+    return _gateway->deleteMessage(id);
 }
 
-const char* smsGatewayGetRouterIp() { return activeGateway->getHost(); }
-const char* smsGatewayGetRouterUser() { return activeGateway->getUser(); }
-const char* smsGatewayGetRouterPass() { return activeGateway->getPass(); }
-
-ISmsGateway* smsGatewayGetActive() {
-    return activeGateway;
+bool SmsService::isLoggedIn() {
+    return _gateway->isReady();
 }
+
+const char* SmsService::getLastError() {
+    return _gateway->getLastError();
+}
+
+const char* SmsService::getRouterIp() { return _gateway->getHost(); }
+const char* SmsService::getRouterUser() { return _gateway->getUser(); }
+const char* SmsService::getRouterPass() { return _gateway->getPass(); }

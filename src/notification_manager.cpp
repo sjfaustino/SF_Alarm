@@ -24,7 +24,8 @@ NotificationManager::~NotificationManager() {
     }
 }
 
-void NotificationManager::init() {
+void NotificationManager::init(SystemContext* ctx) {
+    _ctx = ctx;
     _alertQueue = xQueueCreate(10, sizeof(PendingAlert));
     if (!_alertQueue) {
         LOG_ERROR(TAG, "Failed to create alert queue");
@@ -86,7 +87,7 @@ void NotificationManager::dispatch(const AlarmEventInfo& info, SystemContext* ct
         case EVT_DISARMED: {
             char logMsg[128];
             snprintf(logMsg, sizeof(logMsg), "EVENT:%d Z:%d | %s", (int)info.event, info.zoneId, details);
-            mqttPublish("SF_Alarm/events", logMsg); 
+            ctx->mqtt->publish("SF_Alarm/events", logMsg); 
             break;
         }
         default: break;
@@ -127,7 +128,7 @@ void NotificationManager::update() {
         _lastAlertProcessedMs = now;
         
         if (strlen(alert.targetPhone) > 0) {
-            smsGatewaySend(alert.targetPhone, alert.message);
+            _ctx->sms->send(alert.targetPhone, alert.message);
         } else {
             for (int i = 0; i < _providerCount; i++) {
                 if (_enabledChannels & _providers[i].channel) {

@@ -7,18 +7,12 @@
 #include "logging.h"
 #include <mbedtls/sha1.h>
 #include <base64.h>
-#include <base64.h>
 #include "string_utils.h"
 #include <esp_sntp.h>
+#include <esp_task_wdt.h>
+#include "system_context.h"
 
 static const char* TAG = "ONVIF";
-
-// ---------------------------------------------------------------------------
-// Constants & Templates
-// ---------------------------------------------------------------------------
-
-#include <esp_task_wdt.h>
-#include "string_utils.h"
 
 static const char* SOAP_ENV_START = 
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
@@ -27,10 +21,6 @@ static const char* SOAP_ENV_START =
     "xmlns:e=\"http://www.onvif.org/ver10/events/wsdl\">";
 
 static const char* SOAP_ENV_END = "</s:Envelope>";
-
-// ---------------------------------------------------------------------------
-// Module State
-// ---------------------------------------------------------------------------
 
 struct OnvifState {
     char host[64];
@@ -42,65 +32,56 @@ struct OnvifState {
     String subscriptionAddress;
     uint32_t lastRenewMs;
     TaskHandle_t taskHandle;
+    SemaphoreHandle_t mutex;
 };
 
-static OnvifState state = {0};
-static SemaphoreHandle_t stateMutex = NULL;
+OnvifService* OnvifService::_instance = nullptr;
 
-// Forward declaration of the task
-static void onvifTask(void* pvParameters);
+OnvifService::OnvifService() : _ctx(nullptr), _state(new OnvifState()) {
+    _instance = this;
+    memset(_state, 0, sizeof(OnvifState));
+    _state->port = 80;
+    _state->mutex = xSemaphoreCreateMutex();
+}
 
-// ---------------------------------------------------------------------------
-// Security Helpers
-// ---------------------------------------------------------------------------
+OnvifService::~OnvifService() {
+    if (_state->mutex) vSemaphoreDelete(_state->mutex);
+    delete _state;
+}
 
 static String getTimestamp() {
     time_t now;
     struct tm timeinfo;
     time(&now);
     gmtime_r(&now, &timeinfo);
-    
-    // NTP Maturity: Instead of magic 1970/2026 offsets, check the official SNTP sync status.
-    // If not synced, we return a blank string, which triggers a retry in the caller rather 
-    // than sending a "faked" timestamp that might cause auth rejection.
     if (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET) {
-        LOG_WARN(TAG, "NTP not synced. Postponing auth.");
         return "";
     }
-
     char buf[32];
     strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
     return String(buf);
 }
 
 static String generateDigest(const char* nonce, const char* created, const char* password) {
-    // nonce is binary here
     unsigned char hash[20];
     mbedtls_sha1_context ctx;
     mbedtls_sha1_init(&ctx);
     mbedtls_sha1_starts(&ctx);
-    
-    // Nonce (binary) + Created (string) + Password (string)
     mbedtls_sha1_update(&ctx, (const unsigned char*)nonce, 20);
     mbedtls_sha1_update(&ctx, (const unsigned char*)created, strlen(created));
     mbedtls_sha1_update(&ctx, (const unsigned char*)password, strlen(password));
-    
     mbedtls_sha1_finish(&ctx, hash);
     mbedtls_sha1_free(&ctx);
-    
     return base64::encode(hash, 20);
 }
 
-static String getAuthHeader() {
+String getAuthHeaderInternal(OnvifState* state) {
     unsigned char rawNonce[20];
     for(int i=0; i<20; i++) rawNonce[i] = (unsigned char)random(256);
-    
     String nonceB64 = base64::encode(rawNonce, 20);
     String created = getTimestamp();
-    if (created.length() == 0) return ""; // Postpone until NTP sync
-
-    String digest = generateDigest((const char*)rawNonce, created.c_str(), state.pass);
-
+    if (created.length() == 0) return "";
+    String digest = generateDigest((const char*)rawNonce, created.c_str(), state->pass);
     char headerBuf[512];
     snprintf(headerBuf, sizeof(headerBuf),
         "<s:Header><Security s:mustUnderstand=\"1\" xmlns=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\">"
@@ -109,46 +90,21 @@ static String getAuthHeader() {
         "<Nonce EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\">%s</Nonce>"
         "<Created xmlns=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\">%s</Created>"
         "</UsernameToken></Security></s:Header>",
-        state.user, digest.c_str(), nonceB64.c_str(), created.c_str());
-
-    String result(headerBuf);
-    
-    // Scrub intermediate buffers
-    memset(headerBuf, 0, sizeof(headerBuf));
-    memset(rawNonce, 0, sizeof(rawNonce));
-    digest = ""; 
-    nonceB64 = "";
-
-    return result;
+        state->user, digest.c_str(), nonceB64.c_str(), created.c_str());
+    return String(headerBuf);
 }
 
-// ---------------------------------------------------------------------------
-// ONVIF Operations
-// ---------------------------------------------------------------------------
-
-static bool createSubscription() {
-    if (strlen(state.host) == 0) return false;
-
+static bool createSubscriptionInternal(OnvifState* state) {
+    if (strlen(state->host) == 0) return false;
     HTTPClient http;
-    String url = "http://" + String(state.host) + ":" + String(state.port) + "/onvif/event_service";
-    
+    String url = "http://" + String(state->host) + ":" + String(state->port) + "/onvif/event_service";
     http.begin(url);
-    http.setTimeout(2500); // Prevent initial connection stall (dead camera)
+    http.setTimeout(2500);
     http.addHeader("Content-Type", "application/soap+xml; charset=utf-8");
-
-    String auth = getAuthHeader();
-    String body;
-    body.reserve(1024);
-    body = SOAP_ENV_START;
-    body += auth;
-    body += "<s:Body><e:CreatePullPointSubscription/></s:Body>";
-    body += SOAP_ENV_END;
-
+    String auth = getAuthHeaderInternal(state);
+    if (auth.length() == 0) { http.end(); return false; }
+    String body = String(SOAP_ENV_START) + auth + "<s:Body><e:CreatePullPointSubscription/></s:Body>" + SOAP_ENV_END;
     int code = http.POST(body);
-    
-    // Scrub body which contains the auth digest
-    body = "";
-    auth = "";
     if (code == 200) {
         WiFiClient* stream = http.getStreamPtr();
         if (stream) {
@@ -163,247 +119,155 @@ static bool createSubscription() {
                     if (c < 0) break;
                     buffer[bufPos++] = (char)c;
                     buffer[bufPos] = '\0';
-                    
                     if (strcasestr(buffer, "<tt:Address>")) {
-                        state.subscriptionAddress = extractBetween(buffer, "<tt:Address>", "</tt:Address>");
-                        if (state.subscriptionAddress.length() > 0) {
-                            foundAddress = true;
-                        }
+                        state->subscriptionAddress = extractBetween(buffer, "<tt:Address>", "</tt:Address>");
+                        if (state->subscriptionAddress.length() > 0) foundAddress = true;
                     }
-
-                    // TAG BOMB PROTECTION: Prevent malformed tags from overflowing the 512B buffer
                     if (bufPos >= (int)sizeof(buffer) - 1) {
-                        const int OVERLAP = 128; 
-                        memmove(buffer, buffer + (sizeof(buffer) - OVERLAP - 1), OVERLAP);
-                        bufPos = OVERLAP;
+                        memmove(buffer, buffer + 384, 128);
+                        bufPos = 128;
                         buffer[bufPos] = '\0';
                     }
-                } else {
-                    vTaskDelay(1);
-                }
+                } else vTaskDelay(1);
             }
             if (foundAddress) {
-                state.connected = true;
-                LOG_INFO(TAG, "Subscription created: %s", state.subscriptionAddress.c_str());
+                state->connected = true;
+                LOG_INFO(TAG, "Subscription created: %s", state->subscriptionAddress.c_str());
                 http.end();
                 return true;
             }
         }
     }
-
     LOG_WARN(TAG, "Subscription failed, code: %d", code);
     http.end();
-    
-    // State Scavenging: Prevent stale addresses from lingering
-    scrubString(state.subscriptionAddress);
-    state.connected = false;
-
+    state->subscriptionAddress = "";
+    state->connected = false;
     return false;
 }
 
-static void pollMessages() {
-    if (!state.connected || state.subscriptionAddress.length() == 0) return;
-
+static void pollMessagesInternal(OnvifState* state) {
+    if (!state->connected || state->subscriptionAddress.length() == 0) return;
     HTTPClient http;
-    http.begin(state.subscriptionAddress);
+    http.begin(state->subscriptionAddress);
     http.addHeader("Content-Type", "application/soap+xml; charset=utf-8");
-    http.setTimeout(5000); // 5s timeout for PullMessages
-
-    String auth = getAuthHeader();
-    String body;
-    body.reserve(1024);
-    body = SOAP_ENV_START;
-    body += auth;
-    body += "<s:Body><e:PullMessages><e:Timeout>PT2S</e:Timeout><e:MessageLimit>10</e:MessageLimit></e:PullMessages></s:Body>";
-    body += SOAP_ENV_END;
-
+    http.setTimeout(5000);
+    String auth = getAuthHeaderInternal(state);
+    if (auth.length() == 0) { http.end(); return; }
+    String body = String(SOAP_ENV_START) + auth + "<s:Body><e:PullMessages><e:Timeout>PT2S</e:Timeout><e:MessageLimit>10</e:MessageLimit></e:PullMessages></s:Body>" + SOAP_ENV_END;
     int code = http.POST(body);
-    body = "";
-    auth = "";
     if (code == 200) {
-        // --- THE XML HEAP DETONATOR FIX ---
-        // DO NOT DO: String res = http.getString();
-        // The XML payload from cameras can routinely exceed 64KB. Pulling it
-        // fully into a contiguous RAM String array will instantly shatter the
-        // ESP32 Heap and cause an Out-Of-Memory kernel crash.
-        // We use a sliding-window stream scanner.
-        
         WiFiClient* stream = http.getStreamPtr();
-        if (!stream) {
-            http.end();
-            return;
-        }
-        
+        if (!stream) { http.end(); return; }
         char buffer[512];
         int bufferPos = 0;
         bool motion = false;
         unsigned long timeoutMs = millis();
-        
         while (http.connected() || stream->available()) {
-            if (millis() - timeoutMs > 5000) break; // Emergency timeout
-            
+            if (millis() - timeoutMs > 5000) break;
             if (stream->available()) {
                 timeoutMs = millis();
-                // We read one byte at a time or in small chunks to the end of our fixed buffer
                 int c = stream->read();
                 if (c < 0) break;
-
                 buffer[bufferPos++] = (char)c;
                 buffer[bufferPos] = '\0';
-
-                // Keyword detection: split "IsMotion" + "Value=\"true\""
-                // Enforce STRICT order constraint: "Value=\"true\"" MUST chronically trail "IsMotion"
                 char* m = strcasestr(buffer, "IsMotion");
                 if (m && strcasestr(m, "Value=\"true\"")) {
                     motion = true;
                     break;
                 }
-
-                // If buffer is full, shift it to keep the last 128 bytes (overlapping window)
-                // This ensures we never miss a keyword split across the 512-byte boundary.
-                // TAG BOMB PROTECTION included.
                 if (bufferPos >= (int)sizeof(buffer) - 1) {
-                    const int OVERLAP = 128;
-                    memmove(buffer, buffer + bufferPos - OVERLAP, OVERLAP);
-                    bufferPos = OVERLAP;
+                    memmove(buffer, buffer + 384, 128);
+                    bufferPos = 128;
                     buffer[bufferPos] = '\0';
                 }
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
+            } else vTaskDelay(pdMS_TO_TICKS(10));
         }
-        
-        // Drain stream safely
         while (stream->available()) stream->read();
-        
-        zonesSetVirtualInput(state.targetZone, motion);
-        if (motion) {
-            LOG_INFO(TAG, "Motion detected on camera!");
-        }
+        zonesSetVirtualInput(state->targetZone, motion);
+        if (motion) LOG_INFO(TAG, "Motion detected on camera!");
     } else if (code > 0) {
-        if (code == 401) {
-            LOG_ERROR(TAG, "ONVIF Auth failed - check credentials");
-        }
-        if (code == 400 || code == 404 || code == 500) {
-            state.connected = false;
-            LOG_WARN(TAG, "Connection lost, retrying subscription");
-        }
+        if (code == 401) LOG_ERROR(TAG, "ONVIF Auth failed");
+        if (code == 400 || code == 404 || code == 500) state->connected = false;
     }
     http.end();
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+void OnvifService::init(SystemContext* ctx) {
+    _ctx = ctx;
+    xTaskCreatePinnedToCore(onvifTask, "ONVIF_Poll", 8192, this, 1, &_state->taskHandle, 0);
+    LOG_INFO(TAG, "ONVIF Service initialized");
+}
 
-void onvifDisconnect() {
-    if (state.connected) {
-        LOG_INFO(TAG, "Unsubscribing and disconnecting...");
-        state.connected = false;
-        // Deep memory scrubbing: Erase the password on disconnect
-        scrubBuffer(state.pass, sizeof(state.pass));
+void OnvifService::setServer(const char* host, uint16_t port, const char* user, const char* pass, uint8_t zone) {
+    if (xSemaphoreTake(_state->mutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(_state->host, host, sizeof(_state->host)-1);
+        _state->port = port;
+        strncpy(_state->user, user, sizeof(_state->user)-1);
+        strncpy(_state->pass, pass, sizeof(_state->pass)-1);
+        _state->targetZone = (zone > 0 && zone <= MAX_ZONES) ? zone - 1 : 0;
+        _state->connected = false;
+        _state->subscriptionAddress = "";
+        _state->lastRenewMs = 0;
+        xSemaphoreGive(_state->mutex);
     }
 }
 
-void onvifInit() {
-    state.port = 80;
-    state.connected = false;
-    state.taskHandle = NULL;
-
-    // Create mutex to protect state struct from Core 0/Core 1 concurrent access
-    stateMutex = xSemaphoreCreateMutex();
-
-    xTaskCreatePinnedToCore(
-        onvifTask,
-        "ONVIF_Poll",
-        8192,
-        NULL,
-        1,
-        &state.taskHandle,
-        0
-    );
-    
-    Serial.println("[ONVIF] Client initialized (FreeRTOS Task created)");
+void OnvifService::disconnect() {
+    if (xSemaphoreTake(_state->mutex, portMAX_DELAY) == pdTRUE) {
+        _state->connected = false;
+        scrubBuffer(_state->pass, sizeof(_state->pass));
+        xSemaphoreGive(_state->mutex);
+    }
 }
 
-void onvifSetServer(const char* host, uint16_t port, const char* user, const char* pass, uint8_t targetZone) {
-    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+bool OnvifService::isConnected() { return _state->connected; }
+const char* OnvifService::getHost() { return _state->host; }
+uint16_t OnvifService::getPort() { return _state->port; }
+const char* OnvifService::getUser() { return _state->user; }
+const char* OnvifService::getPass() { return _state->pass; }
+uint8_t OnvifService::getTargetZone() { return _state->targetZone + 1; }
 
-    strncpy(state.host, host, sizeof(state.host)-1);
-    state.host[sizeof(state.host)-1] = '\0';
-    state.port = port;
-    strncpy(state.user, user, sizeof(state.user)-1);
-    state.user[sizeof(state.user)-1] = '\0';
-    strncpy(state.pass, pass, sizeof(state.pass)-1);
-    state.pass[sizeof(state.pass)-1] = '\0';
-    state.targetZone = (targetZone > 0 && targetZone <= MAX_ZONES) ? targetZone - 1 : 0;
-    state.connected = false;
-    state.subscriptionAddress = "";
-    state.lastRenewMs = 0;
-
-    if (stateMutex) xSemaphoreGive(stateMutex);
-}
-
-// The FreeRTOS Task Loop
-static void onvifTask(void* pvParameters) {
-    esp_task_wdt_add(NULL); // Add to watchdog
+void OnvifService::onvifTask(void* pvParameters) {
+    OnvifService* self = (OnvifService*)pvParameters;
+    esp_task_wdt_add(NULL);
     while (true) {
-        esp_task_wdt_reset(); // Pet watchdog
+        esp_task_wdt_reset();
+        if (xSemaphoreTake(self->_state->mutex, portMAX_DELAY) == pdTRUE) {
+            bool hasHost = (strlen(self->_state->host) > 0);
+            bool isConnected = self->_state->connected;
+            uint32_t lastRenew = self->_state->lastRenewMs;
+            xSemaphoreGive(self->_state->mutex);
 
-        // Take a local snapshot of config under mutex to prevent TOCTOU race with onvifSetServer()
-        if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-        bool hasHost = (strlen(state.host) > 0);
-        bool isConnected = state.connected;
-        if (stateMutex) xSemaphoreGive(stateMutex);
+            if (WiFi.status() != WL_CONNECTED || !hasHost) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
 
-        if (WiFi.status() != WL_CONNECTED || !hasHost) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-
-        uint32_t now = millis();
-
-        if (!isConnected) {
-            if (createSubscription()) {
-                if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-                state.lastRenewMs = now;
-                if (stateMutex) xSemaphoreGive(stateMutex);
+            uint32_t now = millis();
+            if (!isConnected) {
+                if (createSubscriptionInternal(self->_state)) {
+                    if (xSemaphoreTake(self->_state->mutex, portMAX_DELAY) == pdTRUE) {
+                        self->_state->lastRenewMs = now;
+                        xSemaphoreGive(self->_state->mutex);
+                    }
+                } else vTaskDelay(pdMS_TO_TICKS(5000));
             } else {
-                vTaskDelay(pdMS_TO_TICKS(5000)); // Reduced from 10s
-            }
-        } else {
-            bool renewNeeded = false;
-            if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-            renewNeeded = (now - state.lastRenewMs > 50000);
-            if (stateMutex) xSemaphoreGive(stateMutex);
-
-            if (renewNeeded) {
-                if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-                state.lastRenewMs = now;
-                if (stateMutex) xSemaphoreGive(stateMutex);
-                if (!createSubscription()) {
-                    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-                    state.connected = false;
-                    if (stateMutex) xSemaphoreGive(stateMutex);
-                    Serial.println("[ONVIF] Subscription renewal failed");
-                    continue;
+                if (now - lastRenew > 50000) {
+                    if (!createSubscriptionInternal(self->_state)) {
+                        if (xSemaphoreTake(self->_state->mutex, portMAX_DELAY) == pdTRUE) {
+                            self->_state->connected = false;
+                            xSemaphoreGive(self->_state->mutex);
+                        }
+                        continue;
+                    }
+                    if (xSemaphoreTake(self->_state->mutex, portMAX_DELAY) == pdTRUE) {
+                        self->_state->lastRenewMs = now;
+                        xSemaphoreGive(self->_state->mutex);
+                    }
                 }
+                pollMessagesInternal(self->_state);
+                vTaskDelay(pdMS_TO_TICKS(1000));
             }
-
-            pollMessages();
-            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
 }
-
-// onvifUpdate() removed — functionality is purely in the FreeRTOS task
-
-bool onvifIsConnected() {
-    return state.connected;
-}
-
-const char* onvifGetHost() { return state.host; }
-uint16_t onvifGetPort() { return state.port; }
-const char* onvifGetUser() { return state.user; }
-const char* onvifGetPass() { return state.pass; }
-uint8_t onvifGetTargetZone() { return state.targetZone + 1; }

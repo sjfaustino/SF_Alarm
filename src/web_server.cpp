@@ -23,7 +23,7 @@ static const char* TAG = "WEB";
 #include <ArduinoJson.h>
 #include "system_context.h"
 
-static SystemContext* globalCtx = nullptr;
+static SystemContext* _ctx = nullptr;
 
 // ---------------------------------------------------------------------------
 // PsychicHttp Server instance (port 80)
@@ -125,9 +125,9 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
     // Security: Local read-only telemetry requires no PIN.
     // Calling alarmValidatePin() here causes a 5-minute system lockout DDoS vulnerability.
     
-    alarm["state"]          = globalCtx->alarmController->getStateStr();
-    alarm["stateCode"]      = (uint8_t)globalCtx->alarmController->getState();
-    alarm["delayRemaining"] = globalCtx->alarmController->getDelayRemaining();
+    alarm["state"]          = _ctx->alarmController->getStateStr();
+    alarm["stateCode"]      = (uint8_t)_ctx->alarmController->getState();
+    alarm["delayRemaining"] = _ctx->alarmController->getDelayRemaining();
 
     // Zones
     JsonArray zones = doc["zones"].to<JsonArray>();
@@ -164,15 +164,15 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
 
     // --- Alerts/WhatsApp (Safe status only) ---
     JsonObject alerts = doc["alerts"].to<JsonObject>();
-    alerts["mode"] = (int)globalCtx->notificationManager->getChannels();
+    alerts["mode"] = (int)_ctx->notificationManager->getChannels();
 
     // --- MQTT (Safe status only) ---
     JsonObject mqtt = doc["mqtt"].to<JsonObject>();
-    mqtt["connected"] = mqttIsConnected();
+    mqtt["connected"] = _ctx->mqtt->isConnected();
 
     // --- ONVIF (Safe status only) ---
     JsonObject onvif = doc["onvif"].to<JsonObject>();
-    onvif["connected"]  = onvifIsConnected();
+    onvif["connected"]  = _ctx->onvif->isConnected();
 
     // Stream serialization directly to the response (Zero-Heap)
     PsychicStreamResponse stream(request->response(), "application/json");
@@ -193,7 +193,7 @@ static esp_err_t handleApiGetSettings(PsychicRequest* request, PsychicResponse* 
     }
 
     const char* pin = doc["pin"] | "";
-    bool valid = globalCtx->alarmController->validatePin(pin);
+    bool valid = _ctx->alarmController->validatePin(pin);
     // Scrub PIN buffer if it exists in doc overhead
     if (doc["pin"].is<JsonVariant>()) doc["pin"] = "****"; 
 
@@ -206,25 +206,25 @@ static esp_err_t handleApiGetSettings(PsychicRequest* request, PsychicResponse* 
     reply["ok"] = true;
 
     JsonObject alerts = reply["alerts"].to<JsonObject>();
-    alerts["mode"] = globalCtx->notificationManager->getChannels();
-    alerts["waPhone"] = whatsappGetPhone();
-    alerts["waApiKey"] = whatsappGetApiKey();
-    alerts["tgToken"] = telegramGetToken();
-    alerts["tgChatId"] = telegramGetChatId();
+    alerts["mode"] = _ctx->notificationManager->getChannels();
+    alerts["waPhone"] = _ctx->whatsapp->getPhone();
+    alerts["waApiKey"] = _ctx->whatsapp->getApiKey();
+    alerts["tgToken"] = _ctx->telegram->getToken();
+    alerts["tgChatId"] = _ctx->telegram->getChatId();
 
     JsonObject mqtt = reply["mqtt"].to<JsonObject>();
-    mqtt["server"] = mqttGetServer();
-    mqtt["port"] = mqttGetPort();
-    mqtt["user"] = mqttGetUser();
-    mqtt["pass"] = mqttGetPass();
-    mqtt["clientId"] = mqttGetClientId();
+    mqtt["server"] = _ctx->mqtt->getServer();
+    mqtt["port"] = _ctx->mqtt->getPort();
+    mqtt["user"] = _ctx->mqtt->getUser();
+    mqtt["pass"] = _ctx->mqtt->getPass();
+    mqtt["clientId"] = _ctx->mqtt->getClientId();
 
     JsonObject onvif = reply["onvif"].to<JsonObject>();
-    onvif["host"]       = onvifGetHost();
-    onvif["port"]       = onvifGetPort();
-    onvif["user"]       = onvifGetUser();
-    onvif["pass"]       = onvifGetPass();
-    onvif["targetZone"] = onvifGetTargetZone();
+    onvif["host"]       = _ctx->onvif->getHost();
+    onvif["port"]       = _ctx->onvif->getPort();
+    onvif["user"]       = _ctx->onvif->getUser();
+    onvif["pass"]       = _ctx->onvif->getPass();
+    onvif["targetZone"] = _ctx->onvif->getTargetZone();
 
     String out;
     serializeJson(reply, out);
@@ -246,7 +246,7 @@ static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* resp
 
     // PIN required — changing alert destination is a security-sensitive operation
     const char* pin = doc["pin"] | "";
-    bool valid = (strlen(pin) > 0 && globalCtx->alarmController->validatePin(pin));
+    bool valid = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (!valid) {
@@ -257,14 +257,14 @@ static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* resp
     const char* phone = doc["phone"];
     const char* apikey = doc["apikey"];
 
-    globalCtx->notificationManager->setChannels(channels);
-    whatsappSetConfig(phone, apikey);
+    _ctx->notificationManager->setChannels(channels);
+    _ctx->whatsapp->setConfig(phone, apikey);
     configSaveWhatsapp();
 
     const char* tgToken = doc["tgToken"] | "";
     const char* tgChatId = doc["tgChatId"] | "";
     
-    telegramSetConfig(tgToken, tgChatId);
+    _ctx->telegram->setConfig(tgToken, tgChatId);
     configSaveTelegram();
     doc.clear(); // Scavenge
 
@@ -285,7 +285,7 @@ static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* respon
 
     // PIN required — changing broker redirects all alarm events
     const char* pin = doc["pin"] | "";
-    bool valid = (strlen(pin) > 0 && globalCtx->alarmController->validatePin(pin));
+    bool valid = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (!valid) {
@@ -298,7 +298,7 @@ static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* respon
     const char* pass = doc["pass"] | "";
     const char* clientId = doc["clientId"] | "SF_Alarm";
 
-    mqttSetConfig(server, port, user, pass, clientId);
+    _ctx->mqtt->setConfig(server, port, user, pass, clientId);
     configSaveMqtt();
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"MQTT settings saved\"}");
@@ -318,7 +318,7 @@ static esp_err_t handlePostOnvif(PsychicRequest* request, PsychicResponse* respo
 
     // PIN required — changing camera config affects motion detection source
     const char* pin = doc["pin"] | "";
-    bool valid = (strlen(pin) > 0 && globalCtx->alarmController->validatePin(pin));
+    bool valid = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (!valid) {
@@ -331,7 +331,7 @@ static esp_err_t handlePostOnvif(PsychicRequest* request, PsychicResponse* respo
     const char* pass = doc["pass"] | "";
     uint8_t zone     = doc["targetZone"] | 1;
 
-    onvifSetServer(host, port, user, pass, zone);
+    _ctx->onvif->setServer(host, port, user, pass, zone);
     configSaveOnvif();
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Camera settings saved\"}");
@@ -359,13 +359,13 @@ static esp_err_t handleApiArm(PsychicRequest* request, PsychicResponse* response
     bool ok = false;
     uint32_t remoteIp = request->client()->remoteIP();
 
-    bool valid = globalCtx->alarmController->validatePin(pin);
+    bool valid = _ctx->alarmController->validatePin(pin);
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (strcmp(mode, "home") == 0) {
-        ok = globalCtx->alarmController->armHome(pin);
+        ok = _ctx->alarmController->armHome(pin);
     } else {
-        ok = globalCtx->alarmController->armAway(pin);
+        ok = _ctx->alarmController->armAway(pin);
     }
 
     recordAttempt(remoteIp, ok);
@@ -402,7 +402,7 @@ static esp_err_t handleApiDisarm(PsychicRequest* request, PsychicResponse* respo
         return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts. Wait 1 minute.\"}");
     }
 
-    bool valid = globalCtx->alarmController->disarm(pin);
+    bool valid = _ctx->alarmController->disarm(pin);
     // Note: alarmDisarm was renamed to disarm in the class
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
     recordAttempt(remoteIp, valid);
@@ -438,7 +438,7 @@ static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* respons
         return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts.\"}");
     }
 
-    bool valid = globalCtx->alarmController->muteSiren(pin);
+    bool valid = _ctx->alarmController->muteSiren(pin);
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
     recordAttempt(remoteIp, valid);
 
@@ -473,7 +473,7 @@ static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* respo
         return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts.\"}");
     }
 
-    bool pinOk = (strlen(pin) > 0 && globalCtx->alarmController->validatePin(pin));
+    bool pinOk = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
     recordAttempt(remoteIp, pinOk);
 
@@ -522,7 +522,7 @@ static esp_err_t handleApiOutput(PsychicRequest* request, PsychicResponse* respo
 
     // Require PIN for output control
     const char* pin = doc["pin"] | "";
-    bool valid = (strlen(pin) > 0 && globalCtx->alarmController->validatePin(pin));
+    bool valid = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (!valid) {
@@ -548,7 +548,7 @@ static esp_err_t handleApiOutput(PsychicRequest* request, PsychicResponse* respo
 // ---------------------------------------------------------------------------
 void webServerInit(SystemContext* ctx)
 {
-    globalCtx = ctx;
+    _ctx = ctx;
     if (!LittleFS.begin(true)) {
         LOG_ERROR(TAG, "LittleFS Mount Failed");
     }

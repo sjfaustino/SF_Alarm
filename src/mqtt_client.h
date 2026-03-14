@@ -2,42 +2,62 @@
 #define SF_ALARM_MQTT_CLIENT_H
 
 #include <Arduino.h>
+#include <PubSubClient.h>
+#include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 struct SystemContext;
-void mqttInit(SystemContext* ctx);
 
-/**
- * @brief Run the MQTT client loop (call in main loop)
- */
-void mqttUpdate();
+struct MqttMsg {
+    char topic[64];
+    char payload[128];
+    bool retained;
+};
 
-/**
- * @brief Set the MQTT configuration
- */
-void mqttSetConfig(const char* server, uint16_t port, const char* user, const char* pass, const char* clientId);
+class MqttService {
+public:
+    MqttService();
+    ~MqttService();
 
-/**
- * @brief Check if MQTT is connected
- */
-bool mqttIsConnected();
+    void init(SystemContext* ctx);
+    void update();
+    
+    void setConfig(const char* server, uint16_t port, const char* user, const char* pass, const char* clientId);
+    bool isConnected();
+    void publish(const char* topic, const char* payload, bool retained = false);
+    void syncState();
 
-/**
- * @brief Publish a message to a topic
- */
-void mqttPublish(const char* topic, const char* payload, bool retained = false);
+    // Getters
+    const char* getServer() const { return _server; }
+    uint16_t getPort() const { return _port; }
+    const char* getUser() const { return _user; }
+    const char* getPass() const { return _pass; }
+    const char* getClientId() const { return _clientId; }
 
-/**
- * @brief Trigger a full state sync to MQTT
- */
-void mqttSyncState();
+private:
+    SystemContext* _ctx;
+    WiFiClient _espClient;
+    PubSubClient _mqttClient;
+    QueueHandle_t _msgQueue;
+    SemaphoreHandle_t _configMutex;
+    
+    char _server[64];
+    uint16_t _port;
+    char _user[32];
+    char _pass[32];
+    char _clientId[32];
 
-/**
- * @brief Getters for configuration
- */
-const char* mqttGetServer();
-uint16_t mqttGetPort();
-const char* mqttGetUser();
-const char* mqttGetPass();
-const char* mqttGetClientId();
+    unsigned long _lastReconnectAttempt;
+    volatile bool _syncRequested;
+    int _lastPublishedState;
+    uint16_t _lastPublishedZones;
+    uint16_t _lastPublishedOutputs;
+
+    static MqttService* _instance;
+    static void staticCallback(char* topic, byte* payload, unsigned int length);
+    void handleMessage(char* topic, byte* payload, unsigned int length);
+    void internalSyncState();
+};
 
 #endif // SF_ALARM_MQTT_CLIENT_H

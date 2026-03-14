@@ -17,7 +17,7 @@
 static const char* TAG = "CLI";
 #include "system_context.h"
 
-static SystemContext* globalCtx = nullptr;
+static SystemContext* _ctx = nullptr;
 
 // ---------------------------------------------------------------------------
 // Module State
@@ -44,7 +44,7 @@ static bool requirePin(cmd* c) {
         Serial.println("[CLI] ERROR: Sensitive command requires -pin <YOUR_PIN>");
         return false;
     }
-    if (!globalCtx->alarmController->validatePin(argPin.getValue().c_str())) {
+    if (!_ctx->alarmController->validatePin(argPin.getValue().c_str())) {
         Serial.println("[CLI] ACCESS DENIED: Invalid PIN");
         return false;
     }
@@ -63,7 +63,7 @@ static void cmdHelpCallback(cmd* c) {
 }
 
 static void cmdStatusCallback(cmd* c) {
-    globalCtx->alarmController->printStatus();
+    _ctx->alarmController->printStatus();
     zonesPrintStatus();
     networkPrintStatus();
 }
@@ -113,22 +113,22 @@ static void cmdArmCallback(cmd* c) {
     if (!requirePin(c)) return;
     Command cmd(c);
     if (cmd.getArgument("home").isSet()) {
-        globalCtx->alarmController->armHome(cmd.getArgument("pin").getValue().c_str());
+        _ctx->alarmController->armHome(cmd.getArgument("pin").getValue().c_str());
     } else {
-        globalCtx->alarmController->armAway(cmd.getArgument("pin").getValue().c_str());
+        _ctx->alarmController->armAway(cmd.getArgument("pin").getValue().c_str());
     }
 }
 
 static void cmdDisarmCallback(cmd* c) {
     if (!requirePin(c)) return;
     Command cmd(c);
-    globalCtx->alarmController->disarm(cmd.getArgument("pin").getValue().c_str());
+    _ctx->alarmController->disarm(cmd.getArgument("pin").getValue().c_str());
 }
 
 static void cmdMuteCallback(cmd* c) {
     if (!requirePin(c)) return;
     Command cmd(c);
-    globalCtx->alarmController->muteSiren(cmd.getArgument("pin").getValue().c_str());
+    _ctx->alarmController->muteSiren(cmd.getArgument("pin").getValue().c_str());
 }
 
 static void cmdRebootCallback(cmd* c) {
@@ -222,7 +222,7 @@ static void cmdSetPinCallback(cmd* c) {
         return;
     }
 
-    if (globalCtx->alarmController->setPin(currentPin.c_str(), newPin.c_str())) {
+    if (_ctx->alarmController->setPin(currentPin.c_str(), newPin.c_str())) {
         Serial.println("PIN updated successfully.");
     } else {
         Serial.println("ERROR: Failed to update PIN.");
@@ -274,12 +274,12 @@ static void cmdTestCallback(cmd* c) {
         String num = cmd.getArgument("target").getValue();
         String msg = cmd.getArgument("msg").getValue();
         Serial.printf("Sending test SMS to %s...\n", num.c_str());
-        if (smsGatewaySend(num.c_str(), msg.c_str())) Serial.println("Test SMS sent OK");
+        if (_ctx->sms->send(num.c_str(), msg.c_str())) Serial.println("Test SMS sent OK");
         else Serial.println("Test SMS FAILED");
     } else if (type == "wa") {
         String msg = cmd.getArgument("msg").getValue();
         Serial.println("Sending test WhatsApp...");
-        if (whatsappSend(whatsappGetPhone(), whatsappGetApiKey(), msg.c_str())) Serial.println("Test WhatsApp sent OK");
+        if (_ctx->whatsapp->send(msg.c_str())) Serial.println("Test WhatsApp sent OK");
         else Serial.println("Test WhatsApp FAILED");
     } else if (type == "output") {
         int ch = cmd.getArgument("target").getValue().toInt();
@@ -308,7 +308,7 @@ static void cmdSmsCallback(cmd* c) {
     if (action == "inbox") {
         Serial.println("Fetching router inbox...");
         SmsMessage msgs[10];
-        int count = smsGatewayPollInbox(msgs, 10);
+        int count = _ctx->sms->pollInbox(msgs, 10);
         if (count == 0) Serial.println("  (inbox empty or not reachable)");
         else {
              Serial.printf("=== Router Inbox (%d message%s) ===\n", count, count > 1 ? "s" : "");
@@ -320,7 +320,7 @@ static void cmdSmsCallback(cmd* c) {
     } else if (action == "sent") {
         Serial.println("Fetching router sent messages...");
         SmsMessage msgs[10];
-        int count = smsGatewayPollSent(msgs, 10);
+        int count = _ctx->sms->pollSent(msgs, 10);
         if (count == 0) Serial.println("  (sent messages empty or not reachable)");
         else {
              Serial.printf("=== Router Sent SMS (%d message%s) ===\n", count, count > 1 ? "s" : "");
@@ -345,7 +345,7 @@ static void cmdWifiCallback(cmd* c) {
 static void cmdRouterCallback(cmd* c) {
     if (!requirePin(c)) return;
     Command cmd(c);
-    smsGatewaySetCredentials(cmd.getArgument("ip").getValue().c_str(), cmd.getArgument("user").getValue().c_str(), cmd.getArgument("pass").getValue().c_str());
+    _ctx->sms->setCredentials(cmd.getArgument("ip").getValue().c_str(), cmd.getArgument("user").getValue().c_str(), cmd.getArgument("pass").getValue().c_str());
     configSave();
     Serial.printf("Router set: IP=%s User=%s\n", cmd.getArgument("ip").getValue().c_str(), cmd.getArgument("user").getValue().c_str());
 }
@@ -367,7 +367,7 @@ static void errorCallback(cmd_error* e) {
 // ---------------------------------------------------------------------------
 
 void cliInit(SystemContext* ctx) {
-    globalCtx = ctx;
+    _ctx = ctx;
     cli.setOnError(errorCallback);
 
     // Public Commands

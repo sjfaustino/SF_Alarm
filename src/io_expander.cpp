@@ -24,13 +24,13 @@ static uint32_t chipRetryMs[4] = { 0, 0, 0, 0 };
 static const uint32_t CHIP_RETRY_INTERVAL_MS = 5000; // Retry once per 5 seconds
 
 #include "system_context.h"
-extern SystemContext* globalCtx;
+static SystemContext* _ctx = nullptr;
 
 #define I2C_LOCK_TIMEOUT_READ  pdMS_TO_TICKS(10)  // 10ms: yield quick to preserve 50Hz loop
 #define I2C_LOCK_TIMEOUT_WRITE pdMS_TO_TICKS(500) // 500ms: sirens MUST fire even if bus is busy
 
 static SemaphoreHandle_t getI2cMutex() {
-    return (SemaphoreHandle_t)globalCtx->i2cBusMutex;
+    return (SemaphoreHandle_t)_ctx->i2cBusMutex;
 }
 
 static void ioBusRecover()

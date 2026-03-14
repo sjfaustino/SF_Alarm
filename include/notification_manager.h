@@ -43,7 +43,7 @@ public:
     /**
      * @brief Initialize the notification system
      */
-    void init();
+    void init(SystemContext* ctx);
 
     /**
      * @brief Register a notification provider
@@ -81,6 +81,7 @@ public:
     void update();
 
 private:
+    SystemContext* _ctx;
     void* _alertQueue; // Internal QueueHandle_t
     uint32_t _lastAlertProcessedMs;
     uint32_t _lastZoneAlertMs[16];

@@ -208,3 +208,104 @@ const char* AlarmController::getStateStr() {
     }
 }
 
+bool AlarmController::armHome(const char* pin) {
+    if (!validatePin(pin)) return false;
+    return armHomeInternal();
+}
+
+bool AlarmController::armHomeInternal() {
+    if (xSemaphoreTakeRecursive((QueueHandle_t)_stateMutex, portMAX_DELAY) == pdTRUE) {
+        _pendingArmMode = ARM_PENDING_HOME;
+        _delayStartMs = millis();
+        _currentState = ALARM_EXIT_DELAY;
+        fireEvent(EVT_EXIT_DELAY);
+        xSemaphoreGiveRecursive((QueueHandle_t)_stateMutex);
+        return true;
+    }
+    return false;
+}
+
+bool AlarmController::muteSiren(const char* pin) {
+    if (!validatePin(pin)) return false;
+    if (xSemaphoreTakeRecursive((QueueHandle_t)_stateMutex, portMAX_DELAY) == pdTRUE) {
+        if (_sirenActive) {
+            _sirenMuted = true;
+            ioExpanderSetOutput(_sirenOutputChannel, false);
+            LOG_INFO(TAG, "Siren: MUTED (Manual)");
+        }
+        xSemaphoreGiveRecursive((QueueHandle_t)_stateMutex);
+        return true;
+    }
+    return false;
+}
+
+uint16_t AlarmController::getActiveAlarmMask() { return _activeAlarmMask; }
+
+uint16_t AlarmController::getDelayRemaining() {
+    if (_currentState == ALARM_EXIT_DELAY) {
+        uint32_t elapsed = (millis() - _delayStartMs) / 1000;
+        return (elapsed < _exitDelaySec) ? (_exitDelaySec - elapsed) : 0;
+    }
+    if (_currentState == ALARM_ENTRY_DELAY) {
+        uint32_t elapsed = (millis() - _delayStartMs) / 1000;
+        return (elapsed < _entryDelaySec) ? (_entryDelaySec - elapsed) : 0;
+    }
+    return 0;
+}
+
+void AlarmController::broadcast(const char* message) {
+    if (_ctx && _ctx->notificationManager) {
+        _ctx->notificationManager->broadcast(message);
+    }
+}
+
+void AlarmController::loadPin(const char* pin) {
+    if (xSemaphoreTakeRecursive((QueueHandle_t)_stateMutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(_alarmPin, pin ? pin : "1234", sizeof(_alarmPin) - 1);
+        _alarmPin[sizeof(_alarmPin) - 1] = '\0';
+        xSemaphoreGiveRecursive((QueueHandle_t)_stateMutex);
+    }
+}
+
+void AlarmController::copyPin(char* dest, size_t maxLen) {
+    if (xSemaphoreTakeRecursive((QueueHandle_t)_stateMutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(dest, _alarmPin, maxLen - 1);
+        dest[maxLen - 1] = '\0';
+        xSemaphoreGiveRecursive((QueueHandle_t)_stateMutex);
+    }
+}
+
+bool AlarmController::setPin(const char* currentPin, const char* newPin) {
+    if (!validatePin(currentPin)) return false;
+    if (!newPin || strlen(newPin) < 4) return false;
+    
+    if (xSemaphoreTakeRecursive((QueueHandle_t)_stateMutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(_alarmPin, newPin, sizeof(_alarmPin) - 1);
+        _alarmPin[sizeof(_alarmPin) - 1] = '\0';
+        configSavePin(newPin);
+        xSemaphoreGiveRecursive((QueueHandle_t)_stateMutex);
+        return true;
+    }
+    return false;
+}
+
+void AlarmController::setExitDelay(uint16_t seconds)   { _exitDelaySec = seconds; }
+void AlarmController::setEntryDelay(uint16_t seconds)  { _entryDelaySec = seconds; }
+uint16_t AlarmController::getExitDelay()              { return _exitDelaySec; }
+uint16_t AlarmController::getEntryDelay()             { return _entryDelaySec; }
+
+void AlarmController::setSirenDuration(uint16_t seconds) { _sirenDurationSec = seconds; }
+uint16_t AlarmController::getSirenDuration()           { return _sirenDurationSec; }
+void AlarmController::setSirenOutput(uint8_t channel)    { _sirenOutputChannel = channel; }
+uint8_t AlarmController::getSirenOutput()               { return _sirenOutputChannel; }
+
+void AlarmController::printStatus() {
+    Serial.println("--- Alarm Controller Status ---");
+    Serial.printf("  State:    %s\n", getStateStr());
+    Serial.printf("  Siren:    %s (Output %d)\n", _sirenActive ? "ON" : "OFF", _sirenOutputChannel);
+    if (_currentState == ALARM_EXIT_DELAY || _currentState == ALARM_ENTRY_DELAY) {
+        Serial.printf("  Delay:    %d s remaining\n", getDelayRemaining());
+    }
+    Serial.printf("  Lockout:  %s\n", _lockedOut ? "YES" : "NO");
+    Serial.println("-------------------------------");
+}

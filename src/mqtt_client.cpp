@@ -1,65 +1,49 @@
 #include "mqtt_client.h"
-#include <WiFi.h>
-#include <PubSubClient.h>
 #include "logging.h"
 #include "alarm_controller.h"
 #include "alarm_zones.h"
 #include "io_expander.h"
-#include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
-#include <esp_task_wdt.h>
+#include "system_context.h"
 #include <esp_task_wdt.h>
 
 static const char* TAG = "MQTT";
-#include "system_context.h"
-#include "alarm_controller.h" // Ensure we have the class definition
-static SystemContext* globalCtx = nullptr;
 
-static WiFiClient espClient;
-static PubSubClient client(espClient);
+MqttService* MqttService::_instance = nullptr;
 
-struct MqttMsg {
-    char topic[64];
-    char payload[128];
-    bool retained;
-};
-
-static QueueHandle_t mqttMsgQueue = NULL;
-static volatile bool mqttSyncRequested = false;
-static SemaphoreHandle_t mqttConfigMutex = NULL;
-
-static char mqttServer[64] = "";
-static uint16_t mqttPort = 1883;
-static char mqttUser[32] = "";
-static char mqttPass[32] = "";
-static char mqttClientId[32] = "SF_Alarm";
-
-static unsigned long lastReconnectAttempt = 0;
-
-// Topic structure
-// SF_Alarm/state -> disarmed, armed_home, armed_away, triggered, pending
-// SF_Alarm/cmd   -> DISARM, ARM_HOME, ARM_AWAY, MUTE
-// SF_Alarm/zone/N -> ON/OFF
-// SF_Alarm/output/N -> ON/OFF
-
-/// Parse "COMMAND:PIN" format safely without mutating the input buffer
-static const char* extractPin(const char* message, char* outPin, size_t outSize) {
-    const char* sep = strchr(message, ':');
-    if (sep) {
-        strncpy(outPin, sep + 1, outSize - 1);
-        outPin[outSize - 1] = '\0';
-        return outPin;
-    }
-    return "";
+MqttService::MqttService() 
+    : _ctx(nullptr), 
+      _mqttClient(_espClient),
+      _msgQueue(NULL),
+      _configMutex(NULL),
+      _port(1883),
+      _lastReconnectAttempt(0),
+      _syncRequested(false),
+      _lastPublishedState(-1),
+      _lastPublishedZones(0xFFFF),
+      _lastPublishedOutputs(0xFFFF)
+{
+    _instance = this;
+    memset(_server, 0, sizeof(_server));
+    memset(_user, 0, sizeof(_user));
+    memset(_pass, 0, sizeof(_pass));
+    strncpy(_clientId, "SF_Alarm", sizeof(_clientId)-1);
 }
 
-void mqttCallback(char* topic, byte* payload, unsigned long length) {
+MqttService::~MqttService() {
+    if (_msgQueue) vQueueDelete(_msgQueue);
+    if (_configMutex) vSemaphoreDelete(_configMutex);
+}
+
+void MqttService::staticCallback(char* topic, byte* payload, unsigned int length) {
+    if (_instance) _instance->handleMessage(topic, payload, length);
+}
+
+void MqttService::handleMessage(char* topic, byte* payload, unsigned int length) {
     char message[64];
     if (length >= sizeof(message)) length = sizeof(message) - 1;
     memcpy(message, payload, length);
     message[length] = '\0';
 
-    // Redact PIN from log — commands with ':' contain a PIN (e.g. "DISARM:1234")
     if (strchr(message, ':')) {
         LOG_INFO(TAG, "Message arrived [%s]: [PIN REDACTED]", topic);
     } else {
@@ -68,257 +52,194 @@ void mqttCallback(char* topic, byte* payload, unsigned long length) {
 
     if (strstr(topic, "/cmd")) {
         char pinBuf[16];
-        // All arm/disarm commands require PIN: "COMMAND:pin"
-        // MUTE is non-destructive and allowed without PIN
+        auto extractPin = [](const char* msg, char* out, size_t sz) -> const char* {
+            const char* sep = strchr(msg, ':');
+            if (sep) {
+                strncpy(out, sep + 1, sz - 1);
+                out[sz - 1] = '\0';
+                return out;
+            }
+            return "";
+        };
+
         if (strncmp(message, "DISARM", 6) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (globalCtx->alarmController->disarm(pin)) {
-                mqttPublish("SF_Alarm/events", "DISARMED via MQTT");
+            if (_ctx->alarmController->disarm(pin)) {
+                publish("SF_Alarm/events", "DISARMED via MQTT");
             } else {
-                mqttPublish("SF_Alarm/events", "DISARM failed (wrong PIN)");
+                publish("SF_Alarm/events", "DISARM failed (wrong PIN)");
             }
         }
         else if (strncmp(message, "ARM_HOME", 8) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (globalCtx->alarmController->armHome(pin)) {
-                mqttPublish("SF_Alarm/events", "ARM_HOME via MQTT");
+            if (_ctx->alarmController->armHome(pin)) {
+                publish("SF_Alarm/events", "ARM_HOME via MQTT");
             } else {
-                mqttPublish("SF_Alarm/events", "ARM_HOME failed (wrong PIN)");
+                publish("SF_Alarm/events", "ARM_HOME failed (wrong PIN)");
             }
         }
         else if (strncmp(message, "ARM_AWAY", 8) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (globalCtx->alarmController->armAway(pin)) {
-                mqttPublish("SF_Alarm/events", "ARM_AWAY via MQTT");
+            if (_ctx->alarmController->armAway(pin)) {
+                publish("SF_Alarm/events", "ARM_AWAY via MQTT");
             } else {
-                mqttPublish("SF_Alarm/events", "ARM_AWAY failed (wrong PIN)");
+                publish("SF_Alarm/events", "ARM_AWAY failed (wrong PIN)");
             }
         }
         else if (strncmp(message, "MUTE", 4) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (globalCtx->alarmController->muteSiren(pin)) {
-                mqttPublish("SF_Alarm/events", "MUTE via MQTT");
+            if (_ctx->alarmController->muteSiren(pin)) {
+                publish("SF_Alarm/events", "MUTE via MQTT");
             } else {
-                mqttPublish("SF_Alarm/events", "MUTE failed (wrong PIN)");
+                publish("SF_Alarm/events", "MUTE failed (wrong PIN)");
             }
         }
     }
 }
 
-void mqttInit(SystemContext* ctx) {
-    globalCtx = ctx;
-    if (mqttConfigMutex == NULL) {
-        mqttConfigMutex = xSemaphoreCreateMutex();
+void MqttService::init(SystemContext* ctx) {
+    _ctx = ctx;
+    if (_configMutex == NULL) {
+        _configMutex = xSemaphoreCreateMutex();
     }
-    mqttMsgQueue = xQueueCreate(30, sizeof(MqttMsg));
+    if (_msgQueue == NULL) {
+        _msgQueue = xQueueCreate(30, sizeof(MqttMsg));
+    }
     
-    // Safety Clamps: Prevent 15-second default FreeRTOS hangs on dead sockets
-    client.setSocketTimeout(2);
-    client.setKeepAlive(15);
-    client.setCallback(mqttCallback);
+    _mqttClient.setSocketTimeout(2);
+    _mqttClient.setKeepAlive(15);
+    _mqttClient.setCallback(MqttService::staticCallback);
     
-    Serial.println("[MQTT] MQTT client initialized with RTOS async queue and mutex protection");
+    LOG_INFO(TAG, "MQTT Service initialized");
 }
 
-void mqttSetServer(const char* host, uint16_t port) {
-    xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
-    strncpy(mqttServer, host, sizeof(mqttServer) - 1);
-    mqttServer[sizeof(mqttServer) - 1] = '\0';
-    mqttPort = port;
-    xSemaphoreGive(mqttConfigMutex);
-    client.setServer(mqttServer, mqttPort);
-}
-
-void mqttSetCredentials(const char* user, const char* pass) {
-    xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
+void MqttService::setConfig(const char* server, uint16_t port, const char* user, const char* pass, const char* clientId) {
+    xSemaphoreTake(_configMutex, portMAX_DELAY);
+    strncpy(_server, server ? server : "", sizeof(_server) - 1);
+    _port = port;
     
-    // Scrub old credentials before overwriting
-    memset(mqttUser, 0, sizeof(mqttUser));
-    memset(mqttPass, 0, sizeof(mqttPass));
-
-    if (user) {
-        strncpy(mqttUser, user, sizeof(mqttUser) - 1);
-        mqttUser[sizeof(mqttUser) - 1] = '\0';
-    }
-    if (pass) {
-        strncpy(mqttPass, pass, sizeof(mqttPass) - 1);
-        mqttPass[sizeof(mqttPass) - 1] = '\0';
-    }
-    xSemaphoreGive(mqttConfigMutex);
+    memset(_user, 0, sizeof(_user));
+    memset(_pass, 0, sizeof(_pass));
+    if (user) strncpy(_user, user, sizeof(_user) - 1);
+    if (pass) strncpy(_pass, pass, sizeof(_pass) - 1);
+    
+    if (clientId) strncpy(_clientId, clientId, sizeof(_clientId) - 1);
+    
+    _mqttClient.setServer(_server, _port);
+    xSemaphoreGive(_configMutex);
 }
 
-void mqttSetClientId(const char* clientId) {
-    xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
-    strncpy(mqttClientId, clientId, sizeof(mqttClientId) - 1);
-    mqttClientId[sizeof(mqttClientId) - 1] = '\0';
-    xSemaphoreGive(mqttConfigMutex);
+bool MqttService::isConnected() {
+    return _mqttClient.connected();
 }
 
-void mqttSetConfig(const char* server, uint16_t port, const char* user, const char* pass, const char* clientId) {
-    mqttSetServer(server, port);
-    mqttSetCredentials(user, pass);
-    mqttSetClientId(clientId);
-}
-
-bool mqttReconnect() {
-    // This function is no longer used directly by mqttUpdate, its logic is inlined there.
-    // Keeping it for now in case other parts of the code still call it.
-    if (strlen(mqttServer) == 0) return false;
-
-    Serial.print("[MQTT] Attempting connection...");
-    bool connected = false;
-    if (strlen(mqttUser) > 0) {
-        connected = client.connect(mqttClientId, mqttUser, mqttPass, "SF_Alarm/availability", 0, true, "offline");
-    } else {
-        connected = client.connect(mqttClientId, NULL, NULL, "SF_Alarm/availability", 0, true, "offline");
-    }
-
-    if (connected) {
-        Serial.println("connected");
-        client.publish("SF_Alarm/availability", "online", true);
-        client.subscribe("SF_Alarm/cmd");
-        mqttSyncState();
-    } else {
-        Serial.print("failed, rc=");
-        Serial.println(client.state());
-    }
-    return connected;
-}
-
-static void internalSyncState(); // Forward declaration
-
-void mqttUpdate() {
-    if (strlen(mqttServer) == 0) return;
-
-    if (!client.connected()) {
-        unsigned long now = millis();
-        // PHYSICAL HARDENING: Add random jitter (1-5s) to prevent thundering herd
-        static uint32_t reconnectJitter = 0;
-        if (reconnectJitter == 0) reconnectJitter = 5000 + random(5000); 
-
-        if (now - lastReconnectAttempt > reconnectJitter) {
-            lastReconnectAttempt = now;
-            reconnectJitter = 5000 + random(5000); // Reset for next fail
-            
-            xSemaphoreTake(mqttConfigMutex, portMAX_DELAY);
-            Serial.printf("[MQTT] Attempting connection to %s:%d...\n", mqttServer, mqttPort);
-            bool connected;
-            if (strlen(mqttUser) > 0) {
-                connected = client.connect(mqttClientId, mqttUser, mqttPass, "SF_Alarm/availability", 0, true, "offline");
-            } else {
-                connected = client.connect(mqttClientId, NULL, NULL, "SF_Alarm/availability", 0, true, "offline");
-            }
-            
-            if (connected) {
-                LOG_INFO(TAG, "Connected to broker");
-                client.publish("SF_Alarm/availability", "online", true);
-                client.subscribe("SF_Alarm/cmd");
-                mqttSyncRequested = true;
-            } else {
-                LOG_WARN(TAG, "Connection failed, rc=%d", client.state());
-            }
-            xSemaphoreGive(mqttConfigMutex);
-        }
-    } else {
-        client.loop();
-
-        if (mqttSyncRequested) {
-            mqttSyncRequested = false;
-            internalSyncState();
-        }
-
-        if (mqttMsgQueue) {
-            MqttMsg msg;
-            while (xQueueReceive(mqttMsgQueue, &msg, 0) == pdTRUE) {
-                client.publish(msg.topic, msg.payload, msg.retained);
-            }
-        }
-    }
-}
-
-void mqttPublish(const char* topic, const char* payload, bool retained) {
-    // Only queue if we have a queue initialized to prevent crashes
-    if (mqttMsgQueue) {
+void MqttService::publish(const char* topic, const char* payload, bool retained) {
+    if (_msgQueue) {
         MqttMsg msg;
         strncpy(msg.topic, topic, sizeof(msg.topic)-1);
         msg.topic[sizeof(msg.topic)-1] = '\0';
         strncpy(msg.payload, payload, sizeof(msg.payload)-1);
         msg.payload[sizeof(msg.payload)-1] = '\0';
         msg.retained = retained;
-        
-        // Push to queue, enforcing a 50ms block timeout to absorb burst events
-        xQueueSend(mqttMsgQueue, &msg, pdMS_TO_TICKS(50));
+        xQueueSend(_msgQueue, &msg, pdMS_TO_TICKS(50));
     }
 }
 
-static const char* haStateMap[] = {
-    "disarmed",   // MODE_DISARMED
-    "pending",    // MODE_EXIT_DELAY
-    "armed_away", // MODE_ARMED_AWAY
-    "armed_home", // MODE_ARMED_HOME
-    "pending",    // MODE_ENTRY_DELAY
-    "triggered",  // MODE_TRIGGERED
-    "unavailable" // ALARM_BUSY
-};
-
-// Change detection for MQTT sync
-static int lastPublishedState = -1;
-static uint16_t lastPublishedZones = 0xFFFF;  // bitmask of zone rawInput
-static uint16_t lastPublishedOutputs = 0xFFFF;
-
-void mqttSyncState() {
-    mqttSyncRequested = true;
+void MqttService::syncState() {
+    _syncRequested = true;
 }
 
-static void internalSyncState() {
-    if (!client.connected()) return;
+void MqttService::update() {
+    if (strlen(_server) == 0) return;
 
-    // 1. Alarm State (only publish on change)
-    AlarmState st = globalCtx->alarmController->getState();
-    if ((int)st != lastPublishedState && (int)st <= 6) {
-        client.publish("SF_Alarm/state", haStateMap[(int)st], true);
-        lastPublishedState = (int)st;
+    if (!_mqttClient.connected()) {
+        unsigned long now = millis();
+        static uint32_t reconnectJitter = 0;
+        if (reconnectJitter == 0) reconnectJitter = 5000 + random(5000); 
+
+        if (now - _lastReconnectAttempt > reconnectJitter) {
+            _lastReconnectAttempt = now;
+            reconnectJitter = 5000 + random(5000);
+            
+            xSemaphoreTake(_configMutex, portMAX_DELAY);
+            LOG_INFO(TAG, "Attempting connection to %s:%d...", _server, _port);
+            
+            bool connected;
+            if (strlen(_user) > 0) {
+                connected = _mqttClient.connect(_clientId, _user, _pass, "SF_Alarm/availability", 0, true, "offline");
+            } else {
+                connected = _mqttClient.connect(_clientId, NULL, NULL, "SF_Alarm/availability", 0, true, "offline");
+            }
+            
+            if (connected) {
+                LOG_INFO(TAG, "Connected to broker");
+                _mqttClient.publish("SF_Alarm/availability", "online", true);
+                _mqttClient.subscribe("SF_Alarm/cmd");
+                _syncRequested = true;
+            } else {
+                LOG_WARN(TAG, "Connection failed, rc=%d", _mqttClient.state());
+            }
+            xSemaphoreGive(_configMutex);
+        }
+    } else {
+        _mqttClient.loop();
+
+        if (_syncRequested) {
+            _syncRequested = false;
+            internalSyncState();
+        }
+
+        if (_msgQueue) {
+            MqttMsg msg;
+            while (xQueueReceive(_msgQueue, &msg, 0) == pdTRUE) {
+                _mqttClient.publish(msg.topic, msg.payload, msg.retained);
+            }
+        }
+    }
+}
+
+void MqttService::internalSyncState() {
+    if (!_mqttClient.connected()) return;
+
+    static const char* haStateMap[] = {
+        "disarmed", "pending", "armed_away", "armed_home", "pending", "triggered", "unavailable"
+    };
+
+    AlarmState st = _ctx->alarmController->getState();
+    if ((int)st != _lastPublishedState && (int)st <= 6) {
+        _mqttClient.publish("SF_Alarm/state", haStateMap[(int)st], true);
+        _lastPublishedState = (int)st;
     }
 
-    // 2. Zones (build current bitmask and compare)
     uint16_t currentZones = 0;
     for (int i = 0; i < 16; i++) {
         const ZoneInfo* zi = zonesGetInfo(i);
         if (zi && zi->rawInput) currentZones |= (1 << i);
     }
-    if (currentZones != lastPublishedZones) {
+    if (currentZones != _lastPublishedZones) {
         for (int i = 0; i < 16; i++) {
             bool current = (currentZones >> i) & 1;
-            bool previous = (lastPublishedZones >> i) & 1;
+            bool previous = (_lastPublishedZones >> i) & 1;
             if (current != previous) {
                 char topic[32];
                 snprintf(topic, sizeof(topic), "SF_Alarm/zone/%d", i + 1);
-                client.publish(topic, current ? "ON" : "OFF", true);
+                _mqttClient.publish(topic, current ? "ON" : "OFF", true);
             }
         }
-        lastPublishedZones = currentZones;
+        _lastPublishedZones = currentZones;
     }
 
-    // 3. Outputs (only publish changed)
     uint16_t outs = ioExpanderGetOutputs();
-    if (outs != lastPublishedOutputs) {
+    if (outs != _lastPublishedOutputs) {
         for (int i = 0; i < 16; i++) {
             bool current = (outs >> i) & 1;
-            bool previous = (lastPublishedOutputs >> i) & 1;
+            bool previous = (_lastPublishedOutputs >> i) & 1;
             if (current != previous) {
                 char topic[32];
                 snprintf(topic, sizeof(topic), "SF_Alarm/output/%d", i + 1);
-                client.publish(topic, current ? "ON" : "OFF", true);
+                _mqttClient.publish(topic, current ? "ON" : "OFF", true);
             }
         }
-        lastPublishedOutputs = outs;
+        _lastPublishedOutputs = outs;
     }
 }
-
-const char* mqttGetServer() { return mqttServer; }
-uint16_t mqttGetPort() { return mqttPort; }
-const char* mqttGetUser() { return mqttUser; }
-const char* mqttGetPass() { return mqttPass; }
-const char* mqttGetClientId() { return mqttClientId; }
-
-bool mqttIsConnected() { return client.connected(); }

@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 
+struct SystemContext;
+
 // ---------------------------------------------------------------------------
 // SMS Message (received)
 // ---------------------------------------------------------------------------
@@ -53,52 +55,32 @@ public:
     virtual const char* getPass() = 0;
 };
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+class SmsService {
+public:
+    SmsService();
+    ~SmsService();
 
-/// Initialize the SMS gateway with router credentials.
-void smsGatewayInit(const char* routerIp, const char* user, const char* pass);
+    void init(SystemContext* ctx);
+    void update();
 
-/// Update router credentials (e.g., after config change).
-void smsGatewaySetCredentials(const char* routerIp, const char* user, const char* pass);
+    void setCredentials(const char* routerIp, const char* user, const char* pass);
+    bool send(const char* phoneNumber, const char* message);
+    int pollInbox(SmsMessage* msgs, int maxMessages);
+    int pollSent(SmsMessage* msgs, int maxMessages);
+    bool deleteMessage(int messageId);
 
-/// Authenticate with the LuCI web interface. Returns true on success.
-/// Must be called before send/poll. Auto-called by send/poll if not logged in.
-bool smsGatewayLogin();
+    bool isLoggedIn();
+    const char* getLastError();
+    const char* getRouterIp();
+    const char* getRouterUser();
+    const char* getRouterPass();
 
-/// Send an SMS via the Cudy LT500D router.
-/// Returns true if the HTTP request succeeded.
-bool smsGatewaySend(const char* phoneNumber, const char* message);
+    ISmsGateway* getGateway() { return _gateway; }
 
-/// Poll the router inbox for new messages.
-/// Fills the provided array with messages. Returns the number of messages found.
-/// maxMessages: size of the msgs array.
-int smsGatewayPollInbox(SmsMessage* msgs, int maxMessages);
-
-/// Poll the router for sent messages for display.
-/// For sent messages, the 'sender' field contains the destination number.
-int smsGatewayPollSent(SmsMessage* msgs, int maxMessages);
-
-/// Main update loop for background tasks (polling). 
-/// Call from a background task at regular intervals.
-void smsGatewayUpdate();
-
-/// Delete a message from the inbox by its ID.
-bool smsGatewayDeleteMessage(int messageId);
-
-/// Check if the gateway is currently authenticated.
-bool smsGatewayIsLoggedIn();
-
-/// Get the last error message (for debugging).
-const char* smsGatewayGetLastError();
-
-/// Get current router credentials (for config persistence).
-const char* smsGatewayGetRouterIp();
-const char* smsGatewayGetRouterUser();
-const char* smsGatewayGetRouterPass();
-
-/// Get the active SMS gateway instance for context injection.
-ISmsGateway* smsGatewayGetActive();
+private:
+    SystemContext* _ctx;
+    ISmsGateway* _gateway;
+    static SmsService* _instance;
+};
 
 #endif // SF_ALARM_SMS_GATEWAY_H

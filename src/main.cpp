@@ -27,6 +27,11 @@ static const char* TAG = "MAIN";
 static SystemContext sysCtx;
 static NotificationManager notifMgr;
 static AlarmController almCtrl;
+static SmsService      smsSvc;
+static MqttService     mqttSvc;
+static TelegramService telegramSvc;
+static WhatsappService whatsappSvc;
+static OnvifService   onvifSvc;
 
 static uint32_t lastI2cPoll  = 0;
 static uint32_t lastMqttStateSync = 0;
@@ -56,7 +61,6 @@ static SemaphoreHandle_t bootLock = NULL;
 
 static void restartTask(int index);
 
-static SystemContext* globalCtx = nullptr;
 
 // Alerts are now managed by NotificationManager
 
@@ -124,7 +128,7 @@ static void netWorkerTask(void* pvParameters)
 
         sysHealthReport(HB_BIT_NET); 
 
-        smsGatewayUpdate(); 
+        ctx->sms->update(); 
         smsCmdUpdate();
         // Safe reset: if we've been stable for 10 minutes, clear boot counter
         if (millis() > 600000 && bootCount > 0) {
@@ -138,6 +142,7 @@ static void netWorkerTask(void* pvParameters)
 
 static void mqttWorkerTask(void* pvParameters)
 {
+    SystemContext* ctx = (SystemContext*)pvParameters;
     while (true) {
         // Wait for Boot Lock
         if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
@@ -146,12 +151,7 @@ static void mqttWorkerTask(void* pvParameters)
         sysHealthReport(HB_BIT_MQTT); 
 
         uint32_t now = millis();
-        mqttUpdate();
-
-        if (now - lastMqttStateSync >= 5000) {
-            lastMqttStateSync = now;
-            mqttSyncState();
-        }
+        ctx->mqtt->update();
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -185,30 +185,32 @@ static void alertWorkerTask(void* pvParameters)
     }
 }
 
-static void heartbeatTask(void* pvParameters)
+static void maintTask(void* pvParameters)
 {
-    while (true) {
-        sysHealthReport(HB_BIT_VIBE); 
+    SystemContext* ctx = (SystemContext*)pvParameters;
+    int lastFiredMin = -1;
+    uint32_t lastHbRecord = 0;
 
-        if (configGetHeartbeatEnabled()) {
-            SystemContext* ctx = globalCtx; // Using globalCtx for heartbeatTask for now
-            AlarmState st = ctx->alarmController->getState();
-            if (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME) {
-                digitalWrite(HEARTBEAT_LED_PIN, HIGH);
-                digitalWrite(HEARTBEAT_BUZZER_PIN, HIGH);
-                vTaskDelay(pdMS_TO_TICKS(50)); 
-                digitalWrite(HEARTBEAT_LED_PIN, LOW);
-                digitalWrite(HEARTBEAT_BUZZER_PIN, LOW);
+    while (true) {
+        sysHealthReport(HB_BIT_MAINT);
+        uint32_t now = millis();
+
+        // 1. Visual/Audible Heartbeat (every 2s)
+        if (now - lastHbRecord >= 2000) {
+            lastHbRecord = now;
+            if (configGetHeartbeatEnabled()) {
+                AlarmState st = ctx->alarmController->getState();
+                if (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME) {
+                    digitalWrite(HEARTBEAT_LED_PIN, HIGH);
+                    digitalWrite(HEARTBEAT_BUZZER_PIN, HIGH);
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    digitalWrite(HEARTBEAT_LED_PIN, LOW);
+                    digitalWrite(HEARTBEAT_BUZZER_PIN, LOW);
+                }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(1950));
-    }
-}
 
-static void schedulerTask(void* pvParameters)
-{
-    int lastFiredMin = -1;
-    while (true) {
+        // 2. Scheduler Check (every minute)
         struct tm timeinfo;
         if (getLocalTime(&timeinfo, 10)) {
             int currentMin = timeinfo.tm_min;
@@ -217,26 +219,26 @@ static void schedulerTask(void* pvParameters)
                 configGetSchedule(timeinfo.tm_wday, aHr, aMin, dHr, dMin);
 
                 if (aHr != -1 && aMin != -1 && timeinfo.tm_hour == aHr && currentMin == aMin) {
-                    SystemContext* ctx = globalCtx; // Using globalCtx for schedulerTask
                     AlarmState st = ctx->alarmController->getState();
                     if (st == ALARM_DISARMED) {
                         LOG_INFO(TAG, "Auto-Arming (%02d:%02d)", aHr, aMin);
-                        if (configGetScheduleMode() == ALARM_ARMED_HOME) globalCtx->alarmController->armHomeInternal();
-                        else globalCtx->alarmController->armAwayInternal();
+                        if (configGetScheduleMode() == ALARM_ARMED_HOME) ctx->alarmController->armHomeInternal();
+                        else ctx->alarmController->armAwayInternal();
                         lastFiredMin = currentMin;
                     }
                 }
                 else if (dHr != -1 && dMin != -1 && timeinfo.tm_hour == dHr && currentMin == dMin) {
-                    AlarmState st = globalCtx->alarmController->getState();
+                    AlarmState st = ctx->alarmController->getState();
                     if (st != ALARM_DISARMED) {
                         LOG_INFO(TAG, "Auto-Disarming (%02d:%02d)", dHr, dMin);
-                        globalCtx->alarmController->disarmInternal();
+                        ctx->alarmController->disarmInternal();
                         lastFiredMin = currentMin;
                     }
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(30000));
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -290,13 +292,17 @@ void setup()
 
     // Initialize System Context
     sysCtx.i2cBusMutex = xSemaphoreCreateMutex();
-    globalCtx = &sysCtx;
     sysCtx.notificationManager = &notifMgr;
     sysCtx.alarmController = &almCtrl;
+    sysCtx.sms = &smsSvc;
+    sysCtx.mqtt = &mqttSvc;
+    sysCtx.telegram = &telegramSvc;
+    sysCtx.whatsapp = &whatsappSvc;
+    sysCtx.onvif = &onvifSvc;
     sysCtx.taskHeartbeatBits = &taskHeartbeatBits;
 
     configInit(&sysCtx);
-    sysCtx.notificationManager->init();
+    sysCtx.notificationManager->init(&sysCtx);
 
     pinMode(HEARTBEAT_LED_PIN, OUTPUT);
     digitalWrite(HEARTBEAT_LED_PIN, LOW);
@@ -322,22 +328,22 @@ void setup()
     sysCtx.alarmController->init(&sysCtx);
     sysCtx.alarmController->setCallback(onAlarmEvent);
 
-    smsGatewayInit(DEFAULT_ROUTER_IP, DEFAULT_ROUTER_USER, DEFAULT_ROUTER_PASS);
-    // TODO: activeGateway is still a global in sms_gateway.cpp, but we can wrap it
+    sysCtx.sms->init(&sysCtx);
+    sysCtx.sms->setCredentials(DEFAULT_ROUTER_IP, DEFAULT_ROUTER_USER, DEFAULT_ROUTER_PASS);
     
     smsCmdInit(&sysCtx);
     networkInit();
-    whatsappInit(&sysCtx);
+    sysCtx.whatsapp->init(&sysCtx);
     webServerInit(&sysCtx);
     cliInit(&sysCtx);
-    mqttInit(&sysCtx);
-    telegramInit(&sysCtx);
-    onvifInit();
+    sysCtx.mqtt->init(&sysCtx);
+    sysCtx.telegram->init(&sysCtx);
+    sysCtx.onvif->init(&sysCtx);
 
     xTaskCreatePinnedToCore(zoneTask, "ZoneTask", 3072, &sysCtx, 5, &taskHandles[0], 1);
     xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 4096, &sysCtx, 1, &taskHandles[1], 0);
     xTaskCreatePinnedToCore(mqttWorkerTask, "MQTTWorker", 4096, &sysCtx, 1, &taskHandles[2], 0);
-    xTaskCreatePinnedToCore(heartbeatTask, "Heartbeat", 2048, &sysCtx, 1, &taskHandles[3], 1);
+    xTaskCreatePinnedToCore(maintTask, "MaintTask", 3072, &sysCtx, 1, &taskHandles[3], 1);
     xTaskCreatePinnedToCore(cliWorkerTask, "CLITask", 4096, &sysCtx, 1, &taskHandles[4], 0);
     xTaskCreatePinnedToCore(alertWorkerTask, "AlertWorker", 4096, &sysCtx, 1, &taskHandles[5], 0);
 
@@ -356,7 +362,7 @@ static void restartTask(int index)
 {
     if (index < 0 || index >= 6) return;
     
-    const char* names[] = { "ZoneTask", "NetWorker", "MQTTWorker", "Heartbeat", "CLITask", "AlertWorker" };
+    const char* names[] = { "ZoneTask", "NetWorker", "MQTTWorker", "MaintTask", "CLITask", "AlertWorker" };
     
     if (restartCount[index] >= 3) {
         LOG_ERROR(TAG, "Task %s failed too many times. Manual intervention or Global Reboot required.", names[index]);
@@ -379,12 +385,12 @@ static void restartTask(int index)
     }
 
     switch(index) {
-        case 0: xTaskCreatePinnedToCore(zoneTask, names[index], 3072, NULL, 5, &taskHandles[index], 1); break;
-        case 1: xTaskCreatePinnedToCore(netWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
-        case 2: xTaskCreatePinnedToCore(mqttWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
-        case 3: xTaskCreatePinnedToCore(heartbeatTask, names[index], 2048, NULL, 1, &taskHandles[index], 1); break;
-        case 4: xTaskCreatePinnedToCore(cliWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
-        case 5: xTaskCreatePinnedToCore(alertWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
+        case 0: xTaskCreatePinnedToCore(zoneTask, names[index], 3072, &sysCtx, 5, &taskHandles[index], 1); break;
+        case 1: xTaskCreatePinnedToCore(netWorkerTask, names[index], 4096, &sysCtx, 1, &taskHandles[index], 0); break;
+        case 2: xTaskCreatePinnedToCore(mqttWorkerTask, names[index], 4096, &sysCtx, 1, &taskHandles[index], 0); break;
+        case 3: xTaskCreatePinnedToCore(maintTask, names[index], 3072, &sysCtx, 1, &taskHandles[index], 1); break;
+        case 4: xTaskCreatePinnedToCore(cliWorkerTask, names[index], 4096, &sysCtx, 1, &taskHandles[index], 0); break;
+        case 5: xTaskCreatePinnedToCore(alertWorkerTask, names[index], 4096, &sysCtx, 1, &taskHandles[index], 0); break;
     }
 }
 

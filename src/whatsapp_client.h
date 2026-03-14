@@ -3,37 +3,31 @@
 
 #include <Arduino.h>
 
-/**
- * @brief WhatsApp alert mode
- */
-#include "notification_manager.h"
-
 struct SystemContext;
-void whatsappInit(SystemContext* ctx);
 
-/**
- * @brief Send a WhatsApp message via CallMeBot gateway
- * 
- * @param phone   The phone number (including country code, e.g., +34600123456)
- * @param apiKey  The CallMeBot API key
- * @param message The message to send
- * @return bool   True if sent successfully
- */
-bool whatsappSend(const char* phone, const char* apiKey, const char* message);
+class WhatsappService {
+public:
+    WhatsappService();
+    ~WhatsappService();
 
-void whatsappSetConfig(const char* phone, const char* apiKey);
-bool whatsappSendWrapper(const char* message);
+    void init(SystemContext* ctx);
+    void setConfig(const char* phone, const char* apiKey);
+    bool send(const char* message);
 
-/**
- * @brief Get the WhatsApp phone number
- */
-const char* whatsappGetPhone();
+    const char* getPhone() const { return _phone; }
+    const char* getApiKey() const { return _apiKey; }
 
-/**
- * @brief Get the WhatsApp API key
- */
-const char* whatsappGetApiKey();
+private:
+    SystemContext* _ctx;
+    char _phone[32];
+    char _apiKey[32];
+    SemaphoreHandle_t _mutex;
 
-// Channels are now managed by NotificationManager
+    static bool staticSendWrapper(const char* message);
+    bool internalSend(const char* phone, const char* apiKey, const char* message);
+    size_t urlEncodeTo(const char* src, char* dest, size_t destSize);
+
+    static WhatsappService* _instance;
+};
 
 #endif // SF_ALARM_WHATSAPP_CLIENT_H

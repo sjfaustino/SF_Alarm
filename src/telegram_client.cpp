@@ -2,71 +2,73 @@
 #include <HTTPClient.h>
 #include "logging.h"
 #include "network.h"
-
-static const char* TAG = "TG";
 #include "system_context.h"
 #include "notification_manager.h"
-static SystemContext* globalCtx = nullptr;
 
-static char tgToken[64] = "";
-static char tgChatId[32] = "";
-static SemaphoreHandle_t tgMutex = NULL;
+static const char* TAG = "TG";
 
-void telegramInit(SystemContext* ctx) {
-    globalCtx = ctx;
-    if (tgMutex == NULL) {
-        tgMutex = xSemaphoreCreateMutex();
-    }
-    globalCtx->notificationManager->registerProvider(CH_TG, "Telegram", telegramSendWrapper);
-    LOG_INFO(TAG, "Telegram client initialized");
+TelegramService* TelegramService::_instance = nullptr;
+
+TelegramService::TelegramService() : _ctx(nullptr), _mutex(NULL) {
+    _instance = this;
+    memset(_token, 0, sizeof(_token));
+    memset(_chatId, 0, sizeof(_chatId));
 }
 
-void telegramSetConfig(const char* token, const char* chatId) {
-    if (tgMutex && xSemaphoreTake(tgMutex, portMAX_DELAY) == pdTRUE) {
+TelegramService::~TelegramService() {
+    if (_mutex) vSemaphoreDelete(_mutex);
+}
+
+void TelegramService::init(SystemContext* ctx) {
+    _ctx = ctx;
+    if (_mutex == NULL) {
+        _mutex = xSemaphoreCreateMutex();
+    }
+    _ctx->notificationManager->registerProvider(CH_TG, "Telegram", TelegramService::staticSendWrapper);
+    LOG_INFO(TAG, "Telegram Service initialized");
+}
+
+void TelegramService::setConfig(const char* token, const char* chatId) {
+    if (_mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
         if (token) {
-            strncpy(tgToken, token, sizeof(tgToken) - 1);
-            tgToken[sizeof(tgToken) - 1] = '\0';
+            strncpy(_token, token, sizeof(_token) - 1);
+            _token[sizeof(_token) - 1] = '\0';
         }
         if (chatId) {
-            strncpy(tgChatId, chatId, sizeof(tgChatId) - 1);
-            tgChatId[sizeof(tgChatId) - 1] = '\0';
+            strncpy(_chatId, chatId, sizeof(_chatId) - 1);
+            _chatId[sizeof(_chatId) - 1] = '\0';
         }
-        xSemaphoreGive(tgMutex);
+        xSemaphoreGive(_mutex);
     }
-    LOG_INFO(TAG, "Config updated: ChatID=%s", tgChatId);
 }
 
-const char* telegramGetToken() { return tgToken; }
-const char* telegramGetChatId() { return tgChatId; }
-bool telegramSendWrapper(const char* message) {
-    return telegramSend(tgToken, tgChatId, message);
+bool TelegramService::staticSendWrapper(const char* message) {
+    if (_instance) return _instance->send(message);
+    return false;
 }
 
-bool telegramSend(const char* token, const char* chatId, const char* message) {
-    if (!token || strlen(token) == 0 || !chatId || strlen(chatId) == 0) {
-        LOG_ERROR(TAG, "Credentials not set");
+bool TelegramService::send(const char* message) {
+    char token[64];
+    char chatId[32];
+    
+    if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        strncpy(token, _token, sizeof(token)-1);
+        token[sizeof(token)-1] = '\0';
+        strncpy(chatId, _chatId, sizeof(chatId)-1);
+        chatId[sizeof(chatId)-1] = '\0';
+        xSemaphoreGive(_mutex);
+    } else {
         return false;
     }
 
-    if (!networkIsConnected()) {
-        LOG_WARN(TAG, "Network DOWN. Skipping TG alert.");
-        return false;
-    }
+    return internalSend(token, chatId, message);
+}
 
-    // Telegram Bot API URL: https://api.telegram.org/bot<token>/sendMessage
-    char fullUrl[1024];
-    
-    // We need to URL encode the message properly. 
-    // We'll use a simple approach for now, assuming string_utils or similar.
-    // However, for consistency with whatsapp_client, let's look at its encoder.
-    
+bool TelegramService::internalSend(const char* token, const char* chatId, const char* message) {
+    if (strlen(token) == 0 || strlen(chatId) == 0) return false;
+    if (!networkIsConnected()) return false;
+
     char encodedMsg[1024];
-    // Re-implementing a simple URL encoder here if not available globally
-    // Actually, I should probably expose the one from whatsapp_client if it's good.
-    // For now, let's just use the one from whatsapp_client if I can find it in a common place.
-    // It's static in whatsapp_client.cpp. I'll just copy it or move it to string_utils.h.
-    
-    // Let's just implement a quick one for TG.
     static const char *hexChars = "0123456789ABCDEF";
     size_t d = 0;
     const char* src = message;
@@ -82,23 +84,18 @@ bool telegramSend(const char* token, const char* chatId, const char* message) {
     }
     encodedMsg[d] = '\0';
 
+    char fullUrl[1024];
     snprintf(fullUrl, sizeof(fullUrl),
              "https://api.telegram.org/bot%s/sendMessage?chat_id=%s&text=%s",
              token, chatId, encodedMsg);
 
     HTTPClient http;
     http.begin(fullUrl);
-    http.setTimeout(5000); // 5s timeout for Telegram
+    http.setTimeout(5000);
     
     int code = http.GET();
-    
-    bool success = false;
-    if (code == 200) {
-        LOG_INFO(TAG, "Telegram alert delivered");
-        success = true;
-    } else {
-        LOG_ERROR(TAG, "TG Failed (HTTP %d)", code);
-    }
+    bool success = (code == 200);
+    if (!success) LOG_ERROR(TAG, "TG Failed (HTTP %d)", code);
     
     http.end();
     return success;

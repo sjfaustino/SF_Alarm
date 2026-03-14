@@ -79,7 +79,6 @@ public:
 
     /// Internal use only: Arm/Disarm without PIN.
     bool armAwayInternal();
-    bool armHomeHomeInternal(); // Fixed typo in previous implementation? No, let's keep it clean
     bool armHomeInternal();
     bool disarmInternal();
 

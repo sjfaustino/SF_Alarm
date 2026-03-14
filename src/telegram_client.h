@@ -2,34 +2,31 @@
 #define SF_ALARM_TELEGRAM_CLIENT_H
 
 #include <Arduino.h>
-#include "notification_manager.h"
 
 struct SystemContext;
-void telegramInit(SystemContext* ctx);
 
-/**
- * @brief Send a Telegram message via Bot API
- * 
- * @param token   The Telegram Bot Token
- * @param chatId  The destination Chat ID
- * @param message The message to send
- * @return bool   True if sent successfully
- */
-bool telegramSend(const char* token, const char* chatId, const char* message);
+class TelegramService {
+public:
+    TelegramService();
+    ~TelegramService();
 
-void telegramSetConfig(const char* token, const char* chatId);
-bool telegramSendWrapper(const char* message);
+    void init(SystemContext* ctx);
+    void setConfig(const char* token, const char* chatId);
+    bool send(const char* message);
 
-/**
- * @brief Get the Telegram Token
- */
-const char* telegramGetToken();
+    const char* getToken() const { return _token; }
+    const char* getChatId() const { return _chatId; }
 
-/**
- * @brief Get the Telegram Chat ID
- */
-const char* telegramGetChatId();
+private:
+    SystemContext* _ctx;
+    char _token[64];
+    char _chatId[32];
+    SemaphoreHandle_t _mutex;
 
-// Channels managed by NotificationManager
+    static bool staticSendWrapper(const char* message);
+    bool internalSend(const char* token, const char* chatId, const char* message);
+    
+    static TelegramService* _instance;
+};
 
 #endif // SF_ALARM_TELEGRAM_CLIENT_H

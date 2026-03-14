@@ -20,7 +20,7 @@ static const char* TAG = "SMSC";
 // Module State
 // ---------------------------------------------------------------------------
 #include "system_context.h"
-static SystemContext* globalCtx = nullptr;
+static SystemContext* _ctx = nullptr;
 static char     phoneNumbers[MAX_PHONE_NUMBERS][MAX_PHONE_LEN];
 static int      phoneCount = 0;
 
@@ -81,7 +81,7 @@ static void sendReply(const char* sender, const char* message)
     // Fix: Queue Starvation DoS vulnerability offload.
     // Instead of synchronously triggering smsGatewaySend (which halts the task for 10s),
     // push the reply into the async queue so core processing can continue immediately.
-    globalCtx->notificationManager->queueReply(sender, message);
+    _ctx->notificationManager->queueReply(sender, message);
 }
 
 
@@ -300,9 +300,9 @@ static bool parseStatus(const char* body, const char* sender)
 
     snprintf(buf, sizeof(buf),
              "SF_Alarm [%s] ZonesTrig:%d | Mask:%04X | Clear:%s | Phones:%d",
-             globalCtx->alarmController->getStateStr(),
+             _ctx->alarmController->getStateStr(),
              trigCount,
-             globalCtx->alarmController->getActiveAlarmMask(),
+             _ctx->alarmController->getActiveAlarmMask(),
              zonesAllClear() ? "YES" : "NO",
              smsCmdGetPhoneCount());
 
@@ -339,7 +339,7 @@ static bool parseArmDisarm(const char* body, const char* sender)
         if (strcmp(cmd2, "HOME") == 0) {
             // skip spaces
             while (*p && isspace(*p)) p++;
-            if (globalCtx->alarmController->armHome(p)) {
+            if (_ctx->alarmController->armHome(p)) {
                 sendReply(sender, "SF_Alarm: Arming HOME. Exit delay started.");
             } else {
                 sendReply(sender, "SF_Alarm: ARM HOME failed. Check PIN/zones.");
@@ -348,7 +348,7 @@ static bool parseArmDisarm(const char* body, const char* sender)
         } else {
             // It was just ARM <pin>
             p = rollback; // The second word is actually the pin
-            if (globalCtx->alarmController->armAway(p)) {
+            if (_ctx->alarmController->armAway(p)) {
                 sendReply(sender, "SF_Alarm: Arming AWAY. Exit delay started.");
             } else {
                 sendReply(sender, "SF_Alarm: ARM failed. Check PIN/zones.");
@@ -356,7 +356,7 @@ static bool parseArmDisarm(const char* body, const char* sender)
             return true;
         }
     } else if (strcmp(cmd1, "DISARM") == 0) {
-        if (globalCtx->alarmController->disarm(p)) {
+        if (_ctx->alarmController->disarm(p)) {
             sendReply(sender, "SF_Alarm: System DISARMED.");
         } else {
             sendReply(sender, "SF_Alarm: DISARM failed. Invalid PIN.");
@@ -373,7 +373,7 @@ static bool parseMute(const char* body, const char* sender)
     const char* pin = body + 4;
     while (*pin && isspace(*pin)) pin++;
 
-    if (globalCtx->alarmController->muteSiren(pin)) {
+    if (_ctx->alarmController->muteSiren(pin)) {
         sendReply(sender, "SF_Alarm: Siren MUTED.");
     } else {
         sendReply(sender, "SF_Alarm: MUTE failed. Invalid PIN.");
@@ -495,7 +495,7 @@ static bool parseAlertChannel(const char* body, const char* sender)
     int m = body[3] - '0';
     if (m < 0 || m > 15) return false; // Extended for future bits
 
-    globalCtx->notificationManager->setChannels((uint8_t)m);
+    _ctx->notificationManager->setChannels((uint8_t)m);
 
     char reply[120];
     snprintf(reply, sizeof(reply), "SF_Alarm: Alert bitmask set to 0x%02X (SMS:%s, WA:%s, TG:%s)", 
@@ -537,7 +537,7 @@ static bool parseSetWhatsApp(const char* body, const char* sender)
     
     if (!tokenize(body, 2, fields, sizes)) return false;
 
-    whatsappSetConfig(phone, key);
+    _ctx->whatsapp->setConfig(phone, key);
     configSaveWhatsapp();
     sendReply(sender, "SF_Alarm: WhatsApp configuration updated");
     return true;
@@ -552,7 +552,7 @@ static bool parseSetTelegram(const char* body, const char* sender)
 
     if (!tokenize(body, 2, fields, sizes)) return false;
 
-    telegramSetConfig(tok, chat);
+    _ctx->telegram->setConfig(tok, chat);
     configSaveTelegram();
     sendReply(sender, "SF_Alarm: Telegram configuration updated");
     return true;
@@ -582,7 +582,7 @@ static bool parseSetMQTT(const char* body, const char* sender)
     const char* pass = (count > 4) ? parts[4] : "";
     const char* clientId = (count > 5) ? parts[5] : "SF_Alarm";
 
-    mqttSetConfig(server, port, user, pass, clientId);
+    _ctx->mqtt->setConfig(server, port, user, pass, clientId);
     sendReply(sender, "SF_Alarm: MQTT configuration updated");
     return true;
 }
@@ -646,7 +646,7 @@ static const int COMMAND_TABLE_SIZE = sizeof(COMMAND_TABLE) / sizeof(CommandEntr
 void smsCmdProcess(const char* sender, const char* body)
 {
     // Logic Bomb Prevention: Inhibit remote commands during critical hardware failure
-    if (globalCtx->alarmController->getState() == ALARM_TRIGGERED) {
+    if (_ctx->alarmController->getState() == ALARM_TRIGGERED) {
         LOG_WARN(TAG, "SMS Command ignored while in PANIC state.");
         return;
     }
@@ -722,7 +722,7 @@ void smsCmdProcess(const char* sender, const char* body)
 
 void smsCmdInit(SystemContext* ctx)
 {
-    globalCtx = ctx;
+    _ctx = ctx;
     if (htmlMutex == NULL) {
         htmlMutex = xSemaphoreCreateMutex();
     }
@@ -730,7 +730,7 @@ void smsCmdInit(SystemContext* ctx)
         smsStateMutex = xSemaphoreCreateMutex();
     }
     
-    globalCtx->notificationManager->registerProvider(CH_SMS, "SMS", smsCmdSendWrapper);
+    _ctx->notificationManager->registerProvider(CH_SMS, "SMS", smsCmdSendWrapper);
 
     xSemaphoreTake(smsStateMutex, portMAX_DELAY);
     phoneCount = 0;
@@ -831,7 +831,7 @@ void smsCmdSendAlert(const char* message)
     LOG_INFO(TAG, "Broadcasting alert to %d number(s): %s", phoneCount, message);
     for (int i = 0; i < phoneCount; i++) {
         if (strlen(phoneNumbers[i]) > 0) {
-            smsGatewaySend(phoneNumbers[i], message);
+            _ctx->sms->send(phoneNumbers[i], message);
         }
     }
 }
@@ -927,11 +927,11 @@ void smsCmdUpdate()
             }
 
             snprintf(buf, sizeof(buf),
-                     globalCtx->alarmController->getStateStr(),
+                     _ctx->alarmController->getStateStr(),
                      trigCount,
-                     globalCtx->alarmController->getActiveAlarmMask(),
+                     _ctx->alarmController->getActiveAlarmMask(),
                      zonesAllClear() ? "YES" : "NO");
-            globalCtx->alarmController->broadcast(buf);
+            _ctx->alarmController->broadcast(buf);
         }
     } else {
         lastReportMs = 0;

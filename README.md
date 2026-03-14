@@ -93,8 +93,8 @@ The system has undergone a comprehensive structural and security hardening ("The
 ### ⚙️ Stability & Performance
 - **Zero-Heap NVS Access**: Optimized `config_manager.cpp` to load credentials and settings directly into static buffers, eliminating boot-time heap fragmentation from `String` objects.
 - **Provider-Based Notification Engine**: Replaced monolithic mode enums with an extensible, registration-based Provider Pattern. The `NotificationManager` now dispatches alerts through decoupled providers (SMS, WhatsApp, Telegram).
-- **Context Injection Architecture**: Surgically eliminated "Global State Addiction" by refactoring core services into instance-based classes. A central `SystemContext` now explicitly manages dependencies, significantly improving testability and modularity.
-- **ISmsGateway Abstraction**: Standardized SMS communication through a modular interface (`ISmsGateway`), decoupling the core logic from specific router or hardware implementations and enabling seamless expansion to future cellular modules.
+- **Context Injection Architecture**: Surgically eliminated "Global State Addiction" by refactoring core modules into instance-based classes (`SmsService`, `MqttService`, `TelegramService`, `WhatsappService`, `OnvifService`). A central `SystemContext` now explicitly manages dependencies, significantly improving testability and modularity.
+- **ISmsGateway Abstraction**: Standardized SMS communication through a modular interface (`ISmsGateway`), decoupling the core logic from specific router or hardware implementations (e.g., `LuciSmsGateway`).
 - **Robust HTML Parser**: Surgically eliminated brittle string scraping in the SMS gateway using `HtmlUtils`, a tag-aware parser that handles varied attribute orders and quote styles.
 - **Robust SMS Tokenizer**: Implemented a stateful parser in `sms_commands.cpp` that correctly handles `#` and other special characters in API tokens and passwords.
 - **Concurrency Mutexing**: All shared global state and the **I2C hardware bus (`Wire`)** are protected by FreeRTOS mutexes to prevent cross-core data corruption.

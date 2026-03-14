@@ -4,22 +4,28 @@
 #include <Arduino.h>
 
 // Forward declarations
-class ISmsGateway;
+class SmsService;
 class NotificationManager;
 class AlarmController;
 class ConfigManager;
-class MqttClient;
+class MqttService;
+class TelegramService;
+class WhatsappService;
+class OnvifService;
 
 /**
  * @brief SystemContext stores references to all shared services,
  * eliminating the "Global State Addiction".
  */
 struct SystemContext {
-    ISmsGateway*         smsGateway;
+    SmsService*          sms;
     NotificationManager* notificationManager;
     AlarmController*     alarmController;
     ConfigManager*       configManager;
-    MqttClient*          mqttClient;
+    MqttService*         mqtt;
+    TelegramService*     telegram;
+    WhatsappService*     whatsapp;
+    OnvifService*        onvif;
     
     // System status flags
     volatile uint8_t*    taskHeartbeatBits;

@@ -10,12 +10,16 @@ Detailed technical documentation for every module in the SF_Alarm firmware.
 - [src/io_expander — I2C PCF8574 I/O Driver](#srcio_expander--i2c-pcf8574-io-driver)
 - [src/alarm_zones — Alarm Zone Manager](#srcalarm_zones--alarm-zone-manager)
 - [src/alarm_controller — Alarm State Machine](#srcalarm_controller--alarm-state-machine)
-- [src/sms_gateway — SMS HTTP Client](#srcsms_gateway--sms-http-client)
+- [src/sms_gateway — SmsService & ISmsGateway](#srcsms_gateway--smsservice--ismsgateway)
 - [src/sms_commands — GA09 SMS Command Parser](#srcsms_commands--ga09-sms-command-parser)
 - [src/config_manager — NVS Persistence](#srcconfig_manager--nvs-persistence)
 - [src/network — Wi-Fi Connectivity](#srcnetwork--wifi-connectivity)
-- [src/whatsapp_client — WhatsApp Notifications](#srcwhatsapp_client--whatsapp-notifications)
-- [src/mqtt_client — IoT Integration](#srcmqtt_client--iot-integration)
+- [src/whatsapp_client — WhatsappService](#srcwhatsapp_client--whatsappservice)
+- [src/mqtt_client — MqttService](#srcmqtt_client--mqttservice)
+- [src/telegram_client — TelegramService](#srctelegram_client--telegramservice)
+- [src/onvif_client — OnvifService](#srconvif_client--onvifservice)
+- [src/notification_manager — Notification Engine](#srcnotification_manager--notification-engine)
+- [include/system_context — Dependency Injection](#includesystem_context--dependency-injection)
 - [src/serial_cli — Serial Command-Line Interface](#srcserial_cli--serial-command-line-interface)
 - [src/web_server & web_ui — Web Dashboard & REST API](#srcweb_server--web_ui--web-dashboard--rest-api)
 - [src/main.cpp — Application Entry Point](#srcmaincpp--application-entry-point)
@@ -348,11 +352,27 @@ operations require a valid PIN match. The default PIN is `1234`.
 
 ---
 
-## src/sms_gateway — SMS HTTP Client
+## src/sms_gateway — SmsService & ISmsGateway
 
-HTTP client that interfaces with the Cudy LT500D router's LuCI web
-interface to send and receive SMS messages. Since the Cudy LT500D has
-no documented API, this module mimics a web browser session.
+Encapsulates all SMS gateway logic into a class-based service. Standardized 
+via the `ISmsGateway` interface, it currently supports the `LuciSmsGateway` 
+implementation for Cudy routers.
+
+### SmsService Class
+
+The `SmsService` acts as a facade, managing the active gateway implementation 
+and providing a consistent API to the rest of the system via the `SystemContext`.
+
+### ISmsGateway Interface
+
+Standardized communication contract for future expansion (e.g., SIM800L, Twilio).
+
+| Method                    | Return   | Description                              |
+|----------------------------|---------|------------------------------------------|
+| `init(ctx)`                | `void`  | Store system context                      |
+| `send(phone, message)`     | `bool`  | Send SMS (with internal retry)            |
+| `pollInbox(msgs, max)`     | `int`   | Return number of new messages             |
+| `update()`                 | `void`  | Periodic background tasks (e.g., polling) |
 
 ### Authentication Flow
 
@@ -831,13 +851,13 @@ The main Arduino sketch that ties all modules together.
     ├── 2. configInit()                  ← open NVS
     ├── 3. ioExpanderInit()              ← I2C + PCF8574 x4
     ├── 4. zonesInit()                   ← 16 zones with defaults
-    ├── 5. alarmInit()                   ← state machine, register zone callback
-    │      alarmSetCallback(onAlarmEvent)
-    ├── 6. smsGatewayInit()              ← HTTP client config
-    │      smsCmdInit()                  ← command parser
-    ├── 7. networkInit()                 ← Wi-Fi connect (from NVS)
-    ├── 8. configLoad()                  ← override defaults from NVS
-    └── 9. cliInit()                     ← print banner, show prompt
+    ├── 5. Service Pre-Init (ctor)       ← Instantiate SmsService, MqttService, etc.
+    ├── 6. alarmInit()                   ← state machine, register zone callback
+    ├── 7. networkInit()                 ← Wi-Fi connect
+    ├── 8. configLoad(&sysCtx)           ← Load from NVS, configure services
+    ├── 9. Service Init (init)           ← Inject SystemContext (Sms, Mqtt, Telegram, etc.)
+    ├── 10. notifMgr.init(&sysCtx)       ← Finalize notification engine
+    └── 11. cliInit()                    ← print banner, show prompt
 ```
 
 ### loop() Cycle
@@ -968,6 +988,71 @@ control. The 50ms debounce ensures no false triggers are missed.
   ├───────────────────────────┼────────────────────────────────┤
   │ TOTAL                     │ ~50 KB / 320 KB available      │
   └───────────────────────────┴────────────────────────────────┘
+```
+
+---
+
+## src/whatsapp_client — WhatsappService
+
+Class-based wrapper for WhatsApp notifications. Uses an external API gateway 
+to deliver messages.
+
+- **Methods**: `setConfig()`, `getPhone()`, `getApiKey()`, `send()`.
+
+---
+
+## src/mqtt_client — MqttService
+
+Robust IoT integration service. Manages connection state, auto-reconnect, 
+and state synchronization with an MQTT broker.
+
+- **Methods**: `setConfig()`, `isConnected()`, `publish()`, `update()`.
+
+---
+
+## src/telegram_client — TelegramService
+
+Native Telegram Bot API implementation. Supports sending alerts to specific 
+Chat IDs using a Bot Token.
+
+- **Methods**: `setConfig()`, `getToken()`, `getChatId()`, `send()`.
+
+---
+
+## src/onvif_client — OnvifService
+
+ONVIF PTZ camera integration. Moves a target camera to a specific preset 
+or coordinate when an alarm zone is triggered.
+
+- **Methods**: `setServer()`, `getHost()`, `getPort()`, `isConnected()`, `update()`.
+
+---
+
+## src/notification_manager — Notification Engine
+
+The central dispatcher for all system alerts. Implements a registration-based 
+provider pattern to decouple the alarm logic from delivery channels.
+
+- **Methods**: `init()`, `dispatch()`, `setChannels()`, `getChannels()`.
+
+---
+
+## include/system_context — Dependency Injection
+
+The "Nervous System" of the firmware. A single structure passed to all 
+services to provide managed access to cross-module dependencies without 
+relying on global state.
+
+```cpp
+struct SystemContext {
+    AlarmController* alarmController;
+    NotificationManager* notificationManager;
+    SmsService* sms;
+    MqttService* mqtt;
+    TelegramService* telegram;
+    WhatsappService* whatsapp;
+    OnvifService* onvif;
+};
 ```
 
 ---

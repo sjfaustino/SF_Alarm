@@ -3,19 +3,29 @@
 
 #include <Arduino.h>
 
-/// Initialize ONVIF client.
-void onvifInit();
+struct SystemContext;
 
-/// Set camera configuration.
-void onvifSetServer(const char* host, uint16_t port, const char* user, const char* pass, uint8_t targetZone);
+class OnvifService {
+public:
+    OnvifService();
+    ~OnvifService();
 
-/// Get current connection status.
-bool onvifIsConnected();
+    void init(SystemContext* ctx);
+    void setServer(const char* host, uint16_t port, const char* user, const char* pass, uint8_t targetZone);
+    void disconnect();
+    bool isConnected();
 
-const char* onvifGetHost();
-uint16_t onvifGetPort();
-const char* onvifGetUser();
-const char* onvifGetPass();
-uint8_t onvifGetTargetZone();
+    const char* getHost();
+    uint16_t getPort();
+    const char* getUser();
+    const char* getPass();
+    uint8_t getTargetZone();
+
+private:
+    SystemContext* _ctx;
+    struct OnvifState* _state;
+    static void onvifTask(void* pvParameters);
+    static OnvifService* _instance;
+};
 
 #endif // SF_ALARM_ONVIF_CLIENT_H

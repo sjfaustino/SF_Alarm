@@ -21,16 +21,28 @@
 #define DEFAULT_ROUTER_USER      "admin"
 #define DEFAULT_ROUTER_PASS      "admin"
 
-#define DEFAULT_WA_PHONE         ""
-#define DEFAULT_WA_APIKEY        ""
+#ifndef DEFAULT_WA_PHONE
+  #define DEFAULT_WA_PHONE         ""
+#endif
+#ifndef DEFAULT_WA_APIKEY
+  #define DEFAULT_WA_APIKEY        ""
+#endif
 
-#define DEFAULT_TG_TOKEN         ""
-#define DEFAULT_TG_CHATID        ""
+#ifndef DEFAULT_TG_TOKEN
+  #define DEFAULT_TG_TOKEN         ""
+#endif
+#ifndef DEFAULT_TG_CHATID
+  #define DEFAULT_TG_CHATID        ""
+#endif
 
 #define DEFAULT_MQTT_SERVER      ""
 #define DEFAULT_MQTT_PORT        1883
-#define DEFAULT_MQTT_USER        ""
-#define DEFAULT_MQTT_PASS        ""
+#ifndef DEFAULT_MQTT_USER
+  #define DEFAULT_MQTT_USER        ""
+#endif
+#ifndef DEFAULT_MQTT_PASS
+  #define DEFAULT_MQTT_PASS        ""
+#endif
 #define DEFAULT_MQTT_CLIENTID    "SF_Alarm"
 
 #define DEFAULT_ONVIF_HOST       ""

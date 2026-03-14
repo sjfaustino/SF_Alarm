@@ -1,16 +1,25 @@
 #include "whatsapp_client.h"
-#include "notification_manager.h"
 #include <HTTPClient.h>
 #include "logging.h"
 #include "network.h"
-
-static const char* TAG = "WA";
 #include "system_context.h"
 #include "notification_manager.h"
-static SystemContext* globalCtx = nullptr;
 
-// Professional URL encoder — Stack-allocated (Obsidian Mantle)
-static size_t urlEncodeTo(const char* src, char* dest, size_t destSize) {
+static const char* TAG = "WA";
+
+WhatsappService* WhatsappService::_instance = nullptr;
+
+WhatsappService::WhatsappService() : _ctx(nullptr), _mutex(NULL) {
+    _instance = this;
+    memset(_phone, 0, sizeof(_phone));
+    memset(_apiKey, 0, sizeof(_apiKey));
+}
+
+WhatsappService::~WhatsappService() {
+    if (_mutex) vSemaphoreDelete(_mutex);
+}
+
+size_t WhatsappService::urlEncodeTo(const char* src, char* dest, size_t destSize) {
     static const char *hexChars = "0123456789ABCDEF";
     size_t d = 0;
     while (*src && (d < destSize - 1)) {
@@ -28,97 +37,70 @@ static size_t urlEncodeTo(const char* src, char* dest, size_t destSize) {
     return d;
 }
 
-static char waPhone[32] = "";
-static char waApiKey[32] = "";
-static SemaphoreHandle_t waMutex = NULL;
-
-void whatsappInit(SystemContext* ctx) {
-    globalCtx = ctx;
-    if (waMutex == NULL) {
-        waMutex = xSemaphoreCreateMutex();
+void WhatsappService::init(SystemContext* ctx) {
+    _ctx = ctx;
+    if (_mutex == NULL) {
+        _mutex = xSemaphoreCreateMutex();
     }
-    globalCtx->notificationManager->registerProvider(CH_WA, "WhatsApp", whatsappSendWrapper);
-    LOG_INFO(TAG, "WhatsApp client initialized");
+    _ctx->notificationManager->registerProvider(CH_WA, "WhatsApp", WhatsappService::staticSendWrapper);
+    LOG_INFO(TAG, "WhatsApp Service initialized");
 }
 
-void whatsappSetConfig(const char* phone, const char* apiKey) {
-    if (waMutex && xSemaphoreTake(waMutex, portMAX_DELAY) == pdTRUE) {
+void WhatsappService::setConfig(const char* phone, const char* apiKey) {
+    if (_mutex && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
         if (phone) {
-            strncpy(waPhone, phone, sizeof(waPhone) - 1);
-            waPhone[sizeof(waPhone) - 1] = '\0';
+            strncpy(_phone, phone, sizeof(_phone) - 1);
+            _phone[sizeof(_phone) - 1] = '\0';
         }
         if (apiKey) {
-            strncpy(waApiKey, apiKey, sizeof(waApiKey) - 1);
-            waApiKey[sizeof(waApiKey) - 1] = '\0';
+            strncpy(_apiKey, apiKey, sizeof(_apiKey) - 1);
+            _apiKey[sizeof(_apiKey) - 1] = '\0';
         }
-        xSemaphoreGive(waMutex);
+        xSemaphoreGive(_mutex);
     }
-    LOG_INFO(TAG, "Config updated: Phone=%s", waPhone);
 }
 
-const char* whatsappGetPhone() { return waPhone; }
-const char* whatsappGetApiKey() { return waApiKey; }
-bool whatsappSendWrapper(const char* message) {
-    return whatsappSend(waPhone, waApiKey, message);
+bool WhatsappService::staticSendWrapper(const char* message) {
+    if (_instance) return _instance->send(message);
+    return false;
 }
 
-bool whatsappSend(const char* phone, const char* apiKey, const char* message) {
-    if (!phone || strlen(phone) == 0 || !apiKey || strlen(apiKey) == 0) {
-        LOG_ERROR(TAG, "Credentials not set");
-        return false;
-    }
-
-    if (!networkIsConnected()) {
-        LOG_WARN(TAG, "Network DOWN. Skipping alert.");
-        return false;
-    }
-
-    // Strictly non-blocking: Submit-and-go. 
-    // Truncation Guard: 400 chars is max for CallMeBot API safety.
-    if (strlen(message) > 400) {
-        LOG_ERROR(TAG, "Message too large (%d). Truncating.", (int)strlen(message));
-    }
-
-    // Stack-allocated buffers (Zero-Heap architecture)
-    char encodedMsg[768]; // Buffer for the encoded message
-    urlEncodeTo(message, encodedMsg, sizeof(encodedMsg)); // Re-entrant urlEncodeTo
-
-    char stackPhone[32];
-    char stackApiKey[32];
+bool WhatsappService::send(const char* message) {
+    char phone[32];
+    char apiKey[32];
     
-    bool credsOk = false;
-    if (waMutex && xSemaphoreTake(waMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        strncpy(stackPhone, waPhone, sizeof(stackPhone)-1);
-        stackPhone[sizeof(stackPhone)-1] = '\0';
-        strncpy(stackApiKey, waApiKey, sizeof(stackApiKey)-1);
-        stackApiKey[sizeof(stackApiKey)-1] = '\0';
-        credsOk = (strlen(stackPhone) > 0 && strlen(stackApiKey) > 0);
-        xSemaphoreGive(waMutex);
-    }
-
-    if (!credsOk) {
-        LOG_ERROR(TAG, "Credentials not valid in mutex cycle");
+    if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        strncpy(phone, _phone, sizeof(phone)-1);
+        phone[sizeof(phone)-1] = '\0';
+        strncpy(apiKey, _apiKey, sizeof(apiKey)-1);
+        apiKey[sizeof(apiKey)-1] = '\0';
+        xSemaphoreGive(_mutex);
+    } else {
         return false;
     }
+
+    return internalSend(phone, apiKey, message);
+}
+
+bool WhatsappService::internalSend(const char* phone, const char* apiKey, const char* message) {
+    if (strlen(phone) == 0 || strlen(apiKey) == 0) return false;
+    if (!networkIsConnected()) return false;
+
+    char encodedMsg[768];
+    urlEncodeTo(message, encodedMsg, sizeof(encodedMsg));
 
     char fullUrl[1024];
     snprintf(fullUrl, sizeof(fullUrl),
              "https://api.callmebot.com/whatsapp.php?phone=%s&text=%s&apikey=%s",
-             stackPhone, encodedMsg, stackApiKey);
+             phone, encodedMsg, apiKey);
 
     HTTPClient http;
     http.begin(fullUrl);
-    http.setTimeout(3000); // Strict 3s timeout to prevent queue starvation
+    http.setTimeout(3000);
     
     int code = http.GET();
-    
-    bool success = false;
-    if (code == 200) {
-        LOG_INFO(TAG, "Alert delivered successfully");
-        success = true;
-    } else {
-        LOG_ERROR(TAG, "Failed to send (HTTP %d): %s", code, http.errorToString(code).c_str());
-    }
+    bool success = (code == 200);
+    if (!success) LOG_ERROR(TAG, "WA Failed (HTTP %d)", code);
     
     http.end();
     return success;

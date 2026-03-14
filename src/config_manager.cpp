@@ -32,7 +32,7 @@ static const char* TAG = "CFG";
 #include "system_context.h"
 #include "notification_manager.h"
 #include "alarm_controller.h"
-static SystemContext* globalCtx = nullptr;
+static SystemContext* _ctx = nullptr;
 
 // Dirty Flags for granular saving (Protected by ConfigUtils::lock)
 static bool dirtyMain      = false;
@@ -215,7 +215,7 @@ void configSaveSchedule() {
 
 void configInit(SystemContext* ctx)
 {
-    globalCtx = ctx;
+    _ctx = ctx;
     esp_err_t err = nvs_flash_init();
     
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -258,7 +258,7 @@ TaskHandle_t configGetLockOwner()
 
 void configLoad(SystemContext* ctx)
 {
-    globalCtx = ctx;
+    _ctx = ctx;
     ConfigUtils::Session sess(true);
     if (!sess.isValid()) {
         LOG_ERROR(TAG, "Config load FAILED: Mutex timeout");
@@ -289,13 +289,13 @@ void configLoad(SystemContext* ctx)
             }
         }
     }
-    globalCtx->alarmController->loadPin(pin.c_str());
+    _ctx->alarmController->loadPin(pin.c_str());
 
     // --- Alarm timing ---
-    globalCtx->alarmController->setExitDelay(p.getUShort(KEY_EXIT_DELAY, DEFAULT_EXIT_DELAY_S));
-    globalCtx->alarmController->setEntryDelay(p.getUShort(KEY_ENTRY_DELAY, DEFAULT_ENTRY_DELAY_S));
-    globalCtx->alarmController->setSirenDuration(p.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
-    globalCtx->alarmController->setSirenOutput(p.getUChar(KEY_SIREN_CH, 0));
+    _ctx->alarmController->setExitDelay(p.getUShort(KEY_EXIT_DELAY, DEFAULT_EXIT_DELAY_S));
+    _ctx->alarmController->setEntryDelay(p.getUShort(KEY_ENTRY_DELAY, DEFAULT_ENTRY_DELAY_S));
+    _ctx->alarmController->setSirenDuration(p.getUShort(KEY_SIREN_DUR, DEFAULT_SIREN_DURATION_S));
+    _ctx->alarmController->setSirenOutput(p.getUChar(KEY_SIREN_CH, 0));
 
     // --- Periodic Report ---
     smsCmdSetReportInterval(p.getUShort(KEY_REPORT_DUR, DEFAULT_REPORT_INTERVAL_MIN));
@@ -317,8 +317,8 @@ void configLoad(SystemContext* ctx)
     if (len == 0) strncpy(keyBuf, DEFAULT_WA_APIKEY, sizeof(keyBuf));
     
     uint8_t channels = p.getUChar(KEY_ALERT_CHANNELS, (uint8_t)(CH_SMS | CH_TG));
-    globalCtx->notificationManager->setChannels(channels);
-    whatsappSetConfig(buf, keyBuf);
+    _ctx->notificationManager->setChannels(channels);
+    _ctx->whatsapp->setConfig(buf, keyBuf);
 
     // --- Telegram ---
     char tgTok[80];
@@ -329,7 +329,7 @@ void configLoad(SystemContext* ctx)
     len = p.getString(KEY_TG_CHATID, tgCid, sizeof(tgCid));
     if (len == 0) strncpy(tgCid, DEFAULT_TG_CHATID, sizeof(tgCid));
 
-    telegramSetConfig(tgTok, tgCid);
+    _ctx->telegram->setConfig(tgTok, tgCid);
 
     // --- MQTT ---
     String mqServer = p.getString(KEY_MQTT_SERVER, "");
@@ -337,7 +337,7 @@ void configLoad(SystemContext* ctx)
     String mqUser = p.getString(KEY_MQTT_USER, "");
     String mqPass = p.getString(KEY_MQTT_PASS, "");
     String mqClientId = p.getString(KEY_MQTT_CLIENTID, "SF_Alarm");
-    mqttSetConfig(mqServer.c_str(), mqPort, mqUser.c_str(), mqPass.c_str(), mqClientId.c_str());
+    _ctx->mqtt->setConfig(mqServer.c_str(), mqPort, mqUser.c_str(), mqPass.c_str(), mqClientId.c_str());
 
     // --- ONVIF ---
     String ovHost = p.getString(KEY_ONVIF_HOST, "");
@@ -345,7 +345,8 @@ void configLoad(SystemContext* ctx)
     String ovUser = p.getString(KEY_ONVIF_USER, "");
     String ovPass = p.getString(KEY_ONVIF_PASS, "");
     uint8_t ovZone = p.getUChar(KEY_ONVIF_ZONE, 1);
-    onvifSetServer(ovHost.c_str(), ovPort, ovUser.c_str(), ovPass.c_str(), ovZone);
+    _ctx->onvif->setServer(ovHost.c_str(), ovPort, ovUser.c_str(), ovPass.c_str(), ovZone);
+
 
     // --- System Extras ---
     g_heartbeatEnabled = p.getBool(KEY_HEARTBEAT_EN, true);
@@ -390,7 +391,7 @@ void configLoad(SystemContext* ctx)
     String routerIp   = p.getString(KEY_ROUTER_IP, DEFAULT_ROUTER_IP);
     String routerUser = p.getString(KEY_ROUTER_USER, DEFAULT_ROUTER_USER);
     String routerPass = p.getString(KEY_ROUTER_PASS, DEFAULT_ROUTER_PASS);
-    smsGatewaySetCredentials(routerIp.c_str(), routerUser.c_str(), routerPass.c_str());
+    _ctx->sms->setCredentials(routerIp.c_str(), routerUser.c_str(), routerPass.c_str());
 
     // --- Alarm Texts ---
     for (int i = 0; i < MAX_ZONES; i++) {
@@ -444,10 +445,10 @@ void configSavePin(const char* pin) {
 void configSaveTiming() {
     ConfigUtils::Session sess(false);
     if (sess.isValid()) {
-        sess.p().putUShort(KEY_EXIT_DELAY, globalCtx->alarmController->getExitDelay());
-        sess.p().putUShort(KEY_ENTRY_DELAY, globalCtx->alarmController->getEntryDelay());
-        sess.p().putUShort(KEY_SIREN_DUR, globalCtx->alarmController->getSirenDuration());
-        sess.p().putUChar(KEY_SIREN_CH, globalCtx->alarmController->getSirenOutput());
+        sess.p().putUShort(KEY_EXIT_DELAY, _ctx->alarmController->getExitDelay());
+        sess.p().putUShort(KEY_ENTRY_DELAY, _ctx->alarmController->getEntryDelay());
+        sess.p().putUShort(KEY_SIREN_DUR, _ctx->alarmController->getSirenDuration());
+        sess.p().putUChar(KEY_SIREN_CH, _ctx->alarmController->getSirenOutput());
         dirtyMain = false;
     }
 }
@@ -485,9 +486,9 @@ void configSaveRouter() {
     ConfigUtils::Session sess(false);
     if (sess.isValid()) {
         char ip[32], user[32], pass[64];
-        strncpy(ip, smsGatewayGetRouterIp(), sizeof(ip)-1); ip[sizeof(ip)-1] = '\0';
-        strncpy(user, smsGatewayGetRouterUser(), sizeof(user)-1); user[sizeof(user)-1] = '\0';
-        strncpy(pass, smsGatewayGetRouterPass(), sizeof(pass)-1); pass[sizeof(pass)-1] = '\0';
+        strncpy(ip, _ctx->sms->getRouterIp(), sizeof(ip)-1); ip[sizeof(ip)-1] = '\0';
+        strncpy(user, _ctx->sms->getRouterUser(), sizeof(user)-1); user[sizeof(user)-1] = '\0';
+        strncpy(pass, _ctx->sms->getRouterPass(), sizeof(pass)-1); pass[sizeof(pass)-1] = '\0';
         
         sess.p().putString(KEY_ROUTER_IP, ip);
         sess.p().putString(KEY_ROUTER_USER, user);
@@ -541,22 +542,11 @@ void configSavePeriodic() {
 void configSaveMqtt() {
     ConfigUtils::Session sess(false);
     if (sess.isValid()) {
-        char server[64], user[32], pass[64], client[32];
-        strncpy(server, mqttGetServer(), sizeof(server)-1); server[sizeof(server)-1] = '\0';
-        strncpy(user, mqttGetUser(), sizeof(user)-1); user[sizeof(user)-1] = '\0';
-        strncpy(pass, mqttGetPass(), sizeof(pass)-1); pass[sizeof(pass)-1] = '\0';
-        strncpy(client, mqttGetClientId(), sizeof(client)-1); client[sizeof(client)-1] = '\0';
-
-        sess.p().putString(KEY_MQTT_SERVER, server);
-        sess.p().putUShort(KEY_MQTT_PORT, mqttGetPort());
-        sess.p().putString(KEY_MQTT_USER, user);
-        sess.p().putString(KEY_MQTT_PASS, pass);
-        sess.p().putString(KEY_MQTT_CLIENTID, client);
-
-        memset(server, 0, sizeof(server));
-        memset(user, 0, sizeof(user));
-        memset(pass, 0, sizeof(pass));
-        memset(client, 0, sizeof(client));
+        sess.p().putString(KEY_MQTT_SERVER, _ctx->mqtt->getServer());
+        sess.p().putUShort(KEY_MQTT_PORT, _ctx->mqtt->getPort());
+        sess.p().putString(KEY_MQTT_USER, _ctx->mqtt->getUser());
+        sess.p().putString(KEY_MQTT_PASS, _ctx->mqtt->getPass());
+        sess.p().putString(KEY_MQTT_CLIENTID, _ctx->mqtt->getClientId());
         dirtyMqtt = false;
     }
 }
@@ -564,11 +554,11 @@ void configSaveMqtt() {
 void configSaveOnvif() {
     ConfigUtils::Session sess(false);
     if (sess.isValid()) {
-        sess.p().putString(KEY_ONVIF_HOST, onvifGetHost());
-        sess.p().putUShort(KEY_ONVIF_PORT, onvifGetPort());
-        sess.p().putString(KEY_ONVIF_USER, onvifGetUser());
-        sess.p().putString(KEY_ONVIF_PASS, onvifGetPass());
-        sess.p().putUChar(KEY_ONVIF_ZONE, onvifGetTargetZone());
+        sess.p().putString(KEY_ONVIF_HOST, _ctx->onvif->getHost());
+        sess.p().putUShort(KEY_ONVIF_PORT, _ctx->onvif->getPort());
+        sess.p().putString(KEY_ONVIF_USER, _ctx->onvif->getUser());
+        sess.p().putString(KEY_ONVIF_PASS, _ctx->onvif->getPass());
+        sess.p().putUChar(KEY_ONVIF_ZONE, _ctx->onvif->getTargetZone());
         dirtyOnvif = false;
     }
 }
@@ -597,7 +587,7 @@ void configSave()
 
     if (sMain) {
         char pin[MAX_PIN_LEN];
-        globalCtx->alarmController->copyPin(pin, sizeof(pin));
+        _ctx->alarmController->copyPin(pin, sizeof(pin));
         configSavePin(pin);
         ConfigUtils::scrubFmt(pin); // Actually scrubBuffer but let's be consistent
         memset(pin, 0, sizeof(pin));
@@ -748,9 +738,9 @@ uint32_t configLoadSirenTime()
 void configSaveWhatsapp() {
     ConfigUtils::Session sess(false);
     if (sess.isValid()) {
-        sess.p().putString(KEY_WA_PHONE, whatsappGetPhone());
-        sess.p().putString(KEY_WA_APIKEY, whatsappGetApiKey());
-        sess.p().putUChar(KEY_ALERT_CHANNELS, globalCtx->notificationManager->getChannels());
+        sess.p().putString(KEY_WA_PHONE, _ctx->whatsapp->getPhone());
+        sess.p().putString(KEY_WA_APIKEY, _ctx->whatsapp->getApiKey());
+        sess.p().putUChar(KEY_ALERT_CHANNELS, _ctx->notificationManager->getChannels());
         dirtyAlerts = false; 
     }
 }
@@ -758,9 +748,9 @@ void configSaveWhatsapp() {
 void configSaveTelegram() {
     ConfigUtils::Session sess(false);
     if (sess.isValid()) {
-        sess.p().putString(KEY_TG_TOKEN, telegramGetToken());
-        sess.p().putString(KEY_TG_CHATID, telegramGetChatId());
-        sess.p().putUChar(KEY_ALERT_CHANNELS, globalCtx->notificationManager->getChannels());
+        sess.p().putString(KEY_TG_TOKEN, _ctx->telegram->getToken());
+        sess.p().putString(KEY_TG_CHATID, _ctx->telegram->getChatId());
+        sess.p().putUChar(KEY_ALERT_CHANNELS, _ctx->notificationManager->getChannels());
         dirtyAlerts = false;
     }
 }
@@ -782,22 +772,22 @@ void configPrint()
     Serial.println("Network:");
     Serial.printf("  WiFi SSID:     %s\n", networkGetSsid());
     Serial.printf("  WiFi Pass:     %s\n", strlen(networkGetPass()) ? "********" : "");
-    Serial.printf("  Router IP:     %s\n", smsGatewayGetRouterIp());
-    Serial.printf("  Router User:   %s\n", smsGatewayGetRouterUser());
-    Serial.printf("  Router Pass:   %s\n", strlen(smsGatewayGetRouterPass()) ? "********" : "");
-    Serial.printf("  Exit delay:  %d sec\n", globalCtx->alarmController->getExitDelay());
-    Serial.printf("  Entry delay: %d sec\n", globalCtx->alarmController->getEntryDelay());
-    Serial.printf("  Siren dur:   %d sec\n", globalCtx->alarmController->getSirenDuration());
-    Serial.printf("  Siren ch:    %d\n", globalCtx->alarmController->getSirenOutput());
+    Serial.printf("  Router IP:     %s\n", _ctx->sms->getRouterIp());
+    Serial.printf("  Router User:   %s\n", _ctx->sms->getRouterUser());
+    Serial.printf("  Router Pass:   %s\n", strlen(_ctx->sms->getRouterPass()) ? "********" : "");
+    Serial.printf("  Exit delay:  %d sec\n", _ctx->alarmController->getExitDelay());
+    Serial.printf("  Entry delay: %d sec\n", _ctx->alarmController->getEntryDelay());
+    Serial.printf("  Siren dur:   %d sec\n", _ctx->alarmController->getSirenDuration());
+    Serial.printf("  Siren ch:    %d\n", _ctx->alarmController->getSirenOutput());
     Serial.printf("  Report int:  %d min\n", smsCmdGetReportInterval());
     Serial.printf("  Alarm mode:  %d (1:SMS, 2:Call, 3:Both)\n", (int)smsCmdGetWorkingMode());
     Serial.printf("  Recovery:    %s\n", smsCmdGetRecoveryText());
-    Serial.printf("  WA Phone:    %s\n", whatsappGetPhone());
-    Serial.printf("  Alert Chans: 0x%02X\n", globalCtx->notificationManager->getChannels());
-    Serial.printf("  TG ChatID:   %s\n", telegramGetChatId());
-    Serial.printf("  MQTT Server: %s:%d\n", mqttGetServer(), mqttGetPort());
-    Serial.printf("  MQTT User:   %s\n", mqttGetUser());
-    Serial.printf("  ONVIF Cam:   %s:%d (Zone %d)\n", onvifGetHost(), onvifGetPort(), (int)onvifGetTargetZone());
+    Serial.printf("  WA Phone:    %s\n", _ctx->whatsapp->getPhone());
+    Serial.printf("  Alert Chans: 0x%02X\n", _ctx->notificationManager->getChannels());
+    Serial.printf("  TG ChatID:   %s\n", _ctx->telegram->getChatId());
+    Serial.printf("  MQTT Server: %s:%d\n", _ctx->mqtt->getServer(), _ctx->mqtt->getPort());
+    Serial.printf("  MQTT User:   %s\n", _ctx->mqtt->getUser());
+    Serial.printf("  ONVIF Cam:   %s:%d (Zone %d)\n", _ctx->onvif->getHost(), _ctx->onvif->getPort(), (int)_ctx->onvif->getTargetZone());
     Serial.printf("  Heartbeat:   %s\n", g_heartbeatEnabled ? "ON" : "OFF");
     Serial.printf("  Timezone:    %s\n", g_timezone);
     Serial.printf("  Auto-Arm:    %s Mode\n", g_schedMode == 3 ? "HOME" : "AWAY");
