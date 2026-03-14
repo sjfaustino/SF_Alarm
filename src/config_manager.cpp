@@ -89,6 +89,30 @@ static const char* KEY_CONFIGURED    = "configured";
 static bool    g_heartbeatEnabled = true;
 static char    g_timezone[32]     = "GMT0";
 
+// ---------------------------------------------------------------------------
+// RTC Protected Storage (Flash Endurance Optimization)
+// ---------------------------------------------------------------------------
+// These survive soft-resets and watchdog triggers, preventing flash burnout.
+// They are flushed to NVS only on disarm or graceful shutdown.
+static RTC_NOINIT_ATTR uint32_t rtc_magic;
+static RTC_NOINIT_ATTR uint32_t rtc_sirenAccum;
+static RTC_NOINIT_ATTR uint8_t  rtc_failedAttempts;
+static RTC_NOINIT_ATTR bool     rtc_lockedOut;
+
+#define RTC_CONFIG_MAGIC 0xFEEDC0DE
+
+static void rtcInit() {
+    if (rtc_magic != RTC_CONFIG_MAGIC) {
+        rtc_sirenAccum = 0;
+        rtc_failedAttempts = 0;
+        rtc_lockedOut = false;
+        rtc_magic = RTC_CONFIG_MAGIC;
+        LOG_INFO(TAG, "RTC Memory: Initialized (Cold Boot)");
+    } else {
+        LOG_INFO(TAG, "RTC Memory: Restored (Warm Boot)");
+    }
+}
+
 bool configGetHeartbeatEnabled() { 
     bool en = true;
     if (configMutex && xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -264,7 +288,8 @@ void configInit()
     }
 
     configMutex = xSemaphoreCreateRecursiveMutex();
-    LOG_INFO(TAG, "NVS manager initialized with Recursive Mutex protection");
+    rtcInit();
+    LOG_INFO(TAG, "NVS manager initialized with RTC protection");
 }
 
 TaskHandle_t configGetLockOwner()
@@ -660,10 +685,13 @@ void configSave()
     if (sTz)        configSaveTimezone();
     if (sSched)     configSaveSchedule();
 
-    // Persist "configured" bit LAST
+    // Persist "configured" bit ONLY if not already set (Flash Endurance)
     Preferences p;
     if (p.begin(NVS_NAMESPACE, false)) {
-        p.putBool(KEY_CONFIGURED, true);
+        if (!p.getBool(KEY_CONFIGURED, false)) {
+            p.putBool(KEY_CONFIGURED, true);
+            LOG_INFO(TAG, "NVS: First-time 'configured' bit set.");
+        }
         p.end();
     }
 
@@ -674,16 +702,34 @@ void configSave()
 void configSaveAlarmState(AlarmState state)
 {
     if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // Optimization: Check existing state before writing
+        AlarmState current = ALARM_DISARMED;
         Preferences p;
+        if (p.begin(NVS_NAMESPACE, true)) {
+            current = (AlarmState)p.getUChar("state", (uint8_t)ALARM_DISARMED);
+            p.end();
+        }
+
+        if (current == state) {
+            xSemaphoreGiveRecursive(configMutex);
+            return; 
+        }
+
         if (p.begin(NVS_NAMESPACE, false)) {
             // Shadow-Copy Transactional Protocol: Write to shadow first
             p.putUChar("state_sh", (uint8_t)state);
-            p.putUChar("state_chk", (uint8_t)(state ^ 0xFF)); // Simple checksum
-            
-            // Now commit to main
+            p.putUChar("state_chk", (uint8_t)(state ^ 0xFF));
             p.putUChar("state", (uint8_t)state);
             p.end();
+            LOG_INFO(TAG, "NVS: Alarm state persisted: %d", (int)state);
         }
+
+        // On Disarm, we flush the RTC telemetry to NVS permanently
+        if (state == ALARM_DISARMED) {
+            configSaveSirenAccum(rtc_sirenAccum);
+            configSaveSecurityState(rtc_failedAttempts, rtc_lockedOut);
+        }
+
         xSemaphoreGiveRecursive(configMutex);
     }
 }
@@ -716,25 +762,45 @@ AlarmState configLoadAlarmState()
 
 void configSaveSecurityState(uint8_t failedAttempts, bool lockedOut)
 {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        Preferences p;
-        if (p.begin(NVS_NAMESPACE, false)) {
-            p.putUChar("failedAtts", failedAttempts);
-            p.putBool("isLocked", lockedOut);
-            p.end();
+    // Update RTC immediately (Survives soft-reboot)
+    rtc_failedAttempts = failedAttempts;
+    rtc_lockedOut      = lockedOut;
+
+    // Only commit to NVS if disarmed or locked out (to prevent brute-force reboot resets)
+    if (lockedOut || failedAttempts == 0) {
+        if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            Preferences p;
+            if (p.begin(NVS_NAMESPACE, false)) {
+                if (p.getUChar("failedAtts", 0) != failedAttempts || p.getBool("isLocked", false) != lockedOut) {
+                    p.putUChar("failedAtts", failedAttempts);
+                    p.putBool("isLocked", lockedOut);
+                    LOG_INFO(TAG, "NVS: Security state committed.");
+                }
+                p.end();
+            }
+            xSemaphoreGiveRecursive(configMutex);
         }
-        xSemaphoreGiveRecursive(configMutex);
     }
 }
 
 void configLoadSecurityState(uint8_t &failedAttempts, bool &lockedOut)
 {
+    // If RTC is valid, use it (Fastest, saves Flash)
+    if (rtc_magic == RTC_CONFIG_MAGIC) {
+        failedAttempts = rtc_failedAttempts;
+        lockedOut      = rtc_lockedOut;
+        return;
+    }
+
     if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         Preferences p;
         if (p.begin(NVS_NAMESPACE, true)) {
             failedAttempts = p.getUChar("failedAtts", 0);
             lockedOut      = p.getBool("isLocked", false);
             p.end();
+            // Populate RTC for next time
+            rtc_failedAttempts = failedAttempts;
+            rtc_lockedOut = lockedOut;
         }
         xSemaphoreGiveRecursive(configMutex);
     }
@@ -742,24 +808,42 @@ void configLoadSecurityState(uint8_t &failedAttempts, bool &lockedOut)
 
 void configSaveSirenAccum(uint32_t seconds)
 {
-    if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        Preferences p;
-        if (p.begin(NVS_NAMESPACE, false)) {
-            p.putUInt("sirenAcc", seconds);
-            p.end();
+    rtc_sirenAccum = seconds;
+
+    // Only commit to NVS if reset to 0 (Disarmed) or every 300 seconds (Anti-Fry)
+    // The previous 30s interval in alarm_controller was still too aggressive for flash longevity
+    static uint32_t lastNvsCommit = 0;
+    bool forceCommit = (seconds == 0);
+    
+    if (forceCommit || (millis() - lastNvsCommit >= 300000)) {
+        if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            Preferences p;
+            if (p.begin(NVS_NAMESPACE, false)) {
+                if (p.getUInt("sirenAcc", 0xFFFFFFFF) != seconds) {
+                    p.putUInt("sirenAcc", seconds);
+                    LOG_INFO(TAG, "NVS: Siren accumulation committed (%u s)", seconds);
+                }
+                p.end();
+            }
+            lastNvsCommit = millis();
+            xSemaphoreGiveRecursive(configMutex);
         }
-        xSemaphoreGiveRecursive(configMutex);
     }
 }
 
 uint32_t configLoadSirenAccum()
 {
+    if (rtc_magic == RTC_CONFIG_MAGIC) {
+        return rtc_sirenAccum;
+    }
+
     uint32_t seconds = 0;
     if (xSemaphoreTakeRecursive(configMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         Preferences p;
         if (p.begin(NVS_NAMESPACE, true)) {
             seconds = p.getUInt("sirenAcc", 0);
             p.end();
+            rtc_sirenAccum = seconds;
         }
         xSemaphoreGiveRecursive(configMutex);
     }

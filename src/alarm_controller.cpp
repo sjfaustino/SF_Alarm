@@ -409,13 +409,8 @@ void alarmUpdate()
                     sirenAccumulatedSec += diff;
                     lastSirenUpdateMs += diff * 1000; // PRESERVE fractional milliseconds (no leak)
                     
-                    // Only save to NVS every 30 seconds to prevent flash burnout
-                    // The RTC backup or soft-reset will protect shorter durations
-                    static uint32_t lastNvsSave = 0;
-                    if (nowTrigger - lastNvsSave >= 30000) {
-                        configSaveSirenAccum(sirenAccumulatedSec);
-                        lastNvsSave = nowTrigger;
-                    }
+                    // Throttled NVS writes are now handled internally by config_manager
+                    configSaveSirenAccum(sirenAccumulatedSec);
                 }
             }
 
