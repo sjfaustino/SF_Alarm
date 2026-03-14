@@ -8,6 +8,8 @@
 static ZoneInfo zones[MAX_ZONES];
 static ZoneEventCallback eventCallback = nullptr;
 static volatile uint16_t virtualInputBitmask = 0;
+static uint32_t virtualInputLastMs[MAX_ZONES] = {0};
+static const uint32_t VIRTUAL_INPUT_TIMEOUT_MS = 30000; // 30s ghost timeout
 static portMUX_TYPE vInputMux = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t zoneMutex = NULL;
 
@@ -97,6 +99,12 @@ void zonesUpdate(uint16_t inputBitmask)
 
         // Read virtual inputs under spinlock (shared with ONVIF task on Core 0)
         portENTER_CRITICAL(&vInputMux);
+        if (virtualInputBitmask & (1 << i)) {
+            if (now - virtualInputLastMs[i] >= VIRTUAL_INPUT_TIMEOUT_MS) {
+                virtualInputBitmask &= ~(1 << i);
+                Serial.printf("[ZONE] Virtual ghost on Zone %d EXPIRED.\n", i + 1);
+            }
+        }
         uint16_t vInput = virtualInputBitmask;
         portEXIT_CRITICAL(&vInputMux);
 
@@ -175,6 +183,7 @@ void zonesSetVirtualInput(uint8_t zoneIndex, bool state)
     portENTER_CRITICAL(&vInputMux);
     if (state) {
         virtualInputBitmask |= (1 << zoneIndex);
+        virtualInputLastMs[zoneIndex] = millis();
     } else {
         virtualInputBitmask &= ~(1 << zoneIndex);
     }

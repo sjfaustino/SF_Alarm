@@ -30,6 +30,8 @@ void logInit() {
     }
 }
 
+static volatile uint32_t droppedLogs = 0;
+
 void logPrintf(const char* level, const char* tag, const char* fmt, ...) {
     if (logQueue == NULL) return;
 
@@ -45,7 +47,12 @@ void logPrintf(const char* level, const char* tag, const char* fmt, ...) {
     vsnprintf(log.msg, sizeof(log.msg), fmt, args);
     va_end(args);
 
-    // Marginal block time (10ms) to handle bursts without immediate loss.
-    // Still caps delay to protect real-time loops.
-    xQueueSend(logQueue, &log, pdMS_TO_TICKS(10));
+    // Strictly non-blocking to protect real-time loops (e.g. Zone Polling).
+    if (xQueueSend(logQueue, &log, 0) != pdTRUE) {
+        droppedLogs++;
+    }
+}
+
+uint32_t logGetDroppedCount() {
+    return droppedLogs;
 }

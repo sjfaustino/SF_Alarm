@@ -18,6 +18,7 @@
 // Async Logging Interface (Iron Citadel)
 void logInit();
 void logPrintf(const char* level, const char* tag, const char* fmt, ...);
+uint32_t logGetDroppedCount();
 
 // Using macros to ensure zero overhead when disabled
 #if CURRENT_LOG_LEVEL >= LOG_LEVEL_ERROR

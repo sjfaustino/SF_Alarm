@@ -23,7 +23,8 @@ static uint32_t chipRetryMs[4] = { 0, 0, 0, 0 };
 static const uint32_t CHIP_RETRY_INTERVAL_MS = 5000; // Retry once per 5 seconds
 
 static SemaphoreHandle_t i2cMutex = nullptr;
-#define I2C_LOCK_TIMEOUT pdMS_TO_TICKS(100)
+#define I2C_LOCK_TIMEOUT_READ  pdMS_TO_TICKS(10)  // 10ms: yield quick to preserve 50Hz loop
+#define I2C_LOCK_TIMEOUT_WRITE pdMS_TO_TICKS(500) // 500ms: sirens MUST fire even if bus is busy
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -35,7 +36,7 @@ bool ioExpanderInit()
         i2cMutex = xSemaphoreCreateMutex();
     }
 
-    if (xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT) != pdTRUE) return false;
+    if (xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return false;
 
     // --- PHYSICAL BUS RECOVERY (Obsidian Sledgehammer) ---
     // If SDA is held low by a hung slave, we need to toggle SCL until it's released.
@@ -112,7 +113,7 @@ uint16_t ioExpanderReadInputs()
     uint8_t low  = 0xFF;
     uint8_t high = 0xFF;
 
-    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT) != pdTRUE) {
+    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_READ) != pdTRUE) {
         return 0; // Skip poll if bus is busy
     }
 
@@ -213,7 +214,7 @@ void ioExpanderWriteOutputs(uint16_t mask)
     currentOutputs = mask;
     portEXIT_CRITICAL(&ioMux);
 
-    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT) != pdTRUE) return;
+    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return;
 
     if (chipOk[2]) {
         pcfOut1.write8((uint8_t)(mask & 0xFF));
@@ -237,7 +238,7 @@ void ioExpanderSetOutput(uint8_t channel, bool state)
     uint16_t mask = currentOutputs;
     portEXIT_CRITICAL(&ioMux);
 
-    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT) != pdTRUE) return;
+    if (i2cMutex == nullptr || xSemaphoreTake(i2cMutex, I2C_LOCK_TIMEOUT_WRITE) != pdTRUE) return;
 
     // Call output writer without nested lock since we bypass ioExpanderWriteOutputs update
     if (chipOk[2]) {

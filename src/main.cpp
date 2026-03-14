@@ -244,7 +244,6 @@ static void zoneTask(void* pvParameters)
 
 static void netWorkerTask(void* pvParameters)
 {
-    esp_task_wdt_add(NULL); 
     while (true) {
         portENTER_CRITICAL(&heartbeatMux);
         taskHeartbeatBits |= TASK_HB_NET; 
@@ -258,7 +257,6 @@ static void netWorkerTask(void* pvParameters)
             LOG_INFO(TAG, "System stable. Boot counter reset.");
         }
         
-        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -443,6 +441,12 @@ void setup()
     onvifInit();
 
     LOG_INFO(TAG, "Startup complete!");
+
+    // Final Aegis: Print dropped logs if any during startup
+    uint32_t dropped = logGetDroppedCount();
+    if (dropped > 0) {
+        LOG_WARN(TAG, "Watchdog: %u logs dropped during burst startup.", dropped);
+    }
 }
 
 static void restartTask(int index)
