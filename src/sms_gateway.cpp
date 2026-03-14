@@ -8,6 +8,8 @@
 #include "network.h"
 #include "logging.h"
 #include <esp_task_wdt.h>
+#include "string_utils.h"
+#include "string_utils.h"
 
 static const char* TAG = "SMS";
 
@@ -64,16 +66,6 @@ static String buildUrl(const char* path)
     return String("http://") + routerIp + path;
 }
 
-/// Extract a substring between two markers from an HTML body safely.
-static String extractBetween(const String& body, const char* before, const char* after, int startPos = 0)
-{
-    int s = body.indexOf(before, startPos);
-    if (s < 0) return "";
-    s += strlen(before);
-    int e = body.indexOf(after, s);
-    if (e < 0) return "";
-    return body.substring(s, e);
-}
 
 /// Robustly extract a value from a named hidden input tag.
 /// Handles unordered attributes and ensures parsing stays within tag boundaries.
@@ -380,25 +372,38 @@ bool smsGatewaySend(const char* phoneNumber, const char* message)
             continue;
         }
 
-        String page = httpGet.getString();
-        httpGet.end();
+        // Zero-Heap Stream Scraper for send tokens
+        WiFiClient* stream = httpGet.getStreamPtr();
+        String sendToken = "";
+        if (stream) {
+            char buffer[512];
+            int bufPos = 0;
+            unsigned long scraperStart = millis();
+            while (httpGet.connected() && sendToken == "") {
+                if (millis() - scraperStart > 5000) break;
+                if (stream->available()) {
+                    int c = stream->read();
+                    if (c < 0) break;
+                    buffer[bufPos++] = (char)c;
+                    buffer[bufPos] = '\0';
+                    
+                    if (strcasestr(buffer, "name=\"token\"") || strcasestr(buffer, "name=\"_csrf\"")) {
+                        sendToken = extractBetween(buffer, "value=\"", "\"");
+                    }
 
-        // Extract token from the smsnew page
-        // The smsnew form uses name="token" (not _csrf)
-        String sendToken = extractCsrfToken(page);
-        if (sendToken.length() == 0) {
-            // Fallback: try _csrf
-            String searchName = "name=\"_csrf\"";
-            int pos = page.indexOf(searchName);
-            if (pos >= 0) {
-                int inputStart = page.lastIndexOf("<input", pos);
-                int inputEnd = page.indexOf(">", pos);
-                if (inputStart >= 0 && inputEnd >= 0) {
-                    String tag = page.substring(inputStart, inputEnd + 1);
-                    sendToken = extractBetween(tag, "value=\"", "\"");
+                    if (bufPos >= (int)sizeof(buffer) - 1) {
+                        const int OVERLAP = 128;
+                        memmove(buffer, buffer + (sizeof(buffer) - OVERLAP - 1), OVERLAP);
+                        bufPos = OVERLAP;
+                        buffer[bufPos] = '\0';
+                    }
+                } else {
+                    vTaskDelay(1);
                 }
             }
         }
+        httpGet.end();
+
 
         if (sendToken.length() == 0) {
             setError("No token on smsnew page (attempt %d)", attempt + 1);

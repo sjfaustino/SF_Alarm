@@ -11,8 +11,10 @@
 #include "config_manager.h"
 #include "network.h"
 #include "logging.h"
+#include "system_health.h"
 
 #include <PsychicHttp.h>
+#include <PsychicStreamResponse.h>
 
 static const char* TAG = "WEB";
 #include <ArduinoJson.h>
@@ -105,6 +107,7 @@ static esp_err_t handleRoot(PsychicRequest* request, PsychicResponse* response)
 // ---------------------------------------------------------------------------
 static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* response)
 {
+    sysHealthReport(HB_BIT_WEB);
     JsonDocument doc;
 
     JsonObject alarm = doc["alarm"].to<JsonObject>();
@@ -161,18 +164,10 @@ static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* respo
     JsonObject onvif = doc["onvif"].to<JsonObject>();
     onvif["connected"]  = onvifIsConnected();
 
-    // Prevent heap fragmentation by allocating exactly what we need once
-    size_t jsonLen = measureJson(doc);
-    char* jsonBuffer = (char*)malloc(jsonLen + 1);
-    if (!jsonBuffer) {
-        return response->send(500, "application/json", "{\"ok\":false,\"msg\":\"Out of memory\"}");
-    }
-    
-    serializeJson(doc, jsonBuffer, jsonLen + 1);
-    esp_err_t res = response->send(200, "application/json", jsonBuffer);
-    free(jsonBuffer);
-    
-    return res;
+    // Stream serialization directly to the response (Zero-Heap)
+    PsychicStreamResponse stream(request->response(), "application/json");
+    serializeJson(doc, stream);
+    return stream.send();
 }
 
 // ---------------------------------------------------------------------------

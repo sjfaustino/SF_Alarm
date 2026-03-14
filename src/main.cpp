@@ -14,6 +14,7 @@
 #include "onvif_client.h"
 #include <esp_task_wdt.h>
 #include "logging.h"
+#include "system_health.h"
 
 static const char* TAG = "MAIN";
 
@@ -28,13 +29,11 @@ static bool     lastAllClear    = true;
 static volatile uint8_t taskHeartbeatBits = 0;
 static portMUX_TYPE heartbeatMux = portMUX_INITIALIZER_UNLOCKED;
 
-static const uint8_t TASK_HB_ZONE = (1 << 0);
-static const uint8_t TASK_HB_NET  = (1 << 1);
-static const uint8_t TASK_HB_MQTT = (1 << 2);
-static const uint8_t TASK_HB_VIBE = (1 << 3);
-static const uint8_t TASK_HB_CLI  = (1 << 4);
-static const uint8_t TASK_HB_ALERT = (1 << 5);
-static const uint8_t ALL_TASKS_HEALTHY = (TASK_HB_ZONE | TASK_HB_NET | TASK_HB_MQTT | TASK_HB_VIBE | TASK_HB_CLI | TASK_HB_ALERT);
+void sysHealthReport(uint8_t bit) {
+    portENTER_CRITICAL(&heartbeatMux);
+    taskHeartbeatBits |= bit;
+    portEXIT_CRITICAL(&heartbeatMux);
+}
 
 static uint32_t lastGlobalHeartbeatCheck = 0;
 static const uint32_t WATCHDOG_INTEGRITY_WINDOW_MS = 15000; // 15 seconds
@@ -222,9 +221,7 @@ static void zoneTask(void* pvParameters)
     const TickType_t period = pdMS_TO_TICKS(INPUT_SCAN_INTERVAL_MS);
 
     while (true) {
-        portENTER_CRITICAL(&heartbeatMux);
-        taskHeartbeatBits |= TASK_HB_ZONE; 
-        portEXIT_CRITICAL(&heartbeatMux);
+        sysHealthReport(HB_BIT_ZONE); 
 
         uint16_t inputs = ioExpanderReadInputs();
         zonesUpdate(inputs);
@@ -245,9 +242,7 @@ static void zoneTask(void* pvParameters)
 static void netWorkerTask(void* pvParameters)
 {
     while (true) {
-        portENTER_CRITICAL(&heartbeatMux);
-        taskHeartbeatBits |= TASK_HB_NET; 
-        portEXIT_CRITICAL(&heartbeatMux);
+        sysHealthReport(HB_BIT_NET); 
 
         smsGatewayUpdate(); 
         smsCmdUpdate();
@@ -264,9 +259,7 @@ static void netWorkerTask(void* pvParameters)
 static void mqttWorkerTask(void* pvParameters)
 {
     while (true) {
-        portENTER_CRITICAL(&heartbeatMux);
-        taskHeartbeatBits |= TASK_HB_MQTT; 
-        portEXIT_CRITICAL(&heartbeatMux);
+        sysHealthReport(HB_BIT_MQTT); 
 
         uint32_t now = millis();
         mqttUpdate();
@@ -283,9 +276,7 @@ static void mqttWorkerTask(void* pvParameters)
 static void cliWorkerTask(void* pvParameters)
 {
     while (true) {
-        portENTER_CRITICAL(&heartbeatMux);
-        taskHeartbeatBits |= TASK_HB_CLI; 
-        portEXIT_CRITICAL(&heartbeatMux);
+        sysHealthReport(HB_BIT_CLI); 
 
         cliUpdate();
         vTaskDelay(pdMS_TO_TICKS(10)); 
@@ -295,9 +286,7 @@ static void cliWorkerTask(void* pvParameters)
 static void alertWorkerTask(void* pvParameters)
 {
     while (true) {
-        portENTER_CRITICAL(&heartbeatMux);
-        taskHeartbeatBits |= TASK_HB_ALERT;
-        portEXIT_CRITICAL(&heartbeatMux);
+        sysHealthReport(HB_BIT_ALERT); 
 
         processAlertQueue(); 
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -307,9 +296,7 @@ static void alertWorkerTask(void* pvParameters)
 static void heartbeatTask(void* pvParameters)
 {
     while (true) {
-        portENTER_CRITICAL(&heartbeatMux);
-        taskHeartbeatBits |= TASK_HB_VIBE; 
-        portEXIT_CRITICAL(&heartbeatMux);
+        sysHealthReport(HB_BIT_VIBE); 
 
         if (configGetHeartbeatEnabled()) {
             AlarmState st = alarmGetState();
@@ -476,12 +463,12 @@ static void restartTask(int index)
     }
 
     switch(index) {
-        case 0: xTaskCreatePinnedToCore(zoneTask, names[index], 4096, NULL, 5, &taskHandles[index], 1); break;
-        case 1: xTaskCreatePinnedToCore(netWorkerTask, names[index], 8192, NULL, 1, &taskHandles[index], 0); break;
+        case 0: xTaskCreatePinnedToCore(zoneTask, names[index], 3072, NULL, 5, &taskHandles[index], 1); break;
+        case 1: xTaskCreatePinnedToCore(netWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
         case 2: xTaskCreatePinnedToCore(mqttWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
         case 3: xTaskCreatePinnedToCore(heartbeatTask, names[index], 2048, NULL, 1, &taskHandles[index], 1); break;
         case 4: xTaskCreatePinnedToCore(cliWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 1); break;
-        case 5: xTaskCreatePinnedToCore(alertWorkerTask, names[index], 8192, NULL, 1, &taskHandles[index], 1); break;
+        case 5: xTaskCreatePinnedToCore(alertWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 1); break;
     }
 }
 
@@ -499,12 +486,12 @@ void loop()
         taskHeartbeatBits = 0; 
         portEXIT_CRITICAL(&heartbeatMux);
 
-        if (currentBits == ALL_TASKS_HEALTHY) {
+        if (currentBits == HB_ALL_HEALTHY) {
             esp_task_wdt_reset();
             // Reset failure counters on healthy cycle
             memset(restartCount, 0, sizeof(restartCount));
         } else {
-            LOG_ERROR(TAG, "WATCHDOG: HANG DETECTED! Bits missing: 0x%02X", (uint8_t)(ALL_TASKS_HEALTHY ^ currentBits));
+            LOG_ERROR(TAG, "WATCHDOG: HANG DETECTED! Bits missing: 0x%02X", (uint8_t)(HB_ALL_HEALTHY ^ currentBits));
             
             // Attempt task recovery before giving up
             for (int i = 0; i < 6; i++) {

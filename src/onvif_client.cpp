@@ -7,6 +7,7 @@
 #include "logging.h"
 #include <mbedtls/sha1.h>
 #include <base64.h>
+#include "string_utils.h"
 
 static const char* TAG = "ONVIF";
 
@@ -15,6 +16,7 @@ static const char* TAG = "ONVIF";
 // ---------------------------------------------------------------------------
 
 #include <esp_task_wdt.h>
+#include "string_utils.h"
 
 static const char* SOAP_ENV_START = 
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
@@ -135,18 +137,43 @@ static bool createSubscription() {
 
     int code = http.POST(body);
     if (code == 200) {
-        String res = http.getString();
-        // Extract Address from SubscriptionReference
-        // Simple search: <Address>...</Address>
-        int start = res.indexOf("<tt:Address>");
-        if (start != -1) {
-            start += 12;
-            int end = res.indexOf("</tt:Address>", start);
-            state.subscriptionAddress = res.substring(start, end);
-            state.connected = true;
-            LOG_INFO(TAG, "Subscription created: %s", state.subscriptionAddress.c_str());
-            http.end();
-            return true;
+        WiFiClient* stream = http.getStreamPtr();
+        if (stream) {
+            char buffer[512];
+            int bufPos = 0;
+            unsigned long scraperStart = millis();
+            bool foundAddress = false;
+            while (http.connected() && !foundAddress) {
+                if (millis() - scraperStart > 5000) break;
+                if (stream->available()) {
+                    int c = stream->read();
+                    if (c < 0) break;
+                    buffer[bufPos++] = (char)c;
+                    buffer[bufPos] = '\0';
+                    
+                    if (strcasestr(buffer, "<tt:Address>")) {
+                        state.subscriptionAddress = extractBetween(buffer, "<tt:Address>", "</tt:Address>");
+                        if (state.subscriptionAddress.length() > 0) {
+                            foundAddress = true;
+                        }
+                    }
+
+                    if (bufPos >= (int)sizeof(buffer) - 1) {
+                        const int OVERLAP = 128; // Large enough for <tt:Address>...</tt:Address>
+                        memmove(buffer, buffer + (sizeof(buffer) - OVERLAP - 1), OVERLAP);
+                        bufPos = OVERLAP;
+                        buffer[bufPos] = '\0';
+                    }
+                } else {
+                    vTaskDelay(1);
+                }
+            }
+            if (foundAddress) {
+                state.connected = true;
+                LOG_INFO(TAG, "Subscription created: %s", state.subscriptionAddress.c_str());
+                http.end();
+                return true;
+            }
         }
     }
 
