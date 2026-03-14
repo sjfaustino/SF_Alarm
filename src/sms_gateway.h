@@ -14,6 +14,46 @@ struct SmsMessage {
 };
 
 // ---------------------------------------------------------------------------
+// Abstract SMS Gateway Interface
+// ---------------------------------------------------------------------------
+class ISmsGateway {
+public:
+    virtual ~ISmsGateway() {}
+
+    /// Initialize the gateway with credentials.
+    virtual void init(const char* host, const char* user, const char* pass) = 0;
+
+    /// Update credentials.
+    virtual void setCredentials(const char* host, const char* user, const char* pass) = 0;
+
+    /// Send an SMS message.
+    virtual bool send(const char* phoneNumber, const char* message) = 0;
+
+    /// Poll the inbox for new messages.
+    virtual int pollInbox(SmsMessage* msgs, int maxMessages) = 0;
+
+    /// Poll for sent messages.
+    virtual int pollSent(SmsMessage* msgs, int maxMessages) = 0;
+
+    /// Delete a message by ID.
+    virtual bool deleteMessage(int messageId) = 0;
+
+    /// Background processing loop.
+    virtual void update() = 0;
+
+    /// Connection status.
+    virtual bool isReady() = 0;
+
+    /// Diagnostic error string.
+    virtual const char* getLastError() = 0;
+
+    // Getters for current config
+    virtual const char* getHost() = 0;
+    virtual const char* getUser() = 0;
+    virtual const char* getPass() = 0;
+};
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
