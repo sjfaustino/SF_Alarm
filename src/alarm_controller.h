@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include "alarm_zones.h"
 
+class SystemContext;
+
 // ---------------------------------------------------------------------------
 // Alarm System States
 // ---------------------------------------------------------------------------
@@ -49,84 +51,136 @@ struct AlarmEventInfo {
 // ---------------------------------------------------------------------------
 typedef void (*AlarmEventCallback)(const AlarmEventInfo& info);
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+/**
+ * @brief Manages the core alarm state machine and security logic.
+ */
+class AlarmController {
+public:
+    AlarmController();
+    ~AlarmController();
 
-/// Initialize the alarm controller.
+    /// Initialize the alarm controller.
+    void init(SystemContext* ctx = nullptr);
+
+    /// Set callback for alarm events.
+    void setCallback(AlarmEventCallback cb);
+
+    /// Main update loop.
+    void update();
+
+    /// Arm the system (away mode).
+    bool armAway(const char* pin);
+
+    /// Arm the system (home mode).
+    bool armHome(const char* pin);
+
+    /// Disarm the system.
+    bool disarm(const char* pin);
+
+    /// Internal use only: Arm/Disarm without PIN.
+    bool armAwayInternal();
+    bool armHomeHomeInternal(); // Fixed typo in previous implementation? No, let's keep it clean
+    bool armHomeInternal();
+    bool disarmInternal();
+
+    /// Mute/silence the siren without disarming.
+    bool muteSiren(const char* pin);
+
+    /// Get current state.
+    AlarmState getState();
+    const char* getStateStr();
+
+    /// Get details.
+    uint16_t getActiveAlarmMask();
+    uint16_t getDelayRemaining();
+
+    /// PIN management.
+    bool setPin(const char* currentPin, const char* newPin);
+    void loadPin(const char* pin);
+    void copyPin(char* dest, size_t maxLen);
+    bool validatePin(const char* pin);
+
+    /// Delay durations.
+    void setExitDelay(uint16_t seconds);
+    void setEntryDelay(uint16_t seconds);
+    uint16_t getExitDelay();
+    uint16_t getEntryDelay();
+
+    /// Siren management.
+    void setSirenDuration(uint16_t seconds);
+    uint16_t getSirenDuration();
+    void setSirenOutput(uint8_t channel);
+    uint8_t getSirenOutput();
+
+    /// Diagnostics.
+    void printStatus();
+
+    /// Broadcast an alert.
+    void broadcast(const char* message);
+
+private:
+    SystemContext* _ctx;
+    char           _alarmPin[16];
+    uint16_t       _exitDelaySec;
+    uint16_t       _entryDelaySec;
+    uint16_t       _sirenDurationSec;
+    uint8_t        _sirenOutputChannel;
+    
+    AlarmState     _currentState;
+    AlarmState     _returnState;
+    void*          _stateMutex; // SemaphoreHandle_t
+    AlarmEventCallback _eventCallback;
+
+    bool           _sirenActive;
+    bool           _sirenMuted;
+    uint16_t       _activeAlarmMask;
+    uint32_t       _delayStartMs;
+    uint32_t       _sirenStartMs;
+    uint8_t        _triggeringZone;
+    uint32_t       _sirenActiveTime;
+    uint32_t       _lastSirenUpdateMs;
+
+    uint8_t        _failedAttempts;
+    uint32_t       _lockoutStartMs;
+    bool           _lockedOut;
+
+    enum PendingArmMode : uint8_t { ARM_PENDING_AWAY = 0, ARM_PENDING_HOME = 1 };
+    PendingArmMode _pendingArmMode;
+
+    void fireEvent(AlarmEvent event, int8_t zoneId = -1, const char* details = "");
+    bool pinEquals(const char* a, const char* b);
+    void sirenOn(int8_t zoneId, const char* name);
+    void sirenOff();
+};
+
+// C Wrappers for legacy code
 void alarmInit();
-
-/// Set callback for alarm events (SMS notifications, logging, etc.)
 void alarmSetCallback(AlarmEventCallback cb);
-
-/// Main update loop — call frequently (e.g., every cycle in loop()).
 void alarmUpdate();
-
-/// Arm the system (away mode). Returns false if zones not clear.
 bool alarmArmAway(const char* pin);
-
-/// Arm the system (home mode). Returns false if zones not clear.
 bool alarmArmHome(const char* pin);
-
-/// Disarm the system. Returns false if PIN is wrong.
 bool alarmDisarm(const char* pin);
-
-/// Internal use only: Arm/Disarm without PIN (for scheduler/automated tasks).
 bool alarmArmAwayInternal();
 bool alarmArmHomeInternal();
 bool alarmDisarmInternal();
-
-/// Mute/silence the siren without disarming. Returns false if PIN is wrong.
 bool alarmMuteSiren(const char* pin);
-
-/// Get the current alarm state.
 AlarmState alarmGetState();
-
-/// Get bitmask of all zones triggered in the current alarm cycle.
-uint16_t   alarmGetActiveAlarmMask();
-
-/// Get a human-readable string for the current state.
+uint16_t alarmGetActiveAlarmMask();
 const char* alarmGetStateStr();
-
-/// Get the remaining delay time (entry or exit), in seconds.
 uint16_t alarmGetDelayRemaining();
-
-/// Set the alarm PIN code. Requires current PIN for authorization.
 bool alarmSetPin(const char* currentPin, const char* newPin);
-
-/// Internal use only: Load PIN from NVS on boot without validation.
 void alarmLoadPin(const char* pin);
-
-/// Securely copy the current alarm PIN code into the destination buffer
 void alarmCopyPin(char* dest, size_t maxLen);
-
-/// Validate a PIN without side effects (does NOT disarm).
 bool alarmValidatePin(const char* pin);
-
-/// Set entry/exit delay durations (in seconds).
 void alarmSetExitDelay(uint16_t seconds);
 void alarmSetEntryDelay(uint16_t seconds);
-
-/// Get entry/exit delay durations (in seconds).
 uint16_t alarmGetExitDelay();
 uint16_t alarmGetEntryDelay();
-
-/// Set siren duration (in seconds, 0 = unlimited until disarm).
 void alarmSetSirenDuration(uint16_t seconds);
-
-/// Get siren duration (in seconds).
 uint16_t alarmGetSirenDuration();
-
-/// Set the output channel used for the siren (0–15, default 0).
 void alarmSetSirenOutput(uint8_t channel);
-
-/// Get the siren output channel.
 uint8_t alarmGetSirenOutput();
-
-/// Print alarm status to Serial.
 void alarmPrintStatus();
-
-/// Broadcast an alert message to all configured channels (WhatsApp, SMS, Call)
 void alarmBroadcast(const char* message);
 
 #endif // SF_ALARM_CONTROLLER_H

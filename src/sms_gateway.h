@@ -98,4 +98,7 @@ const char* smsGatewayGetRouterIp();
 const char* smsGatewayGetRouterUser();
 const char* smsGatewayGetRouterPass();
 
+/// Get the active SMS gateway instance for context injection.
+ISmsGateway* smsGatewayGetActive();
+
 #endif // SF_ALARM_SMS_GATEWAY_H

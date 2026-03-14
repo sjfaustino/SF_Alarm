@@ -455,3 +455,7 @@ const char* smsGatewayGetLastError() {
 const char* smsGatewayGetRouterIp() { return activeGateway->getHost(); }
 const char* smsGatewayGetRouterUser() { return activeGateway->getUser(); }
 const char* smsGatewayGetRouterPass() { return activeGateway->getPass(); }
+
+ISmsGateway* smsGatewayGetActive() {
+    return activeGateway;
+}

@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include "alarm_controller.h"
 
+class SystemContext;
+
 /**
  * @brief Notification channels (bitmask)
  */
@@ -19,48 +21,82 @@ enum AlertChannel {
  */
 typedef bool (*NotificationSendFunc)(const char* message);
 
+struct ProviderEntry {
+    AlertChannel channel;
+    const char* name;
+    NotificationSendFunc send;
+};
+
+struct PendingAlert {
+    char message[160];
+    char targetPhone[24]; 
+};
+
 /**
- * @brief Initialize the notification system
+ * @brief Manages dispatching alerts through various providers.
  */
+class NotificationManager {
+public:
+    NotificationManager();
+    ~NotificationManager();
+
+    /**
+     * @brief Initialize the notification system
+     */
+    void init();
+
+    /**
+     * @brief Register a notification provider
+     */
+    void registerProvider(AlertChannel channel, const char* name, NotificationSendFunc send);
+
+    /**
+     * @brief Set the enabled alert channels (bitmask)
+     */
+    void setChannels(uint8_t channels);
+
+    /**
+     * @brief Get the currently enabled channels
+     */
+    uint8_t getChannels();
+
+    /**
+     * @brief Dispatch an alarm event to all configured channels
+     */
+    void dispatch(const AlarmEventInfo& info, SystemContext* ctx = nullptr);
+
+    /**
+     * @brief Queue a generic broadcast message
+     */
+    void broadcast(const char* message);
+
+    /**
+     * @brief Queue a targeted reply message
+     */
+    void queueReply(const char* phone, const char* message);
+
+    /**
+     * @brief Process the internal alert queue (call from task)
+     */
+    void update();
+
+private:
+    void* _alertQueue; // Internal QueueHandle_t
+    uint32_t _lastAlertProcessedMs;
+    uint32_t _lastZoneAlertMs[16];
+    uint8_t _enabledChannels;
+    ProviderEntry _providers[8];
+    int _providerCount;
+};
+
+// C Wrappers for legacy code and easy access
 void notificationInit();
-
-/**
- * @brief Register a notification provider
- * 
- * @param channel The channel bitmask (e.g., CH_SMS)
- * @param name    Provider name for logging
- * @param send    The function to call to send a broadcast message
- */
 void notificationRegisterProvider(AlertChannel channel, const char* name, NotificationSendFunc send);
-
-/**
- * @brief Set the enabled alert channels (bitmask)
- */
 void notificationSetChannels(uint8_t channels);
-
-/**
- * @brief Get the currently enabled channels
- */
 uint8_t notificationGetChannels();
-
-/**
- * @brief Dispatch an alarm event to all configured channels
- */
 void notificationDispatch(const AlarmEventInfo& info);
-
-/**
- * @brief Queue a generic broadcast message
- */
 void notificationBroadcast(const char* message);
-
-/**
- * @brief Queue a targeted reply message
- */
 void notificationQueueReply(const char* phone, const char* message);
-
-/**
- * @brief Process the internal alert queue (call from task)
- */
 void notificationUpdate();
 
 #endif // SF_ALARM_NOTIFICATION_MANAGER_H

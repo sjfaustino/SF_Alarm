@@ -6,56 +6,52 @@
 #include "whatsapp_client.h"
 #include "telegram_client.h"
 #include "mqtt_client.h"
+#include "system_context.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
 static const char* TAG = "NOTIF";
 
-struct PendingAlert {
-    char message[160];
-    char targetPhone[24]; 
-};
+// Global instance for C wrappers
+static NotificationManager globalNotifManager;
 
-static QueueHandle_t alertQueue = NULL;
-static uint32_t lastAlertProcessedMs = 0;
-static const uint32_t ALERT_PROCESS_INTERVAL_MS = 1000;
-static uint32_t lastZoneAlertMs[16] = {0};
-static uint8_t enabledChannels = CH_NONE;
-
-struct ProviderEntry {
-    AlertChannel channel;
-    const char* name;
-    NotificationSendFunc send;
-};
-
-static ProviderEntry providers[8]; // Room for future proofing
-static int providerCount = 0;
-
-void notificationInit() {
-    alertQueue = xQueueCreate(10, sizeof(PendingAlert));
-    if (!alertQueue) {
-        LOG_ERROR(TAG, "Failed to create alert queue");
-    }
-    providerCount = 0;
-    enabledChannels = CH_NONE;
+NotificationManager::NotificationManager()
+    : _alertQueue(NULL), _lastAlertProcessedMs(0), _enabledChannels(CH_NONE), _providerCount(0) {
+    memset(_lastZoneAlertMs, 0, sizeof(_lastZoneAlertMs));
+    memset(_providers, 0, sizeof(_providers));
 }
 
-void notificationRegisterProvider(AlertChannel channel, const char* name, NotificationSendFunc send) {
-    if (providerCount < 8) {
-        providers[providerCount++] = {channel, name, send};
+NotificationManager::~NotificationManager() {
+    if (_alertQueue) {
+        vQueueDelete((QueueHandle_t)_alertQueue);
+    }
+}
+
+void NotificationManager::init() {
+    _alertQueue = xQueueCreate(10, sizeof(PendingAlert));
+    if (!_alertQueue) {
+        LOG_ERROR(TAG, "Failed to create alert queue");
+    }
+    _providerCount = 0;
+    _enabledChannels = CH_NONE;
+}
+
+void NotificationManager::registerProvider(AlertChannel channel, const char* name, NotificationSendFunc send) {
+    if (_providerCount < 8) {
+        _providers[_providerCount++] = {channel, name, send};
         LOG_INFO(TAG, "Registered provider: %s (0x%02X)", name, (uint8_t)channel);
     }
 }
 
-void notificationSetChannels(uint8_t channels) {
-    enabledChannels = channels;
+void NotificationManager::setChannels(uint8_t channels) {
+    _enabledChannels = channels;
 }
 
-uint8_t notificationGetChannels() {
-    return enabledChannels;
+uint8_t NotificationManager::getChannels() {
+    return _enabledChannels;
 }
 
-void notificationDispatch(const AlarmEventInfo& info) {
+void NotificationManager::dispatch(const AlarmEventInfo& info, SystemContext* ctx) {
     char msg[160];
     const char* details = info.details ? info.details : "";
 
@@ -63,22 +59,22 @@ void notificationDispatch(const AlarmEventInfo& info) {
     switch (info.event) {
         case EVT_ALARM_TRIGGERED:
             if (info.zoneId >= 0 && info.zoneId < 16) {
-                if (millis() - lastZoneAlertMs[info.zoneId] < 60000) {
+                if (millis() - _lastZoneAlertMs[info.zoneId] < 60000) {
                     LOG_INFO(TAG, "Throttling redundant alert for Zone %d", info.zoneId + 1);
                     return;
                 }
-                lastZoneAlertMs[info.zoneId] = millis();
+                _lastZoneAlertMs[info.zoneId] = millis();
             }
             snprintf(msg, sizeof(msg), "SF_Alarm ALERT: %s", details);
-            notificationBroadcast(msg);
+            broadcast(msg);
             break;
 
-        case EVT_ARMED_AWAY: notificationBroadcast("SF_Alarm: System ARMED (Away)"); break;
-        case EVT_ARMED_HOME: notificationBroadcast("SF_Alarm: System ARMED (Home)"); break;
-        case EVT_DISARMED:   notificationBroadcast("SF_Alarm: System DISARMED"); break;
+        case EVT_ARMED_AWAY: broadcast("SF_Alarm: System ARMED (Away)"); break;
+        case EVT_ARMED_HOME: broadcast("SF_Alarm: System ARMED (Home)"); break;
+        case EVT_DISARMED:   broadcast("SF_Alarm: System DISARMED"); break;
         case EVT_TAMPER:
             snprintf(msg, sizeof(msg), "SF_Alarm TAMPER: %s", details);
-            notificationBroadcast(msg);
+            broadcast(msg);
             break;
 
         default: break;
@@ -100,49 +96,61 @@ void notificationDispatch(const AlarmEventInfo& info) {
     }
 }
 
-void notificationBroadcast(const char* message) {
-    if (!alertQueue) return;
+void NotificationManager::broadcast(const char* message) {
+    if (!_alertQueue) return;
     PendingAlert alert;
     memset(&alert, 0, sizeof(alert));
     strncpy(alert.message, message, sizeof(alert.message) - 1);
     alert.targetPhone[0] = '\0';
     
-    if (xQueueSend(alertQueue, &alert, 0) != pdTRUE) {
+    if (xQueueSend((QueueHandle_t)_alertQueue, &alert, 0) != pdTRUE) {
         LOG_ERROR(TAG, "Alert queue full!");
     }
 }
 
-void notificationQueueReply(const char* phone, const char* message) {
-    if (!alertQueue) return;
+void NotificationManager::queueReply(const char* phone, const char* message) {
+    if (!_alertQueue) return;
     PendingAlert alert;
     memset(&alert, 0, sizeof(alert));
     strncpy(alert.message, message, sizeof(alert.message) - 1);
     strncpy(alert.targetPhone, phone, sizeof(alert.targetPhone) - 1);
 
-    if (xQueueSend(alertQueue, &alert, 0) != pdTRUE) {
+    if (xQueueSend((QueueHandle_t)_alertQueue, &alert, 0) != pdTRUE) {
         LOG_ERROR(TAG, "Alert queue full!");
     }
 }
 
-void notificationUpdate() {
+void NotificationManager::update() {
     uint32_t now = millis();
-    if (now - lastAlertProcessedMs < ALERT_PROCESS_INTERVAL_MS) return;
-    if (!alertQueue) return;
+    if (now - _lastAlertProcessedMs < 1000) return;
+    if (!_alertQueue) return;
 
     PendingAlert alert;
-    if (xQueueReceive(alertQueue, &alert, 0) == pdTRUE) {
-        lastAlertProcessedMs = now;
+    if (xQueueReceive((QueueHandle_t)_alertQueue, &alert, 0) == pdTRUE) {
+        _lastAlertProcessedMs = now;
         
         if (strlen(alert.targetPhone) > 0) {
             smsGatewaySend(alert.targetPhone, alert.message);
         } else {
-            for (int i = 0; i < providerCount; i++) {
-                if (enabledChannels & providers[i].channel) {
-                    if (providers[i].send) {
-                        providers[i].send(alert.message);
+            for (int i = 0; i < _providerCount; i++) {
+                if (_enabledChannels & _providers[i].channel) {
+                    if (_providers[i].send) {
+                        _providers[i].send(alert.message);
                     }
                 }
             }
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// C Wrappers
+// ---------------------------------------------------------------------------
+void notificationInit() { globalNotifManager.init(); }
+void notificationRegisterProvider(AlertChannel ch, const char* n, NotificationSendFunc s) { globalNotifManager.registerProvider(ch, n, s); }
+void notificationSetChannels(uint8_t ch) { globalNotifManager.setChannels(ch); }
+uint8_t notificationGetChannels() { return globalNotifManager.getChannels(); }
+void notificationDispatch(const AlarmEventInfo& i) { globalNotifManager.dispatch(i); }
+void notificationBroadcast(const char* m) { globalNotifManager.broadcast(m); }
+void notificationQueueReply(const char* p, const char* m) { globalNotifManager.queueReply(p, m); }
+void notificationUpdate() { globalNotifManager.update(); }

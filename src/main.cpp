@@ -17,12 +17,17 @@
 #include "logging.h"
 #include "system_health.h"
 #include "notification_manager.h"
+#include "system_context.h"
 
 static const char* TAG = "MAIN";
 
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
+static SystemContext sysCtx;
+static NotificationManager notifMgr;
+static AlarmController almCtrl;
+
 static uint32_t lastI2cPoll  = 0;
 static uint32_t lastMqttStateSync = 0;
 static bool     lastAllClear    = true;
@@ -58,17 +63,12 @@ static void restartTask(int index);
 // ---------------------------------------------------------------------------
 static void onAlarmEvent(const AlarmEventInfo& info)
 {
-    notificationDispatch(info);
+    sysCtx.notificationManager->dispatch(info, &sysCtx);
 }
 
 // ---------------------------------------------------------------------------
 // Non-Blocking Alert Dispatcher
 // ---------------------------------------------------------------------------
-void alarmBroadcast(const char* message)
-{
-    notificationBroadcast(message);
-}
-
 void alarmQueueReply(const char* phone, const char* message)
 {
     notificationQueueReply(phone, message);
@@ -80,6 +80,7 @@ void alarmQueueReply(const char* phone, const char* message)
 
 static void zoneTask(void* pvParameters)
 {
+    SystemContext* ctx = (SystemContext*)pvParameters;
     TickType_t lastWakeTime = xTaskGetTickCount();
     const TickType_t period = pdMS_TO_TICKS(INPUT_SCAN_INTERVAL_MS);
 
@@ -113,6 +114,7 @@ static void zoneTask(void* pvParameters)
 
 static void netWorkerTask(void* pvParameters)
 {
+    SystemContext* ctx = (SystemContext*)pvParameters;
     while (true) {
         // Wait for Boot Lock
         if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
@@ -169,14 +171,14 @@ static void cliWorkerTask(void* pvParameters)
 
 static void alertWorkerTask(void* pvParameters)
 {
+    SystemContext* ctx = (SystemContext*)pvParameters;
     while (true) {
         // Wait for Boot Lock
         if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
         if (bootLock) xSemaphoreGive(bootLock);
 
         sysHealthReport(HB_BIT_ALERT); 
-
-        notificationUpdate(); 
+        ctx->notificationManager->update(); 
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
@@ -282,8 +284,13 @@ void setup()
     Serial.println("  Industrial Security Controller (ESP32)");
     Serial.println("========================================");
 
+    // Initialize System Context
+    sysCtx.notificationManager = &notifMgr;
+    sysCtx.alarmController = &almCtrl;
+    sysCtx.taskHeartbeatBits = &taskHeartbeatBits;
+
     configInit();
-    notificationInit();
+    sysCtx.notificationManager->init();
 
     pinMode(HEARTBEAT_LED_PIN, OUTPUT);
     digitalWrite(HEARTBEAT_LED_PIN, LOW);
@@ -305,17 +312,26 @@ void setup()
     // CRITICAL: Load config BEFORE initializing alarm logic
     configLoad();
     
-    // Initialize Alarm Logic (Restores ARM state from NVS correctly now)
-    alarmInit();
-    alarmSetCallback(onAlarmEvent);
+    // Initialize Alarm Logic
+    sysCtx.alarmController->init(&sysCtx);
+    sysCtx.alarmController->setCallback(onAlarmEvent);
 
     smsGatewayInit(DEFAULT_ROUTER_IP, DEFAULT_ROUTER_USER, DEFAULT_ROUTER_PASS);
+    // TODO: activeGateway is still a global in sms_gateway.cpp, but we can wrap it
+    
     smsCmdInit();
     networkInit();
     webServerInit();
     cliInit();
     mqttInit();
     onvifInit();
+
+    xTaskCreatePinnedToCore(zoneTask, "ZoneTask", 3072, &sysCtx, 5, &taskHandles[0], 1);
+    xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 4096, &sysCtx, 1, &taskHandles[1], 0);
+    xTaskCreatePinnedToCore(mqttWorkerTask, "MQTTWorker", 4096, &sysCtx, 1, &taskHandles[2], 0);
+    xTaskCreatePinnedToCore(heartbeatTask, "Heartbeat", 2048, &sysCtx, 1, &taskHandles[3], 1);
+    xTaskCreatePinnedToCore(cliWorkerTask, "CLITask", 4096, &sysCtx, 1, &taskHandles[4], 0);
+    xTaskCreatePinnedToCore(alertWorkerTask, "AlertWorker", 4096, &sysCtx, 1, &taskHandles[5], 0);
 
     xSemaphoreGive(bootLock); // Release workers (Total Sync achieved)
     networkDiscoveryInit();   // Enable .local discovery
