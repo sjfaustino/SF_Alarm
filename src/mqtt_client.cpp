@@ -1,17 +1,21 @@
 #include "mqtt_client.h"
 #include "logging.h"
 #include "alarm_controller.h"
-#include "alarm_zones.h"
-#include "io_expander.h"
-#include "system_context.h"
+#include "zone_manager.h"
+#include "io_service.h"
+#include "system_state.h"
 #include <esp_task_wdt.h>
+#include "notification_manager.h"
 
 static const char* TAG = "MQTT";
 
 MqttService* MqttService::_instance = nullptr;
 
 MqttService::MqttService() 
-    : _ctx(nullptr), 
+    : _alarm(nullptr),
+      _zones(nullptr),
+      _io(nullptr),
+      _nm(nullptr),
       _mqttClient(_espClient),
       _msgQueue(NULL),
       _configMutex(NULL),
@@ -20,7 +24,8 @@ MqttService::MqttService()
       _syncRequested(false),
       _lastPublishedState(-1),
       _lastPublishedZones(0xFFFF),
-      _lastPublishedOutputs(0xFFFF)
+      _lastPublishedOutputs(0xFFFF),
+      _connected(false)
 {
     _instance = this;
     memset(_server, 0, sizeof(_server));
@@ -32,6 +37,7 @@ MqttService::MqttService()
 MqttService::~MqttService() {
     if (_msgQueue) vQueueDelete(_msgQueue);
     if (_configMutex) vSemaphoreDelete(_configMutex);
+    if (_mqttMutex) vSemaphoreDelete(_mqttMutex);
 }
 
 void MqttService::staticCallback(char* topic, byte* payload, unsigned int length) {
@@ -64,7 +70,7 @@ void MqttService::handleMessage(char* topic, byte* payload, unsigned int length)
 
         if (strncmp(message, "DISARM", 6) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (_ctx->alarmController->disarm(pin)) {
+            if (_alarm && _alarm->disarm(pin)) {
                 publish("SF_Alarm/events", "DISARMED via MQTT");
             } else {
                 publish("SF_Alarm/events", "DISARM failed (wrong PIN)");
@@ -72,7 +78,7 @@ void MqttService::handleMessage(char* topic, byte* payload, unsigned int length)
         }
         else if (strncmp(message, "ARM_HOME", 8) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (_ctx->alarmController->armHome(pin)) {
+            if (_alarm && _alarm->armHome(pin)) {
                 publish("SF_Alarm/events", "ARM_HOME via MQTT");
             } else {
                 publish("SF_Alarm/events", "ARM_HOME failed (wrong PIN)");
@@ -80,7 +86,7 @@ void MqttService::handleMessage(char* topic, byte* payload, unsigned int length)
         }
         else if (strncmp(message, "ARM_AWAY", 8) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (_ctx->alarmController->armAway(pin)) {
+            if (_alarm && _alarm->armAway(pin)) {
                 publish("SF_Alarm/events", "ARM_AWAY via MQTT");
             } else {
                 publish("SF_Alarm/events", "ARM_AWAY failed (wrong PIN)");
@@ -88,7 +94,7 @@ void MqttService::handleMessage(char* topic, byte* payload, unsigned int length)
         }
         else if (strncmp(message, "MUTE", 4) == 0) {
             const char* pin = extractPin(message, pinBuf, sizeof(pinBuf));
-            if (_ctx->alarmController->muteSiren(pin)) {
+            if (_alarm && _alarm->muteSiren(pin)) {
                 publish("SF_Alarm/events", "MUTE via MQTT");
             } else {
                 publish("SF_Alarm/events", "MUTE failed (wrong PIN)");
@@ -97,19 +103,30 @@ void MqttService::handleMessage(char* topic, byte* payload, unsigned int length)
     }
 }
 
-void MqttService::init(SystemContext* ctx) {
-    _ctx = ctx;
+void MqttService::init(AlarmController* alarm, ZoneManager* zones, IoService* io, NotificationManager* nm) {
+    _alarm = alarm;
+    _zones = zones;
+    _io = io;
+    _nm = nm;
+
     if (_configMutex == NULL) {
         _configMutex = xSemaphoreCreateMutex();
+    }
+    if (_mqttMutex == NULL) {
+        _mqttMutex = xSemaphoreCreateMutex();
     }
     if (_msgQueue == NULL) {
         _msgQueue = xQueueCreate(30, sizeof(MqttMsg));
     }
     
-    _mqttClient.setSocketTimeout(2);
-    _mqttClient.setKeepAlive(15);
-    _mqttClient.setCallback(MqttService::staticCallback);
+    if (xSemaphoreTake(_mqttMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        _mqttClient.setSocketTimeout(2);
+        _mqttClient.setKeepAlive(15);
+        _mqttClient.setCallback(MqttService::staticCallback);
+        xSemaphoreGive(_mqttMutex);
+    }
     
+    _nm->registerProvider(CH_ALL, this);
     LOG_INFO(TAG, "MQTT Service initialized");
 }
 
@@ -125,12 +142,15 @@ void MqttService::setConfig(const char* server, uint16_t port, const char* user,
     
     if (clientId) strncpy(_clientId, clientId, sizeof(_clientId) - 1);
     
-    _mqttClient.setServer(_server, _port);
+    if (xSemaphoreTake(_mqttMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        _mqttClient.setServer(_server, _port);
+        xSemaphoreGive(_mqttMutex);
+    }
     xSemaphoreGive(_configMutex);
 }
 
-bool MqttService::isConnected() {
-    return _mqttClient.connected();
+bool MqttService::isConnected() const {
+    return _connected;
 }
 
 void MqttService::publish(const char* topic, const char* payload, bool retained) {
@@ -145,6 +165,12 @@ void MqttService::publish(const char* topic, const char* payload, bool retained)
     }
 }
 
+bool MqttService::send(const char* target, const char* message) {
+    const char* topic = (target && strlen(target) > 0) ? target : "SF_Alarm/notifications";
+    publish(topic, message, false);
+    return true;
+}
+
 void MqttService::syncState() {
     _syncRequested = true;
 }
@@ -152,7 +178,12 @@ void MqttService::syncState() {
 void MqttService::update() {
     if (strlen(_server) == 0) return;
 
-    if (!_mqttClient.connected()) {
+    if (xSemaphoreTake(_mqttMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        _connected = _mqttClient.connected();
+        xSemaphoreGive(_mqttMutex);
+    }
+
+    if (!_connected) {
         unsigned long now = millis();
         static uint32_t reconnectJitter = 0;
         if (reconnectJitter == 0) reconnectJitter = 5000 + random(5000); 
@@ -164,36 +195,44 @@ void MqttService::update() {
             xSemaphoreTake(_configMutex, portMAX_DELAY);
             LOG_INFO(TAG, "Attempting connection to %s:%d...", _server, _port);
             
-            bool connected;
-            if (strlen(_user) > 0) {
-                connected = _mqttClient.connect(_clientId, _user, _pass, "SF_Alarm/availability", 0, true, "offline");
-            } else {
-                connected = _mqttClient.connect(_clientId, NULL, NULL, "SF_Alarm/availability", 0, true, "offline");
-            }
-            
-            if (connected) {
-                LOG_INFO(TAG, "Connected to broker");
-                _mqttClient.publish("SF_Alarm/availability", "online", true);
-                _mqttClient.subscribe("SF_Alarm/cmd");
-                _syncRequested = true;
-            } else {
-                LOG_WARN(TAG, "Connection failed, rc=%d", _mqttClient.state());
+            bool connected = false;
+            if (xSemaphoreTake(_mqttMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                if (strlen(_user) > 0) {
+                    connected = _mqttClient.connect(_clientId, _user, _pass, "SF_Alarm/availability", 0, true, "offline");
+                } else {
+                    connected = _mqttClient.connect(_clientId, NULL, NULL, "SF_Alarm/availability", 0, true, "offline");
+                }
+                
+                if (connected) {
+                    LOG_INFO(TAG, "Connected to broker");
+                    _mqttClient.publish("SF_Alarm/availability", "online", true);
+                    _mqttClient.subscribe("SF_Alarm/cmd");
+                    publishDiscovery();
+                    _syncRequested = true;
+                    _connected = true;
+                } else {
+                    LOG_WARN(TAG, "Connection failed, rc=%d", _mqttClient.state());
+                }
+                xSemaphoreGive(_mqttMutex);
             }
             xSemaphoreGive(_configMutex);
         }
     } else {
-        _mqttClient.loop();
+        if (xSemaphoreTake(_mqttMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            _mqttClient.loop();
 
-        if (_syncRequested) {
-            _syncRequested = false;
-            internalSyncState();
-        }
-
-        if (_msgQueue) {
-            MqttMsg msg;
-            while (xQueueReceive(_msgQueue, &msg, 0) == pdTRUE) {
-                _mqttClient.publish(msg.topic, msg.payload, msg.retained);
+            if (_syncRequested) {
+                _syncRequested = false;
+                internalSyncState();
             }
+
+            if (_msgQueue) {
+                MqttMsg msg;
+                while (xQueueReceive(_msgQueue, &msg, 0) == pdTRUE) {
+                    _mqttClient.publish(msg.topic, msg.payload, msg.retained);
+                }
+            }
+            xSemaphoreGive(_mqttMutex);
         }
     }
 }
@@ -201,21 +240,23 @@ void MqttService::update() {
 void MqttService::internalSyncState() {
     if (!_mqttClient.connected()) return;
 
+    SystemSnapshot snap;
+    StateManager::capture(_alarm, _zones, _io, _nm, this, nullptr, snap);
+
     static const char* haStateMap[] = {
         "disarmed", "pending", "armed_away", "armed_home", "pending", "triggered", "unavailable"
     };
 
-    AlarmState st = _ctx->alarmController->getState();
-    if ((int)st != _lastPublishedState && (int)st <= 6) {
-        _mqttClient.publish("SF_Alarm/state", haStateMap[(int)st], true);
-        _lastPublishedState = (int)st;
+    if ((int)snap.alarmState != _lastPublishedState && (int)snap.alarmState <= 6) {
+        _mqttClient.publish("SF_Alarm/state", haStateMap[(int)snap.alarmState], true);
+        _lastPublishedState = (int)snap.alarmState;
     }
 
     uint16_t currentZones = 0;
     for (int i = 0; i < 16; i++) {
-        const ZoneInfo* zi = zonesGetInfo(i);
-        if (zi && zi->rawInput) currentZones |= (1 << i);
+        if (snap.zones[i].rawInput) currentZones |= (1 << i);
     }
+
     if (currentZones != _lastPublishedZones) {
         for (int i = 0; i < 16; i++) {
             bool current = (currentZones >> i) & 1;
@@ -229,10 +270,9 @@ void MqttService::internalSyncState() {
         _lastPublishedZones = currentZones;
     }
 
-    uint16_t outs = ioExpanderGetOutputs();
-    if (outs != _lastPublishedOutputs) {
+    if (snap.outputs != _lastPublishedOutputs) {
         for (int i = 0; i < 16; i++) {
-            bool current = (outs >> i) & 1;
+            bool current = (snap.outputs >> i) & 1;
             bool previous = (_lastPublishedOutputs >> i) & 1;
             if (current != previous) {
                 char topic[32];
@@ -240,6 +280,77 @@ void MqttService::internalSyncState() {
                 _mqttClient.publish(topic, current ? "ON" : "OFF", true);
             }
         }
-        _lastPublishedOutputs = outs;
+        _lastPublishedOutputs = snap.outputs;
     }
+}
+
+void MqttService::publishDiscovery() {
+    if (!_mqttClient.connected()) return;
+
+    LOG_INFO(TAG, "Publishing Home Assistant discovery payloads...");
+
+    // 1. Alarm Control Panel
+    {
+        JsonDocument doc;
+        doc["name"] = "SF_Alarm";
+        doc["state_topic"] = "SF_Alarm/state";
+        doc["command_topic"] = "SF_Alarm/cmd";
+        doc["availability_topic"] = "SF_Alarm/availability";
+        doc["payload_available"] = "online";
+        doc["payload_not_available"] = "offline";
+        doc["code_arm_required"] = true;
+        doc["code_disarm_required"] = true;
+        doc["unique_id"] = String(_clientId) + "_alarm";
+        
+        JsonObject dev = doc["device"].to<JsonObject>();
+        dev["identifiers"][0] = _clientId;
+        dev["name"] = "SF_Alarm System";
+        dev["model"] = "KC868-A16";
+        dev["sw_version"] = "2.0.0-hardened";
+
+        String output;
+        serializeJson(doc, output);
+        _mqttClient.publish("homeassistant/alarm_control_panel/sf_alarm/config", output.c_str(), true);
+    }
+
+    // 2. Binary Sensors (Zones)
+    for (int i = 0; i < 16; i++) {
+        char objId[32], name[32], stateTopic[64];
+        snprintf(objId, sizeof(objId), "zone_%d", i + 1);
+        snprintf(name, sizeof(name), "Zone %d", i + 1);
+        snprintf(stateTopic, sizeof(stateTopic), "SF_Alarm/zone/%d", i + 1);
+        publishHAConfig("binary_sensor", objId, name, (i < 8) ? "motion" : "door", stateTopic, nullptr);
+    }
+
+    // 3. Switches (Outputs/Relays)
+    for (int i = 0; i < 16; i++) {
+        char objId[32], name[32], stateTopic[64], cmdTopic[64];
+        snprintf(objId, sizeof(objId), "output_%d", i + 1);
+        snprintf(name, sizeof(name), "Output %d", i + 1);
+        snprintf(stateTopic, sizeof(stateTopic), "SF_Alarm/output/%d", i + 1);
+        snprintf(cmdTopic, sizeof(cmdTopic), "SF_Alarm/output/%d/set", i + 1);
+        publishHAConfig("switch", objId, name, nullptr, stateTopic, cmdTopic);
+    }
+}
+
+void MqttService::publishHAConfig(const char* component, const char* objectId, const char* name, 
+                                 const char* deviceClass, const char* stateTopic, const char* cmdTopic) {
+    JsonDocument doc;
+    char discTopic[128];
+    snprintf(discTopic, sizeof(discTopic), "homeassistant/%s/sf_alarm/%s/config", component, objectId);
+
+    doc["name"] = name;
+    if (stateTopic) doc["state_topic"] = stateTopic;
+    if (cmdTopic) doc["command_topic"] = cmdTopic;
+    if (deviceClass) doc["device_class"] = deviceClass;
+    
+    doc["unique_id"] = String(_clientId) + "_" + objectId;
+    doc["availability_topic"] = "SF_Alarm/availability";
+    
+    JsonObject dev = doc["device"].to<JsonObject>();
+    dev["identifiers"][0] = _clientId;
+
+    String output;
+    serializeJson(doc, output);
+    _mqttClient.publish(discTopic, output.c_str(), true);
 }

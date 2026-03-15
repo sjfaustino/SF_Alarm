@@ -1,16 +1,21 @@
 #ifndef SF_ALARM_TELEGRAM_CLIENT_H
 #define SF_ALARM_TELEGRAM_CLIENT_H
 
-#include <Arduino.h>
+#include "notification_provider.h"
 
-struct SystemContext;
+class NotificationManager;
 
-class TelegramService {
+class TelegramService : public NotificationProvider {
 public:
     TelegramService();
-    ~TelegramService();
+    virtual ~TelegramService();
 
-    void init(SystemContext* ctx);
+    // NotificationProvider implementation
+    virtual const char* getName() const override { return "Telegram"; }
+    virtual bool send(const char* target, const char* message) override;
+    virtual bool isReady() const override { return strlen(_token) > 0; }
+
+    void init(NotificationManager* nm);
     void setConfig(const char* token, const char* chatId);
     bool send(const char* message);
 
@@ -18,7 +23,7 @@ public:
     const char* getChatId() const { return _chatId; }
 
 private:
-    SystemContext* _ctx;
+    NotificationManager* _nm;
     char _token[64];
     char _chatId[32];
     SemaphoreHandle_t _mutex;

@@ -3,14 +3,14 @@
 
 #include <Arduino.h>
 
-struct SystemContext;
+class ZoneManager;
 
 class OnvifService {
 public:
     OnvifService();
     ~OnvifService();
 
-    void init(SystemContext* ctx);
+    void init(ZoneManager* zones);
     void setServer(const char* host, uint16_t port, const char* user, const char* pass, uint8_t targetZone);
     void disconnect();
     bool isConnected();
@@ -21,11 +21,12 @@ public:
     const char* getPass();
     uint8_t getTargetZone();
 
+    ZoneManager* _zones;
+    static OnvifService* _instance;
+
 private:
-    SystemContext* _ctx;
     struct OnvifState* _state;
     static void onvifTask(void* pvParameters);
-    static OnvifService* _instance;
 };
 
 #endif // SF_ALARM_ONVIF_CLIENT_H

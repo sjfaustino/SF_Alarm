@@ -41,5 +41,6 @@ static const char* KEY_ONVIF_ZONE    = "ovZone";
 static const char* KEY_HEARTBEAT_EN  = "hbEn";
 static const char* KEY_TZ            = "tz";
 static const char* KEY_CONFIGURED    = "configured";
+static const char* KEY_SMS_PROVIDER  = "smsProv";
 
 #endif // SF_ALARM_CONFIG_KEYS_H

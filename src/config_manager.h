@@ -2,6 +2,7 @@
 #define SF_ALARM_CONFIG_MANAGER_H
 
 #include <Arduino.h>
+#include "config.h"
 #include "alarm_controller.h"
 
 enum ConfigSection {
@@ -22,14 +23,32 @@ enum ConfigSection {
 void configMarkDirty(ConfigSection section);
 
 /// Initialize the config manager (opens NVS namespace).
-struct SystemContext;
-void configInit(SystemContext* ctx);
+class AlarmController;
+class ZoneManager;
+class IoService;
+class NotificationManager;
+class MqttService;
+class OnvifService;
+class PhoneAuthenticator;
+class SmsCommandProcessor;
+class SmsService;
+class WhatsappService;
+class TelegramService;
 
-/// Load all configuration from NVS into the running modules.
-/// Call after all modules are initialized.
-void configLoad(SystemContext* ctx);
+void configInit(AlarmController* alarm, ZoneManager* zones, IoService* io,
+               NotificationManager* nm, MqttService* mqtt, OnvifService* onvif,
+               PhoneAuthenticator* auth, SmsCommandProcessor* smsProc, SmsService* sms,
+               WhatsappService* whatsapp, TelegramService* telegram);
 
-/// Save all current configuration to NVS.
+void configLoad(AlarmController* alarm, ZoneManager* zones, IoService* io,
+               NotificationManager* nm, MqttService* mqtt, OnvifService* onvif,
+               PhoneAuthenticator* auth, SmsCommandProcessor* smsProc, SmsService* sms,
+               WhatsappService* whatsapp, TelegramService* telegram);
+
+/// Process background configuration maintenance (flushes dirty flags)
+void configTick();
+
+/// Save all current configuration to NVS (Force immediate flush)
 void configSave();
 
 /// Modular NVS saves to prevent flash wear-out during web requests
@@ -59,6 +78,9 @@ void configGetSchedule(int dayOfWeek, int8_t &armHr, int8_t &armMin, int8_t &dis
 void configSetSchedule(int dayOfWeek, int8_t armHr, int8_t armMin, int8_t disarmHr, int8_t disarmMin);
 uint8_t configGetScheduleMode();
 void configSetScheduleMode(uint8_t mode);
+
+SmsProvider configGetSmsProvider();
+void configSetSmsProvider(SmsProvider prov);
 
 /// Reset all configuration to factory defaults.
 TaskHandle_t configGetLockOwner();

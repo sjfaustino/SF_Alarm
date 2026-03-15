@@ -1,6 +1,6 @@
 #include "onvif_client.h"
 #include "config_manager.h"
-#include "alarm_zones.h"
+#include "zone_manager.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <time.h>
@@ -10,7 +10,6 @@
 #include "string_utils.h"
 #include <esp_sntp.h>
 #include <esp_task_wdt.h>
-#include "system_context.h"
 
 static const char* TAG = "ONVIF";
 
@@ -37,7 +36,7 @@ struct OnvifState {
 
 OnvifService* OnvifService::_instance = nullptr;
 
-OnvifService::OnvifService() : _ctx(nullptr), _state(new OnvifState()) {
+OnvifService::OnvifService() : _zones(nullptr), _state(new OnvifState()) {
     _instance = this;
     memset(_state, 0, sizeof(OnvifState));
     _state->port = 80;
@@ -94,42 +93,107 @@ String getAuthHeaderInternal(OnvifState* state) {
     return String(headerBuf);
 }
 
+/**
+ * StreamScanner: Zero-allocation state machine for finding patterns in a stream.
+ * Mitigates the "XML Heap Detonator" by avoiding sliding window memmoves and 
+ * temporary String/buffer allocations.
+ */
+class StreamScanner {
+public:
+    StreamScanner(const char* pattern) : _pattern(pattern), _len(strlen(pattern)), _pos(0) {}
+
+    bool feed(char c) {
+        if (tolower(c) == tolower(_pattern[_pos])) {
+            _pos++;
+            if (_pos == _len) {
+                _pos = 0; // Reset for next potential match
+                return true;
+            }
+        } else {
+            // Brute force reset - for small patterns this is fine.
+            // If the char matches the START of the pattern, start from 1.
+            _pos = (tolower(c) == tolower(_pattern[0])) ? 1 : 0;
+        }
+        return false;
+    }
+
+    void reset() { _pos = 0; }
+
+private:
+    const char* _pattern;
+    size_t _len;
+    size_t _pos;
+};
+
 static bool createSubscriptionInternal(OnvifState* state) {
     if (strlen(state->host) == 0) return false;
     HTTPClient http;
-    String url = "http://" + String(state->host) + ":" + String(state->port) + "/onvif/event_service";
+    
+    // Use fixed buffer for URL to avoid heap churn
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s:%d/onvif/event_service", state->host, state->port);
     http.begin(url);
     http.setTimeout(2500);
     http.addHeader("Content-Type", "application/soap+xml; charset=utf-8");
+
     String auth = getAuthHeaderInternal(state);
     if (auth.length() == 0) { http.end(); return false; }
-    String body = String(SOAP_ENV_START) + auth + "<s:Body><e:CreatePullPointSubscription/></s:Body>" + SOAP_ENV_END;
+
+    // Construct body using pre-defined parts to minimize String reallocations
+    String body;
+    body.reserve(1024);
+    body += SOAP_ENV_START;
+    body += auth;
+    body += "<s:Body><e:CreatePullPointSubscription/></s:Body>";
+    body += SOAP_ENV_END;
+
     int code = http.POST(body);
     if (code == 200) {
         WiFiClient* stream = http.getStreamPtr();
         if (stream) {
-            char buffer[512];
-            int bufPos = 0;
-            unsigned long scraperStart = millis();
+            StreamScanner startTag("<tt:Address>");
+            StreamScanner endTag("</tt:Address>");
+            
+            char addrBuf[128];
+            int addrPos = 0;
+            bool inAddress = false;
             bool foundAddress = false;
+            unsigned long scraperStart = millis();
+
             while (http.connected() && !foundAddress) {
                 if (millis() - scraperStart > 5000) break;
-                if (stream->available()) {
-                    int c = stream->read();
-                    if (c < 0) break;
-                    buffer[bufPos++] = (char)c;
-                    buffer[bufPos] = '\0';
-                    if (strcasestr(buffer, "<tt:Address>")) {
-                        state->subscriptionAddress = extractBetween(buffer, "<tt:Address>", "</tt:Address>");
-                        if (state->subscriptionAddress.length() > 0) foundAddress = true;
+                int available = stream->available();
+                if (available > 0) {
+                    uint8_t tempBuf[128];
+                    int n = stream->read(tempBuf, std::min((int)sizeof(tempBuf), available));
+                    if (n <= 0) break;
+
+                    for (int i = 0; i < n && !foundAddress; i++) {
+                        char c = (char)tempBuf[i];
+                        if (!inAddress) {
+                            if (startTag.feed(c)) {
+                                inAddress = true;
+                                addrPos = 0;
+                            }
+                        } else {
+                            if (endTag.feed(c)) {
+                                addrBuf[addrPos] = '\0';
+                                state->subscriptionAddress = String(addrBuf);
+                                foundAddress = true;
+                            } else if (addrPos < (int)sizeof(addrBuf) - 1) {
+                                addrBuf[addrPos++] = c;
+                            } else {
+                                inAddress = false;
+                                startTag.reset();
+                                endTag.reset();
+                            }
+                        }
                     }
-                    if (bufPos >= (int)sizeof(buffer) - 1) {
-                        memmove(buffer, buffer + 384, 128);
-                        bufPos = 128;
-                        buffer[bufPos] = '\0';
-                    }
-                } else vTaskDelay(1);
+                } else {
+                    vTaskDelay(1);
+                }
             }
+
             if (foundAddress) {
                 state->connected = true;
                 LOG_INFO(TAG, "Subscription created: %s", state->subscriptionAddress.c_str());
@@ -151,39 +215,52 @@ static void pollMessagesInternal(OnvifState* state) {
     http.begin(state->subscriptionAddress);
     http.addHeader("Content-Type", "application/soap+xml; charset=utf-8");
     http.setTimeout(5000);
+
     String auth = getAuthHeaderInternal(state);
     if (auth.length() == 0) { http.end(); return; }
-    String body = String(SOAP_ENV_START) + auth + "<s:Body><e:PullMessages><e:Timeout>PT2S</e:Timeout><e:MessageLimit>10</e:MessageLimit></e:PullMessages></s:Body>" + SOAP_ENV_END;
+
+    // Minimize String reallocations
+    String body;
+    body.reserve(1024);
+    body += SOAP_ENV_START;
+    body += auth;
+    body += "<s:Body><e:PullMessages><e:Timeout>PT2S</e:Timeout><e:MessageLimit>10</e:MessageLimit></e:PullMessages></s:Body>";
+    body += SOAP_ENV_END;
+
     int code = http.POST(body);
     if (code == 200) {
         WiFiClient* stream = http.getStreamPtr();
         if (!stream) { http.end(); return; }
-        char buffer[512];
-        int bufferPos = 0;
+
+        StreamScanner isMotion("IsMotion");
+        StreamScanner valueTrue("Value=\"true\"");
+        
         bool motion = false;
+        bool foundIsMotion = false;
         unsigned long timeoutMs = millis();
+
         while (http.connected() || stream->available()) {
             if (millis() - timeoutMs > 5000) break;
             if (stream->available()) {
                 timeoutMs = millis();
-                int c = stream->read();
-                if (c < 0) break;
-                buffer[bufferPos++] = (char)c;
-                buffer[bufferPos] = '\0';
-                char* m = strcasestr(buffer, "IsMotion");
-                if (m && strcasestr(m, "Value=\"true\"")) {
-                    motion = true;
-                    break;
-                }
-                if (bufferPos >= (int)sizeof(buffer) - 1) {
-                    memmove(buffer, buffer + 384, 128);
-                    bufferPos = 128;
-                    buffer[bufferPos] = '\0';
+                char c = (char)stream->read();
+                
+                if (!foundIsMotion) {
+                    if (isMotion.feed(c)) foundIsMotion = true;
+                } else {
+                    if (valueTrue.feed(c)) {
+                        motion = true;
+                        break;
+                    }
                 }
             } else vTaskDelay(pdMS_TO_TICKS(10));
         }
+        // Drain remaining stream
         while (stream->available()) stream->read();
-        zonesSetVirtualInput(state->targetZone, motion);
+
+        if (state->connected && OnvifService::_instance && OnvifService::_instance->_zones) {
+            OnvifService::_instance->_zones->setVirtualInput(state->targetZone, motion);
+        }
         if (motion) LOG_INFO(TAG, "Motion detected on camera!");
     } else if (code > 0) {
         if (code == 401) LOG_ERROR(TAG, "ONVIF Auth failed");
@@ -192,8 +269,8 @@ static void pollMessagesInternal(OnvifState* state) {
     http.end();
 }
 
-void OnvifService::init(SystemContext* ctx) {
-    _ctx = ctx;
+void OnvifService::init(ZoneManager* zones) {
+    _zones = zones;
     xTaskCreatePinnedToCore(onvifTask, "ONVIF_Poll", 8192, this, 1, &_state->taskHandle, 0);
     LOG_INFO(TAG, "ONVIF Service initialized");
 }

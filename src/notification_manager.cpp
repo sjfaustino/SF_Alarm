@@ -1,12 +1,6 @@
 #include "notification_manager.h"
 #include "config.h"
 #include "logging.h"
-#include "sms_gateway.h"
-#include "sms_commands.h"
-#include "whatsapp_client.h"
-#include "telegram_client.h"
-#include "mqtt_client.h"
-#include "system_context.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -24,8 +18,7 @@ NotificationManager::~NotificationManager() {
     }
 }
 
-void NotificationManager::init(SystemContext* ctx) {
-    _ctx = ctx;
+void NotificationManager::init() {
     _alertQueue = xQueueCreate(10, sizeof(PendingAlert));
     if (!_alertQueue) {
         LOG_ERROR(TAG, "Failed to create alert queue");
@@ -34,10 +27,10 @@ void NotificationManager::init(SystemContext* ctx) {
     _enabledChannels = CH_NONE;
 }
 
-void NotificationManager::registerProvider(AlertChannel channel, const char* name, NotificationSendFunc send) {
-    if (_providerCount < 8) {
-        _providers[_providerCount++] = {channel, name, send};
-        LOG_INFO(TAG, "Registered provider: %s (0x%02X)", name, (uint8_t)channel);
+void NotificationManager::registerProvider(AlertChannel channel, NotificationProvider* provider) {
+    if (_providerCount < 8 && provider != nullptr) {
+        _providers[_providerCount++] = {channel, provider};
+        LOG_INFO(TAG, "Registered provider: %s (0x%02X)", provider->getName(), (uint8_t)channel);
     }
 }
 
@@ -49,7 +42,7 @@ uint8_t NotificationManager::getChannels() {
     return _enabledChannels;
 }
 
-void NotificationManager::dispatch(const AlarmEventInfo& info, SystemContext* ctx) {
+void NotificationManager::dispatch(const AlarmEventInfo& info) {
     char msg[160];
     const char* details = info.details ? info.details : "";
 
@@ -75,21 +68,6 @@ void NotificationManager::dispatch(const AlarmEventInfo& info, SystemContext* ct
             broadcast(msg);
             break;
 
-        default: break;
-    }
-
-    // 2. High-latency MQTT events
-    switch (info.event) {
-        case EVT_ALARM_TRIGGERED:
-        case EVT_TAMPER:
-        case EVT_ARMED_AWAY:
-        case EVT_ARMED_HOME:
-        case EVT_DISARMED: {
-            char logMsg[128];
-            snprintf(logMsg, sizeof(logMsg), "EVENT:%d Z:%d | %s", (int)info.event, info.zoneId, details);
-            ctx->mqtt->publish("SF_Alarm/events", logMsg); 
-            break;
-        }
         default: break;
     }
 }
@@ -128,13 +106,17 @@ void NotificationManager::update() {
         _lastAlertProcessedMs = now;
         
         if (strlen(alert.targetPhone) > 0) {
-            _ctx->sms->send(alert.targetPhone, alert.message);
+            // Find a provider that handles SMS and send to targetPhone
+            for (int i = 0; i < _providerCount; i++) {
+                if (_providers[i].channel == CH_SMS) {
+                    _providers[i].provider->send(alert.targetPhone, alert.message);
+                    break;
+                }
+            }
         } else {
             for (int i = 0; i < _providerCount; i++) {
                 if (_enabledChannels & _providers[i].channel) {
-                    if (_providers[i].send) {
-                        _providers[i].send(alert.message);
-                    }
+                    _providers[i].provider->send(nullptr, alert.message);
                 }
             }
         }

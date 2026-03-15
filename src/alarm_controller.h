@@ -4,7 +4,9 @@
 #include <Arduino.h>
 #include "alarm_zones.h"
 
-class SystemContext;
+class ZoneManager;
+class NotificationManager;
+class IoService;
 
 // ---------------------------------------------------------------------------
 // Alarm System States
@@ -60,7 +62,7 @@ public:
     ~AlarmController();
 
     /// Initialize the alarm controller.
-    void init(SystemContext* ctx = nullptr);
+    void init(ZoneManager* zones, NotificationManager* nm, IoService* io);
 
     /// Set callback for alarm events.
     void setCallback(AlarmEventCallback cb);
@@ -92,6 +94,7 @@ public:
     /// Get details.
     uint16_t getActiveAlarmMask();
     uint16_t getDelayRemaining();
+    uint8_t getTriggeringZone() { return _triggeringZone; }
 
     /// PIN management.
     bool setPin(const char* currentPin, const char* newPin);
@@ -118,7 +121,9 @@ public:
     void broadcast(const char* message);
 
 private:
-    SystemContext* _ctx;
+    ZoneManager*         _zones;
+    NotificationManager* _notificationManager;
+    IoService*           _io;
     char           _alarmPin[16];
     uint16_t       _exitDelaySec;
     uint16_t       _entryDelaySec;
@@ -147,6 +152,7 @@ private:
     PendingArmMode _pendingArmMode;
 
     void fireEvent(AlarmEvent event, int8_t zoneId = -1, const char* details = "");
+    void onZoneEvent(uint8_t zoneId, ZoneState state);
     bool pinEquals(const char* a, const char* b);
     void sirenOn(int8_t zoneId, const char* name);
     void sirenOff();

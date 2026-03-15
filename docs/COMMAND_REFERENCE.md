@@ -10,7 +10,7 @@ This document provides a detailed technical guide for interacting with the SF_Al
 To prevent unauthorized access via physical console, all "destructive" or "config-altering" commands require a trailing PIN signature.
 * **Syntax**: `<command> [args] -pin <YOUR_PIN>`
 * **Default PIN**: `1234`
-* **Lockout**: 3 failed attempts will lock the CLI for 5 minutes.
+* **Lockout**: Global exponential backoff. 3 failed attempts lock the system for 10s, doubling with each subsequent failure.
 
 ### SMS Security
 * **Whitelisting**: Only phone numbers stored in slots 01–05 can issue commands.
@@ -31,6 +31,8 @@ To prevent unauthorized access via physical console, all "destructive" or "confi
 | `config` | - | Flash dump. | Lists all persistent variables stored in NVS. |
 | `sms inbox` | - | SMS read-only diagnostic. | Shows last 10 received messages in the router inbox. |
 | `sms outbox` | - | SMS read-only diagnostic. | Shows last 10 sent messages in the router outbox. |
+| `gsm` | `status` | GSM hardware status. | Prints current provider and registration state. |
+| `gsm` | `<AT...>` | Raw AT command. | Sends command directly to A6 module and returns response. |
 
 ### 2. Control Commands (Requires `pin <pin>`)
 | Command | Syntax | Example | Result |

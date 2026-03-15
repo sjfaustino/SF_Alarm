@@ -4,27 +4,24 @@
 #include <Arduino.h>
 #include "alarm_controller.h"
 
-class SystemContext;
+#include "notification_provider.h"
+
 
 /**
  * @brief Notification channels (bitmask)
+ * Used to filter which providers are enabled for broadcasts.
  */
 enum AlertChannel {
     CH_NONE = 0x00,
     CH_SMS  = 0x01,
     CH_WA   = 0x02,
-    CH_TG   = 0x04
+    CH_TG   = 0x04,
+    CH_ALL  = 0xFF
 };
-
-/**
- * @brief Notification provider interface
- */
-typedef bool (*NotificationSendFunc)(const char* message);
 
 struct ProviderEntry {
     AlertChannel channel;
-    const char* name;
-    NotificationSendFunc send;
+    NotificationProvider* provider;
 };
 
 struct PendingAlert {
@@ -43,12 +40,12 @@ public:
     /**
      * @brief Initialize the notification system
      */
-    void init(SystemContext* ctx);
+    void init();
 
     /**
      * @brief Register a notification provider
      */
-    void registerProvider(AlertChannel channel, const char* name, NotificationSendFunc send);
+    void registerProvider(AlertChannel channel, NotificationProvider* provider);
 
     /**
      * @brief Set the enabled alert channels (bitmask)
@@ -63,7 +60,7 @@ public:
     /**
      * @brief Dispatch an alarm event to all configured channels
      */
-    void dispatch(const AlarmEventInfo& info, SystemContext* ctx = nullptr);
+    void dispatch(const AlarmEventInfo& info);
 
     /**
      * @brief Queue a generic broadcast message
@@ -81,7 +78,7 @@ public:
     void update();
 
 private:
-    SystemContext* _ctx;
+
     void* _alertQueue; // Internal QueueHandle_t
     uint32_t _lastAlertProcessedMs;
     uint32_t _lastZoneAlertMs[16];

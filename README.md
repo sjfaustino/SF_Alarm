@@ -55,6 +55,8 @@ extended to support all 16 zones.
   |  [x] 16 MOSFET outputs (siren, strobe, relays)                  |
   |  [x] GA09-compatible SMS command set (extended to 16 channels)   |
   |  [x] SMS alerts via Cudy LT500D 4G router (HTTP/LuCI)           |
+  |  [x] SMS alerts via AI-Thinker A6 GSM Module (UART/AT)           |
+  |  [x] Home Assistant MQTT Auto-Discovery (Parametric)             |
   |  [x] Receive & process SMS commands remotely                     |
   |  [x] Up to 5 alert phone numbers                                |
   |  [x] Customizable alarm text per zone                            |
@@ -86,6 +88,7 @@ The system has undergone a comprehensive structural and security hardening ("The
 
 ### 🛡️ Security Implementation
 - **API Authentication**: Core diagnostic endpoints (`/api/status`, `/api/outputs`) are protected by PIN-based authorization.
+- **Global Exponential Backoff**: Implemented a global lockout mechanism for all PIN-protected endpoints (Web & CLI). Failed attempts trigger an exponential delay, making brute-force attacks computationally infeasible while maintaining zero-knowledge of user identity.
 - **Anti-Brute Force**: IP-based rate limiting on the web API prevents local network brute-force attacks from locking out legitimate users.
 - **Stored XSS Prevention**: All custom SMS alarm texts are sanitized to prevent malicious payloads from hijacking the web dashboard.
 - **Atomic Persistence**: Configuration commits are now atomic; the "Configured" flag is only set after all settings are verified in NVS.
@@ -99,6 +102,7 @@ The system has undergone a comprehensive structural and security hardening ("The
 - **Robust SMS Tokenizer**: Implemented a stateful parser in `sms_commands.cpp` that correctly handles `#` and other special characters in API tokens and passwords.
 - **Concurrency Mutexing**: All shared global state and the **I2C hardware bus (`Wire`)** are protected by FreeRTOS mutexes to prevent cross-core data corruption.
 - **FS-Based Web UI**: Offloaded 900+ lines of embedded HTML/JS to **LittleFS**, served asynchronously to reduce binary bloat and separate concerns.
+- **Chunk-Based Stream Processing**: Replaced inefficient byte-by-byte polling with high-performance chunked reads for HTTP responses and ONVIF XML parsing. This reduces CPU context switching and improves system responsiveness during network-heavy operations.
 - **Asynchronous Logging**: Synchronous serial traps have been purged; all logging is now offloaded to an asynchronous buffer.
 
 ---
@@ -775,6 +779,7 @@ Connect via USB at **115200 baud**. The CLI provides a `sf_alarm>` prompt.
   │ factory              │ Factory reset (requires YES confirm)  │
   │ reboot               │ Restart the ESP32                     │
   │ help                 │ Show all commands                     │
+  │ gsm <cmd>            │ GSM diagnostics & raw AT commands     │
   ├──────────────────────┼───────────────────────────────────────┤
   │ ALARM CONTROL        │                                       │
   ├──────────────────────┼───────────────────────────────────────┤

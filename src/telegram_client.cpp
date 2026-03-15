@@ -2,14 +2,13 @@
 #include <HTTPClient.h>
 #include "logging.h"
 #include "network.h"
-#include "system_context.h"
 #include "notification_manager.h"
 
 static const char* TAG = "TG";
 
 TelegramService* TelegramService::_instance = nullptr;
 
-TelegramService::TelegramService() : _ctx(nullptr), _mutex(NULL) {
+TelegramService::TelegramService() : _nm(nullptr), _mutex(NULL) {
     _instance = this;
     memset(_token, 0, sizeof(_token));
     memset(_chatId, 0, sizeof(_chatId));
@@ -19,12 +18,12 @@ TelegramService::~TelegramService() {
     if (_mutex) vSemaphoreDelete(_mutex);
 }
 
-void TelegramService::init(SystemContext* ctx) {
-    _ctx = ctx;
+void TelegramService::init(NotificationManager* nm) {
+    _nm = nm;
     if (_mutex == NULL) {
         _mutex = xSemaphoreCreateMutex();
     }
-    _ctx->notificationManager->registerProvider(CH_TG, "Telegram", TelegramService::staticSendWrapper);
+    _nm->registerProvider(CH_TG, this);
     LOG_INFO(TAG, "Telegram Service initialized");
 }
 
@@ -42,19 +41,18 @@ void TelegramService::setConfig(const char* token, const char* chatId) {
     }
 }
 
-bool TelegramService::staticSendWrapper(const char* message) {
-    if (_instance) return _instance->send(message);
-    return false;
-}
-
-bool TelegramService::send(const char* message) {
+bool TelegramService::send(const char* target, const char* message) {
     char token[64];
     char chatId[32];
     
     if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         strncpy(token, _token, sizeof(token)-1);
         token[sizeof(token)-1] = '\0';
-        strncpy(chatId, _chatId, sizeof(chatId)-1);
+        if (target && strlen(target) > 0) {
+            strncpy(chatId, target, sizeof(chatId)-1);
+        } else {
+            strncpy(chatId, _chatId, sizeof(chatId)-1);
+        }
         chatId[sizeof(chatId)-1] = '\0';
         xSemaphoreGive(_mutex);
     } else {
@@ -62,6 +60,10 @@ bool TelegramService::send(const char* message) {
     }
 
     return internalSend(token, chatId, message);
+}
+
+bool TelegramService::send(const char* message) {
+    return send(nullptr, message);
 }
 
 bool TelegramService::internalSend(const char* token, const char* chatId, const char* message) {

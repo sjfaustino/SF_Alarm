@@ -1,9 +1,11 @@
 #ifndef SF_ALARM_SMS_GATEWAY_H
 #define SF_ALARM_SMS_GATEWAY_H
 
-#include <Arduino.h>
+#include "notification_provider.h"
+#include "config.h"
 
-struct SystemContext;
+class NotificationManager;
+class SmsCommandProcessor;
 
 // ---------------------------------------------------------------------------
 // SMS Message (received)
@@ -23,7 +25,7 @@ public:
     virtual ~ISmsGateway() {}
 
     /// Initialize the gateway with credentials.
-    virtual void init(const char* host, const char* user, const char* pass) = 0;
+    virtual void init(const char* host, const char* user, const char* pass, SmsCommandProcessor* processor = nullptr) = 0;
 
     /// Update credentials.
     virtual void setCredentials(const char* host, const char* user, const char* pass) = 0;
@@ -53,18 +55,28 @@ public:
     virtual const char* getHost() = 0;
     virtual const char* getUser() = 0;
     virtual const char* getPass() = 0;
+
+    /// Execute a raw command (for diagnostics).
+    virtual bool execCommand(const char* cmd, char* response, size_t maxLen) = 0;
 };
 
-class SmsService {
+class SmsService : public NotificationProvider {
 public:
     SmsService();
-    ~SmsService();
+    virtual ~SmsService();
 
-    void init(SystemContext* ctx);
+    // NotificationProvider implementation
+    virtual const char* getName() const override { return "SMS"; }
+    virtual bool send(const char* target, const char* message) override;
+    virtual bool isReady() const override;
+
+    void init(NotificationManager* nm, SmsCommandProcessor* processor);
     void update();
 
     void setCredentials(const char* routerIp, const char* user, const char* pass);
-    bool send(const char* phoneNumber, const char* message);
+    void setProvider(SmsProvider prov);
+    bool execCommand(const char* cmd, char* resp, size_t max);
+
     int pollInbox(SmsMessage* msgs, int maxMessages);
     int pollSent(SmsMessage* msgs, int maxMessages);
     bool deleteMessage(int messageId);
@@ -78,7 +90,8 @@ public:
     ISmsGateway* getGateway() { return _gateway; }
 
 private:
-    SystemContext* _ctx;
+    NotificationManager* _nm;
+    SmsCommandProcessor* _processor;
     ISmsGateway* _gateway;
     static SmsService* _instance;
 };

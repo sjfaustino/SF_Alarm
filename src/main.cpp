@@ -1,10 +1,13 @@
+#if defined(ESP32)
 #include <Arduino.h>
+#endif
 #include "config.h"
-#include "io_expander.h"
-#include "alarm_zones.h"
+#include "io_service.h"
+#include "zone_manager.h"
 #include "alarm_controller.h"
 #include "sms_gateway.h"
-#include "sms_commands.h"
+#include "sms_command_processor.h"
+#include "logging.h"
 #include "whatsapp_client.h"
 #include "config_manager.h"
 #include "network.h"
@@ -14,34 +17,38 @@
 #include "mqtt_client.h"
 #include "onvif_client.h"
 #include <esp_task_wdt.h>
-#include "logging.h"
 #include "system_health.h"
 #include "notification_manager.h"
-#include "system_context.h"
+#include "phone_authenticator.h"
+#include "sms_command_processor.h"
 
 static const char* TAG = "MAIN";
 
 // ---------------------------------------------------------------------------
 // Module State
 // ---------------------------------------------------------------------------
-static SystemContext sysCtx;
+static IoService           ioSvc;
+static ZoneManager         zoneMgr;
+static AlarmController     almCtrl;
 static NotificationManager notifMgr;
-static AlarmController almCtrl;
-static SmsService      smsSvc;
-static MqttService     mqttSvc;
-static TelegramService telegramSvc;
-static WhatsappService whatsappSvc;
-static OnvifService   onvifSvc;
+static SmsService          smsSvc;
+static PhoneAuthenticator   phoneAuth;
+static SmsCommandProcessor  smsProc;
+static MqttService         mqttSvc;
+static TelegramService     telegramSvc;
+static WhatsappService     whatsappSvc;
+static OnvifService        onvifSvc;
+static SerialCLI           serialCli;
 
 static uint32_t lastI2cPoll  = 0;
 static uint32_t lastMqttStateSync = 0;
 static bool     lastAllClear    = true;
 
 // Task Heartbeat Registry (Task Integrity Monitor)
-static volatile uint8_t taskHeartbeatBits = 0;
+static volatile uint16_t taskHeartbeatBits = 0;
 static portMUX_TYPE heartbeatMux = portMUX_INITIALIZER_UNLOCKED;
 
-void sysHealthReport(uint8_t bit) {
+void sysHealthReport(uint16_t bit) {
     portENTER_CRITICAL(&heartbeatMux);
     taskHeartbeatBits |= bit;
     portEXIT_CRITICAL(&heartbeatMux);
@@ -50,8 +57,8 @@ void sysHealthReport(uint8_t bit) {
 static uint32_t lastGlobalHeartbeatCheck = 0;
 static const uint32_t WATCHDOG_INTEGRITY_WINDOW_MS = 15000; // 15 seconds
 
-static TaskHandle_t taskHandles[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
-static uint8_t restartCount[6] = { 0, 0, 0, 0, 0, 0 };
+static TaskHandle_t taskHandles[7] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+static uint8_t restartCount[7] = { 0, 0, 0, 0, 0, 0, 0 };
 
 // Boot Loop Protection (RTC memory persists through soft/WDT reset)
 RTC_NOINIT_ATTR uint32_t bootCount;
@@ -59,17 +66,28 @@ RTC_NOINIT_ATTR uint32_t lastKnownSystemTime; // Persistent system time (seconds
 static bool recoveryMode = false;
 static SemaphoreHandle_t bootLock = NULL;
 
+static void configWorkerTask(void* pvParameters) {
+    while(true) {
+        configTick();
+        sysHealthReport(HB_BIT_CONFIG);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 static void restartTask(int index);
 
 
 // Alerts are now managed by NotificationManager
 
-// ---------------------------------------------------------------------------
-// Alarm Event Handler — sends SMS alerts
-// ---------------------------------------------------------------------------
 static void onAlarmEvent(const AlarmEventInfo& info)
 {
-    sysCtx.notificationManager->dispatch(info, &sysCtx);
+    notifMgr.dispatch(info);
+}
+
+void alarmSendAlert(const char* message)
+{
+    // Bridge to unified notification distribution
+    notifMgr.broadcast(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -77,7 +95,7 @@ static void onAlarmEvent(const AlarmEventInfo& info)
 // ---------------------------------------------------------------------------
 void alarmQueueReply(const char* phone, const char* message)
 {
-    sysCtx.notificationManager->queueReply(phone, message);
+    notifMgr.queueReply(phone, message);
 }
 
 // ---------------------------------------------------------------------------
@@ -86,31 +104,29 @@ void alarmQueueReply(const char* phone, const char* message)
 
 static void zoneTask(void* pvParameters)
 {
-    SystemContext* ctx = (SystemContext*)pvParameters;
     TickType_t lastWakeTime = xTaskGetTickCount();
     const TickType_t period = pdMS_TO_TICKS(INPUT_SCAN_INTERVAL_MS);
-
-    while (true) {
-        // Wait for Boot Lock (Core 0 must finish setup)
+    
+    while(true) {
+        // Wait for Boot Lock
         if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
-        if (bootLock) xSemaphoreGive(bootLock); // Release again for other tasks
+        if (bootLock) xSemaphoreGive(bootLock);
 
         sysHealthReport(HB_BIT_ZONE); 
 
         uint16_t inputs = 0;
-        if (!ioExpanderReadInputs(&inputs)) {
-            // Bus busy or faulted: skip update to fail-secure
+        if (!ioSvc.readInputs(&inputs)) {
             vTaskDelayUntil(&lastWakeTime, period);
             continue;
         }
-        zonesUpdate(inputs);
+        zoneMgr.update(inputs);
 
-        bool currentAllClear = zonesAllClear();
-        AlarmState st = ctx->alarmController->getState();
+        bool currentAllClear = zoneMgr.areAllClear();
+        AlarmState st = almCtrl.getState();
         bool isArmedOrActive = (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME ||
                                 st == ALARM_TRIGGERED  || st == ALARM_ENTRY_DELAY);
         if (currentAllClear && !lastAllClear && isArmedOrActive) {
-            ctx->alarmController->broadcast(smsCmdGetRecoveryText());
+            almCtrl.broadcast(smsProc.getRecoveryText());
         }
         lastAllClear = currentAllClear;
 
@@ -120,7 +136,6 @@ static void zoneTask(void* pvParameters)
 
 static void netWorkerTask(void* pvParameters)
 {
-    SystemContext* ctx = (SystemContext*)pvParameters;
     while (true) {
         // Wait for Boot Lock
         if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
@@ -128,8 +143,8 @@ static void netWorkerTask(void* pvParameters)
 
         sysHealthReport(HB_BIT_NET); 
 
-        ctx->sms->update(); 
-        smsCmdUpdate();
+        smsSvc.update(); 
+        smsProc.update();
         // Safe reset: if we've been stable for 10 minutes, clear boot counter
         if (millis() > 600000 && bootCount > 0) {
             bootCount = 0;
@@ -142,7 +157,6 @@ static void netWorkerTask(void* pvParameters)
 
 static void mqttWorkerTask(void* pvParameters)
 {
-    SystemContext* ctx = (SystemContext*)pvParameters;
     while (true) {
         // Wait for Boot Lock
         if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
@@ -150,8 +164,7 @@ static void mqttWorkerTask(void* pvParameters)
 
         sysHealthReport(HB_BIT_MQTT); 
 
-        uint32_t now = millis();
-        ctx->mqtt->update();
+        mqttSvc.update();
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -166,30 +179,32 @@ static void cliWorkerTask(void* pvParameters)
 
         sysHealthReport(HB_BIT_CLI); 
 
-        cliUpdate();
+        serialCli.update();
+
         vTaskDelay(pdMS_TO_TICKS(10)); 
     }
 }
 
 static void alertWorkerTask(void* pvParameters)
 {
-    SystemContext* ctx = (SystemContext*)pvParameters;
     while (true) {
         // Wait for Boot Lock
         if (bootLock) xSemaphoreTake(bootLock, portMAX_DELAY);
         if (bootLock) xSemaphoreGive(bootLock);
 
         sysHealthReport(HB_BIT_ALERT); 
-        ctx->notificationManager->update(); 
+        notifMgr.update(); 
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
 static void maintTask(void* pvParameters)
 {
-    SystemContext* ctx = (SystemContext*)pvParameters;
     int lastFiredMin = -1;
     uint32_t lastHbRecord = 0;
+    uint32_t lowHeapStartMs = 0;
+    const uint32_t HEAP_CRITICAL_THRESHOLD = 32768; // 32KB
+    const uint32_t HEAP_SURVIVAL_WINDOW_MS = 10000; // 10 seconds
 
     while (true) {
         sysHealthReport(HB_BIT_MAINT);
@@ -199,7 +214,7 @@ static void maintTask(void* pvParameters)
         if (now - lastHbRecord >= 2000) {
             lastHbRecord = now;
             if (configGetHeartbeatEnabled()) {
-                AlarmState st = ctx->alarmController->getState();
+                AlarmState st = almCtrl.getState();
                 if (st == ALARM_ARMED_AWAY || st == ALARM_ARMED_HOME) {
                     digitalWrite(HEARTBEAT_LED_PIN, HIGH);
                     digitalWrite(HEARTBEAT_BUZZER_PIN, HIGH);
@@ -210,7 +225,20 @@ static void maintTask(void* pvParameters)
             }
         }
 
-        // 2. Scheduler Check (every minute)
+        // 2. Resource Watchdog (Heap Sentinel)
+        uint32_t freeHeap = esp_get_free_heap_size();
+        if (freeHeap < HEAP_CRITICAL_THRESHOLD) {
+            if (lowHeapStartMs == 0) lowHeapStartMs = now;
+            else if (now - lowHeapStartMs > HEAP_SURVIVAL_WINDOW_MS) {
+                LOG_ERROR(TAG, "RESOURCE EXHAUSTED: Heap at %u bytes. Forced reboot for stability.", freeHeap);
+                delay(500);
+                ESP.restart();
+            }
+        } else {
+            lowHeapStartMs = 0;
+        }
+
+        // 3. Scheduler Check (every minute)
         struct tm timeinfo;
         if (getLocalTime(&timeinfo, 10)) {
             int currentMin = timeinfo.tm_min;
@@ -219,19 +247,19 @@ static void maintTask(void* pvParameters)
                 configGetSchedule(timeinfo.tm_wday, aHr, aMin, dHr, dMin);
 
                 if (aHr != -1 && aMin != -1 && timeinfo.tm_hour == aHr && currentMin == aMin) {
-                    AlarmState st = ctx->alarmController->getState();
+                    AlarmState st = almCtrl.getState();
                     if (st == ALARM_DISARMED) {
                         LOG_INFO(TAG, "Auto-Arming (%02d:%02d)", aHr, aMin);
-                        if (configGetScheduleMode() == ALARM_ARMED_HOME) ctx->alarmController->armHomeInternal();
-                        else ctx->alarmController->armAwayInternal();
+                        if (configGetScheduleMode() == ALARM_ARMED_HOME) almCtrl.armHomeInternal();
+                        else almCtrl.armAwayInternal();
                         lastFiredMin = currentMin;
                     }
                 }
                 else if (dHr != -1 && dMin != -1 && timeinfo.tm_hour == dHr && currentMin == dMin) {
-                    AlarmState st = ctx->alarmController->getState();
+                    AlarmState st = almCtrl.getState();
                     if (st != ALARM_DISARMED) {
                         LOG_INFO(TAG, "Auto-Disarming (%02d:%02d)", dHr, dMin);
-                        ctx->alarmController->disarmInternal();
+                        almCtrl.disarmInternal();
                         lastFiredMin = currentMin;
                     }
                 }
@@ -268,11 +296,11 @@ void setup()
         LOG_ERROR(TAG, "FATAL: Recursive boot loop detected! Entering RECOVERY MODE.");
         recoveryMode = true;
         // In recovery mode, we MUST still init I/O for CLI to work safely
-        ioExpanderInit();
-        configInit(&sysCtx);
-        cliInit(&sysCtx);
+        ioSvc.init(NULL);
+        configInit(&almCtrl, &zoneMgr, &ioSvc, &notifMgr, &mqttSvc, &onvifSvc, &phoneAuth, &smsProc, &smsSvc, &whatsappSvc, &telegramSvc);
+        serialCli.init(&almCtrl, &zoneMgr, &ioSvc, &smsSvc, &whatsappSvc, &smsProc, &phoneAuth);
         while(true) {
-            cliUpdate();
+            serialCli.update();
             // Slow "Distress" blink
             digitalWrite(HEARTBEAT_LED_PIN, HIGH);
             delay(100);
@@ -290,19 +318,11 @@ void setup()
     Serial.println("  Industrial Security Controller (ESP32)");
     Serial.println("========================================");
 
-    // Initialize System Context
-    sysCtx.i2cBusMutex = xSemaphoreCreateMutex();
-    sysCtx.notificationManager = &notifMgr;
-    sysCtx.alarmController = &almCtrl;
-    sysCtx.sms = &smsSvc;
-    sysCtx.mqtt = &mqttSvc;
-    sysCtx.telegram = &telegramSvc;
-    sysCtx.whatsapp = &whatsappSvc;
-    sysCtx.onvif = &onvifSvc;
-    sysCtx.taskHeartbeatBits = &taskHeartbeatBits;
+    // Initialize System Context - REMOVED (PURGED)
+    SemaphoreHandle_t i2cBusMutex = xSemaphoreCreateMutex();
 
-    configInit(&sysCtx);
-    sysCtx.notificationManager->init(&sysCtx);
+    configInit(&almCtrl, &zoneMgr, &ioSvc, &notifMgr, &mqttSvc, &onvifSvc, &phoneAuth, &smsProc, &smsSvc, &whatsappSvc, &telegramSvc);
+    notifMgr.init();
 
     pinMode(HEARTBEAT_LED_PIN, OUTPUT);
     digitalWrite(HEARTBEAT_LED_PIN, LOW);
@@ -310,7 +330,7 @@ void setup()
     digitalWrite(HEARTBEAT_BUZZER_PIN, LOW);
 
     LOG_INFO(TAG, "Initializing Hardware...");
-    if (!ioExpanderInit()) {
+    if (!ioSvc.init(i2cBusMutex)) {
         LOG_ERROR(TAG, "FATAL: I/O Expander offline. Entering PANIC mode.");
         while (true) {
             digitalWrite(HEARTBEAT_LED_PIN, HIGH);
@@ -320,32 +340,35 @@ void setup()
             delay(100);
         }
     }
+    zoneMgr.init(&ioSvc);
 
     // CRITICAL: Load config BEFORE initializing alarm logic
-    configLoad(&sysCtx);
+    configLoad(&almCtrl, &zoneMgr, &ioSvc, &notifMgr, &mqttSvc, &onvifSvc, &phoneAuth, &smsProc, &smsSvc, &whatsappSvc, &telegramSvc);
     
     // Initialize Alarm Logic
-    sysCtx.alarmController->init(&sysCtx);
-    sysCtx.alarmController->setCallback(onAlarmEvent);
+    almCtrl.init(&zoneMgr, &notifMgr, &ioSvc);
+    almCtrl.setCallback(onAlarmEvent);
 
-    sysCtx.sms->init(&sysCtx);
-    sysCtx.sms->setCredentials(DEFAULT_ROUTER_IP, DEFAULT_ROUTER_USER, DEFAULT_ROUTER_PASS);
+    smsSvc.init(&notifMgr, &smsProc);
+    phoneAuth.init();
+    smsProc.init(&almCtrl, &zoneMgr, &ioSvc, &notifMgr, &mqttSvc, &onvifSvc, &whatsappSvc, &telegramSvc, &phoneAuth);
     
-    smsCmdInit(&sysCtx);
+    smsSvc.setCredentials(DEFAULT_ROUTER_IP, DEFAULT_ROUTER_USER, DEFAULT_ROUTER_PASS);
+    
     networkInit();
-    sysCtx.whatsapp->init(&sysCtx);
-    webServerInit(&sysCtx);
-    cliInit(&sysCtx);
-    sysCtx.mqtt->init(&sysCtx);
-    sysCtx.telegram->init(&sysCtx);
-    sysCtx.onvif->init(&sysCtx);
+    whatsappSvc.init(&notifMgr);
+    webServerInit(&almCtrl, &zoneMgr, &ioSvc, &notifMgr, &mqttSvc, &onvifSvc, &phoneAuth, &smsProc, &whatsappSvc, &telegramSvc);
+    serialCli.init(&almCtrl, &zoneMgr, &ioSvc, &smsSvc, &whatsappSvc, &smsProc, &phoneAuth);
+    mqttSvc.init(&almCtrl, &zoneMgr, &ioSvc, &notifMgr);
+    telegramSvc.init(&notifMgr);
+    onvifSvc.init(&zoneMgr);
 
-    xTaskCreatePinnedToCore(zoneTask, "ZoneTask", 3072, &sysCtx, 5, &taskHandles[0], 1);
-    xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 4096, &sysCtx, 1, &taskHandles[1], 0);
-    xTaskCreatePinnedToCore(mqttWorkerTask, "MQTTWorker", 4096, &sysCtx, 1, &taskHandles[2], 0);
-    xTaskCreatePinnedToCore(maintTask, "MaintTask", 3072, &sysCtx, 1, &taskHandles[3], 1);
-    xTaskCreatePinnedToCore(cliWorkerTask, "CLITask", 4096, &sysCtx, 1, &taskHandles[4], 0);
-    xTaskCreatePinnedToCore(alertWorkerTask, "AlertWorker", 4096, &sysCtx, 1, &taskHandles[5], 0);
+    xTaskCreatePinnedToCore(zoneTask, "ZoneTask", 3072, NULL, 5, &taskHandles[0], 1);
+    xTaskCreatePinnedToCore(netWorkerTask, "NetWorker", 4096, NULL, 1, &taskHandles[1], 0);
+    xTaskCreatePinnedToCore(mqttWorkerTask, "MQTTWorker", 4096, NULL, 1, &taskHandles[2], 0);
+    xTaskCreatePinnedToCore(maintTask, "MaintTask", 3072, NULL, 1, &taskHandles[3], 1);
+    xTaskCreatePinnedToCore(cliWorkerTask, "CLITask", 4096, NULL, 1, &taskHandles[4], 0);
+    xTaskCreatePinnedToCore(alertWorkerTask, "AlertWorker", 4096, NULL, 1, &taskHandles[5], 0);
 
     xSemaphoreGive(bootLock); // Release workers (Total Sync achieved)
     networkDiscoveryInit();   // Enable .local discovery
@@ -360,9 +383,9 @@ void setup()
 
 static void restartTask(int index)
 {
-    if (index < 0 || index >= 6) return;
+    if (index < 0 || index >= 7) return;
     
-    const char* names[] = { "ZoneTask", "NetWorker", "MQTTWorker", "MaintTask", "CLITask", "AlertWorker" };
+    const char* names[] = {"ZoneTask", "NetWorker", "MQTTWorker", "MaintTask", "CLITask", "AlertWorker", "ConfigTask"};
     
     if (restartCount[index] >= 3) {
         LOG_ERROR(TAG, "Task %s failed too many times. Manual intervention or Global Reboot required.", names[index]);
@@ -374,7 +397,7 @@ static void restartTask(int index)
     // We MUST perform a full hardware reboot in this case.
     TaskHandle_t h = taskHandles[index];
     if (h != NULL) {
-        if (configGetLockOwner() == h || ioExpanderGetLockOwner() == h) {
+        if (configGetLockOwner() == h || ioSvc.getLockOwner() == h) {
             LOG_ERROR(TAG, "WATCHDOG: Task %s holds CRITICAL MUTEX. Forced hardware reboot to clear lock.", names[index]);
             delay(500); // Allow logs to flush
             ESP.restart();
@@ -385,24 +408,26 @@ static void restartTask(int index)
     }
 
     switch(index) {
-        case 0: xTaskCreatePinnedToCore(zoneTask, names[index], 3072, &sysCtx, 5, &taskHandles[index], 1); break;
-        case 1: xTaskCreatePinnedToCore(netWorkerTask, names[index], 4096, &sysCtx, 1, &taskHandles[index], 0); break;
-        case 2: xTaskCreatePinnedToCore(mqttWorkerTask, names[index], 4096, &sysCtx, 1, &taskHandles[index], 0); break;
-        case 3: xTaskCreatePinnedToCore(maintTask, names[index], 3072, &sysCtx, 1, &taskHandles[index], 1); break;
-        case 4: xTaskCreatePinnedToCore(cliWorkerTask, names[index], 4096, &sysCtx, 1, &taskHandles[index], 0); break;
-        case 5: xTaskCreatePinnedToCore(alertWorkerTask, names[index], 4096, &sysCtx, 1, &taskHandles[index], 0); break;
+        case 0: xTaskCreatePinnedToCore(zoneTask, names[index], 3072, NULL, 5, &taskHandles[index], 1); break;
+        case 1: xTaskCreatePinnedToCore(netWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
+        case 2: xTaskCreatePinnedToCore(mqttWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
+        case 3: xTaskCreatePinnedToCore(maintTask, names[index], 3072, NULL, 1, &taskHandles[index], 1); break;
+        case 4: xTaskCreatePinnedToCore(cliWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
+        case 5: xTaskCreatePinnedToCore(alertWorkerTask, names[index], 4096, NULL, 1, &taskHandles[index], 0); break;
+        case 6: xTaskCreatePinnedToCore(configWorkerTask, names[index], 3072, NULL, 1, &taskHandles[index], 1); break;
     }
 }
 
 void loop()
 {
     uint32_t now = millis();
-    sysCtx.alarmController->update();
+    almCtrl.update();
+    serialCli.update();
     networkUpdate();
 
     if (now - lastGlobalHeartbeatCheck >= 3000) {
         lastGlobalHeartbeatCheck = now;
-        uint8_t currentBits = 0;
+        uint16_t currentBits = 0;
         portENTER_CRITICAL(&heartbeatMux);
         currentBits = taskHeartbeatBits;
         taskHeartbeatBits = 0; 
@@ -416,7 +441,7 @@ void loop()
             LOG_ERROR(TAG, "WATCHDOG: HANG DETECTED! Bits missing: 0x%02X", (uint8_t)(HB_ALL_HEALTHY ^ currentBits));
             
             // Attempt task recovery before giving up
-            for (int i = 0; i < 6; i++) {
+            for (int i = 0; i < 7; i++) {
                 if (!(currentBits & (1 << i))) {
                     restartTask(i);
                 }

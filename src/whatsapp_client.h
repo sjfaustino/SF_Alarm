@@ -1,16 +1,21 @@
 #ifndef SF_ALARM_WHATSAPP_CLIENT_H
 #define SF_ALARM_WHATSAPP_CLIENT_H
 
-#include <Arduino.h>
+#include "notification_provider.h"
 
-struct SystemContext;
+class NotificationManager;
 
-class WhatsappService {
+class WhatsappService : public NotificationProvider {
 public:
     WhatsappService();
-    ~WhatsappService();
+    virtual ~WhatsappService();
 
-    void init(SystemContext* ctx);
+    // NotificationProvider implementation
+    virtual const char* getName() const override { return "WhatsApp"; }
+    virtual bool send(const char* target, const char* message) override;
+    virtual bool isReady() const override { return strlen(_apiKey) > 0; }
+
+    void init(NotificationManager* nm);
     void setConfig(const char* phone, const char* apiKey);
     bool send(const char* message);
 
@@ -18,7 +23,7 @@ public:
     const char* getApiKey() const { return _apiKey; }
 
 private:
-    SystemContext* _ctx;
+    NotificationManager* _nm;
     char _phone[32];
     char _apiKey[32];
     SemaphoreHandle_t _mutex;

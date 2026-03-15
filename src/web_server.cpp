@@ -1,11 +1,12 @@
 #include "web_server.h"
 #include <LittleFS.h>
 #include "config.h"
-#include "io_expander.h"
-#include "alarm_zones.h"
+#include "system_state.h"
+#include "io_service.h"
+#include "zone_manager.h"
 #include "alarm_controller.h"
 #include "notification_manager.h"
-#include "sms_commands.h"
+#include "sms_command_processor.h"
 #include "whatsapp_client.h"
 #include "mqtt_client.h"
 #include "onvif_client.h"
@@ -21,14 +22,33 @@
 
 static const char* TAG = "WEB";
 #include <ArduinoJson.h>
-#include "system_context.h"
-
-static SystemContext* _ctx = nullptr;
+static AlarmController*     _alarm    = nullptr;
+static ZoneManager*         _zones    = nullptr;
+static IoService*           _io       = nullptr;
+static NotificationManager* _nm       = nullptr;
+static MqttService*         _mqtt     = nullptr;
+static OnvifService*        _onvif    = nullptr;
+static PhoneAuthenticator*  _auth     = nullptr;
+static SmsCommandProcessor* _smsProc  = nullptr;
+static WhatsappService*    _whatsapp = nullptr;
+static TelegramService*    _telegram = nullptr;
 
 // ---------------------------------------------------------------------------
 // PsychicHttp Server instance (port 80)
 // ---------------------------------------------------------------------------
 static PsychicHttpServer server;
+
+static uint32_t _failedAttempts = 0;
+static unsigned long _lockoutEnd = 0;
+
+static bool checkGlobalAuthLockout(PsychicResponse* response) {
+    unsigned long now = millis();
+    if (now < _lockoutEnd) {
+        response->send(429, "application/json", "{\"ok\":false,\"msg\":\"System locked due to too many failed attempts. Try again later.\"}");
+        return true;
+    }
+    return false;
+}
 
 // ---------------------------------------------------------------------------
 // Helper: zone state enum → string
@@ -46,49 +66,8 @@ static const char* zoneStateStr(ZoneState s)
 }
 
 // ---------------------------------------------------------------------------
-// Security: IP-based Rate Limiting
+// Zone Type Helper
 // ---------------------------------------------------------------------------
-struct AuthTracker {
-    uint32_t ip;
-    uint32_t lastAttemptMs;
-    uint8_t  failCount;
-};
-static AuthTracker authHistory[8]; // Track last 8 IPs
-static uint8_t authHistoryIdx = 0;
-
-static bool checkRateLimit(uint32_t ip)
-{
-    uint32_t now = millis();
-    for (int i = 0; i < 8; i++) {
-        if (authHistory[i].ip == ip) {
-            // cooldown 5 seconds between attempts from same IP
-            if (now - authHistory[i].lastAttemptMs < 5000) return false;
-            // lockout IP for 1 minute after 5 consecutive failures
-            if (authHistory[i].failCount >= 5 && (now - authHistory[i].lastAttemptMs < 60000)) return false;
-            return true;
-        }
-    }
-    return true;
-}
-
-static void recordAttempt(uint32_t ip, bool success)
-{
-    uint32_t now = millis();
-    for (int i = 0; i < 8; i++) {
-        if (authHistory[i].ip == ip) {
-            authHistory[i].lastAttemptMs = now;
-            if (success) authHistory[i].failCount = 0;
-            else authHistory[i].failCount++;
-            return;
-        }
-    }
-    // New IP
-    authHistory[authHistoryIdx].ip = ip;
-    authHistory[authHistoryIdx].lastAttemptMs = now;
-    authHistory[authHistoryIdx].failCount = success ? 0 : 1;
-    authHistoryIdx = (authHistoryIdx + 1) % 8;
-}
-
 static const char* zoneTypeStr(ZoneType t)
 {
     switch (t) {
@@ -115,69 +94,20 @@ static esp_err_t handleRoot(PsychicRequest* request, PsychicResponse* response)
 // ---------------------------------------------------------------------------
 // GET /api/status — full system status JSON
 // ---------------------------------------------------------------------------
-static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* response)
-{
+static esp_err_t handleApiStatus(PsychicRequest* request, PsychicResponse* response) {
+    if (!request) return ESP_FAIL;
+
     sysHealthReport(HB_BIT_WEB);
+    SystemSnapshot snap;
+    StateManager::capture(_alarm, _zones, _io, _nm, _mqtt, _onvif, snap);
+
     JsonDocument doc;
+    JsonObject root = doc.to<JsonObject>();
+    StateManager::serialize(snap, root);
 
-    JsonObject alarm = doc["alarm"].to<JsonObject>();
-
-    // Security: Local read-only telemetry requires no PIN.
-    // Calling alarmValidatePin() here causes a 5-minute system lockout DDoS vulnerability.
-    
-    alarm["state"]          = _ctx->alarmController->getStateStr();
-    alarm["stateCode"]      = (uint8_t)_ctx->alarmController->getState();
-    alarm["delayRemaining"] = _ctx->alarmController->getDelayRemaining();
-
-    // Zones
-    JsonArray zones = doc["zones"].to<JsonArray>();
-    for (int i = 0; i < MAX_ZONES; i++) {
-        const ZoneInfo* zi = zonesGetInfo(i);
-        if (!zi) continue;
-
-        JsonObject z = zones.add<JsonObject>();
-        z["index"]     = i;
-        z["name"]      = zi->config.name;
-        z["type"]      = zoneTypeStr(zi->config.type);
-        z["typeCode"]  = (uint8_t)zi->config.type;
-        z["wiring"]    = zi->config.wiring == ZONE_NC ? "NC" : "NO";
-        z["enabled"]   = zi->config.enabled;
-        z["state"]     = zoneStateStr(zi->state);
-        z["stateCode"] = (uint8_t)zi->state;
-        z["rawInput"]  = zi->rawInput;
-    }
-
-    // Outputs
-    doc["outputs"] = ioExpanderGetOutputs();
-
-    // Network
-    JsonObject net = doc["network"].to<JsonObject>();
-    net["ip"]        = networkGetIP();
-    net["rssi"]      = networkGetRSSI();
-    net["connected"] = networkIsConnected();
-
-    // System
-    JsonObject sys = doc["system"].to<JsonObject>();
-    sys["uptime"]   = esp_timer_get_time() / 1000000ULL;
-    sys["freeHeap"] = ESP.getFreeHeap();
-    sys["version"]  = FW_VERSION_STR;
-
-    // --- Alerts/WhatsApp (Safe status only) ---
-    JsonObject alerts = doc["alerts"].to<JsonObject>();
-    alerts["mode"] = (int)_ctx->notificationManager->getChannels();
-
-    // --- MQTT (Safe status only) ---
-    JsonObject mqtt = doc["mqtt"].to<JsonObject>();
-    mqtt["connected"] = _ctx->mqtt->isConnected();
-
-    // --- ONVIF (Safe status only) ---
-    JsonObject onvif = doc["onvif"].to<JsonObject>();
-    onvif["connected"]  = _ctx->onvif->isConnected();
-
-    // Stream serialization directly to the response (Zero-Heap)
-    PsychicStreamResponse stream(request->response(), "application/json");
-    serializeJson(doc, stream);
-    return stream.send();
+    String body;
+    serializeJson(doc, body);
+    return response->send(200, "application/json", body.c_str());
 }
 
 // ---------------------------------------------------------------------------
@@ -192,39 +122,44 @@ static esp_err_t handleApiGetSettings(PsychicRequest* request, PsychicResponse* 
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
+    if (checkGlobalAuthLockout(response)) return ESP_OK;
+
     const char* pin = doc["pin"] | "";
-    bool valid = _ctx->alarmController->validatePin(pin);
+    bool valid = _alarm->validatePin(pin);
     // Scrub PIN buffer if it exists in doc overhead
     if (doc["pin"].is<JsonVariant>()) doc["pin"] = "****"; 
 
     if (!valid) {
+        _failedAttempts++;
+        _lockoutEnd = millis() + (std::min(_failedAttempts, (uint32_t)30) * 1000);
         doc.clear(); // Explicitly clear to zero-out internal pointers/refs
         return response->send(403, "application/json", "{\"ok\":false,\"msg\":\"ACCESS DENIED: PIN required\"}");
     }
+    _failedAttempts = 0;
 
     JsonDocument reply;
     reply["ok"] = true;
 
     JsonObject alerts = reply["alerts"].to<JsonObject>();
-    alerts["mode"] = _ctx->notificationManager->getChannels();
-    alerts["waPhone"] = _ctx->whatsapp->getPhone();
-    alerts["waApiKey"] = _ctx->whatsapp->getApiKey();
-    alerts["tgToken"] = _ctx->telegram->getToken();
-    alerts["tgChatId"] = _ctx->telegram->getChatId();
+    alerts["mode"] = _nm->getChannels();
+    alerts["waPhone"] = _whatsapp->getPhone();
+    alerts["waApiKey"] = _whatsapp->getApiKey();
+    alerts["tgToken"] = _telegram->getToken();
+    alerts["tgChatId"] = _telegram->getChatId();
 
     JsonObject mqtt = reply["mqtt"].to<JsonObject>();
-    mqtt["server"] = _ctx->mqtt->getServer();
-    mqtt["port"] = _ctx->mqtt->getPort();
-    mqtt["user"] = _ctx->mqtt->getUser();
-    mqtt["pass"] = _ctx->mqtt->getPass();
-    mqtt["clientId"] = _ctx->mqtt->getClientId();
+    mqtt["server"] = _mqtt->getServer();
+    mqtt["port"] = _mqtt->getPort();
+    mqtt["user"] = _mqtt->getUser();
+    mqtt["pass"] = _mqtt->getPass();
+    mqtt["clientId"] = _mqtt->getClientId();
 
     JsonObject onvif = reply["onvif"].to<JsonObject>();
-    onvif["host"]       = _ctx->onvif->getHost();
-    onvif["port"]       = _ctx->onvif->getPort();
-    onvif["user"]       = _ctx->onvif->getUser();
-    onvif["pass"]       = _ctx->onvif->getPass();
-    onvif["targetZone"] = _ctx->onvif->getTargetZone();
+    onvif["host"]       = _onvif->getHost();
+    onvif["port"]       = _onvif->getPort();
+    onvif["user"]       = _onvif->getUser();
+    onvif["pass"]       = _onvif->getPass();
+    onvif["targetZone"] = _onvif->getTargetZone();
 
     String out;
     serializeJson(reply, out);
@@ -244,27 +179,32 @@ static esp_err_t handlePostAlerts(PsychicRequest* request, PsychicResponse* resp
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
+    if (checkGlobalAuthLockout(response)) return ESP_OK;
+
     // PIN required — changing alert destination is a security-sensitive operation
     const char* pin = doc["pin"] | "";
-    bool valid = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
+    bool valid = (strlen(pin) > 0 && _alarm->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (!valid) {
+        _failedAttempts++;
+        _lockoutEnd = millis() + (std::min(_failedAttempts, (uint32_t)30) * 1000);
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
+    _failedAttempts = 0;
 
     uint8_t channels = doc["mode"] | (uint8_t)CH_SMS;
     const char* phone = doc["phone"];
     const char* apikey = doc["apikey"];
 
-    _ctx->notificationManager->setChannels(channels);
-    _ctx->whatsapp->setConfig(phone, apikey);
+    _nm->setChannels(channels);
+    _whatsapp->setConfig(phone, apikey);
     configSaveWhatsapp();
 
     const char* tgToken = doc["tgToken"] | "";
     const char* tgChatId = doc["tgChatId"] | "";
     
-    _ctx->telegram->setConfig(tgToken, tgChatId);
+    _telegram->setConfig(tgToken, tgChatId);
     configSaveTelegram();
     doc.clear(); // Scavenge
 
@@ -283,14 +223,19 @@ static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* respon
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
+    if (checkGlobalAuthLockout(response)) return ESP_OK;
+
     // PIN required — changing broker redirects all alarm events
     const char* pin = doc["pin"] | "";
-    bool valid = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
+    bool valid = (strlen(pin) > 0 && _alarm->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (!valid) {
+        _failedAttempts++;
+        _lockoutEnd = millis() + (std::min(_failedAttempts, (uint32_t)30) * 1000);
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
+    _failedAttempts = 0;
 
     const char* server = doc["server"] | "";
     uint16_t port = doc["port"] | 1883;
@@ -298,7 +243,7 @@ static esp_err_t handlePostMqtt(PsychicRequest* request, PsychicResponse* respon
     const char* pass = doc["pass"] | "";
     const char* clientId = doc["clientId"] | "SF_Alarm";
 
-    _ctx->mqtt->setConfig(server, port, user, pass, clientId);
+    _mqtt->setConfig(server, port, user, pass, clientId);
     configSaveMqtt();
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"MQTT settings saved\"}");
@@ -316,14 +261,19 @@ static esp_err_t handlePostOnvif(PsychicRequest* request, PsychicResponse* respo
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid or nested JSON\"}");
     }
 
+    if (checkGlobalAuthLockout(response)) return ESP_OK;
+
     // PIN required — changing camera config affects motion detection source
     const char* pin = doc["pin"] | "";
-    bool valid = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
+    bool valid = (strlen(pin) > 0 && _alarm->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (!valid) {
+        _failedAttempts++;
+        _lockoutEnd = millis() + (std::min(_failedAttempts, (uint32_t)30) * 1000);
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
     }
+    _failedAttempts = 0;
 
     const char* host = doc["host"] | "";
     uint16_t port    = doc["port"] | 80;
@@ -331,7 +281,7 @@ static esp_err_t handlePostOnvif(PsychicRequest* request, PsychicResponse* respo
     const char* pass = doc["pass"] | "";
     uint8_t zone     = doc["targetZone"] | 1;
 
-    _ctx->onvif->setServer(host, port, user, pass, zone);
+    _onvif->setServer(host, port, user, pass, zone);
     configSaveOnvif();
 
     return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Camera settings saved\"}");
@@ -357,18 +307,7 @@ static esp_err_t handleApiArm(PsychicRequest* request, PsychicResponse* response
     const char* mode = doc["mode"] | "away";
 
     bool ok = false;
-    uint32_t remoteIp = request->client()->remoteIP();
-
-    bool valid = _ctx->alarmController->validatePin(pin);
-    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
-
-    if (strcmp(mode, "home") == 0) {
-        ok = _ctx->alarmController->armHome(pin);
-    } else {
-        ok = _ctx->alarmController->armAway(pin);
-    }
-
-    recordAttempt(remoteIp, ok);
+    bool valid = _alarm->validatePin(pin);
 
     if (ok) {
         doc.clear();
@@ -396,16 +335,8 @@ static esp_err_t handleApiDisarm(PsychicRequest* request, PsychicResponse* respo
     }
 
     const char* pin = doc["pin"] | "";
-    uint32_t remoteIp = request->client()->remoteIP();
 
-    if (!checkRateLimit(remoteIp)) {
-        return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts. Wait 1 minute.\"}");
-    }
-
-    bool valid = _ctx->alarmController->disarm(pin);
-    // Note: alarmDisarm was renamed to disarm in the class
-    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
-    recordAttempt(remoteIp, valid);
+    bool valid = _alarm->disarm(pin);
 
     if (valid) {
         doc.clear();
@@ -432,15 +363,8 @@ static esp_err_t handleApiMute(PsychicRequest* request, PsychicResponse* respons
     }
 
     const char* pin = doc["pin"] | "";
-    uint32_t remoteIp = request->client()->remoteIP();
 
-    if (!checkRateLimit(remoteIp)) {
-        return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts.\"}");
-    }
-
-    bool valid = _ctx->alarmController->muteSiren(pin);
-    if (doc["pin"].is<const char*>()) doc["pin"] = "****";
-    recordAttempt(remoteIp, valid);
+    bool valid = _alarm->muteSiren(pin);
 
     if (valid) {
         return response->send(200, "application/json", "{\"ok\":true,\"msg\":\"Siren muted\"}");
@@ -467,15 +391,9 @@ static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* respo
 
     // Require PIN for zone bypass/unbypass
     const char* pin = doc["pin"] | "";
-    uint32_t remoteIp = request->client()->remoteIP();
     
-    if (!checkRateLimit(remoteIp)) {
-        return response->send(429, "application/json", "{\"ok\":false,\"msg\":\"Too many attempts.\"}");
-    }
-
-    bool pinOk = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
+    bool pinOk = (strlen(pin) > 0 && _alarm->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
-    recordAttempt(remoteIp, pinOk);
 
     if (!pinOk) {
         return response->send(200, "application/json", "{\"ok\":false,\"msg\":\"PIN required\"}");
@@ -488,7 +406,7 @@ static esp_err_t handleApiBypass(PsychicRequest* request, PsychicResponse* respo
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid zone index\"}");
     }
 
-    zonesSetBypassed((uint8_t)zone, bypass);
+    _zones->setBypassed((uint8_t)zone, bypass);
 
     char resp[80];
     snprintf(resp, sizeof(resp), "{\"ok\":true,\"msg\":\"Zone %d %s\"}", zone + 1, bypass ? "bypassed" : "unbypassed");
@@ -504,7 +422,7 @@ static esp_err_t handleApiOutputs(PsychicRequest* request, PsychicResponse* resp
     // Calling alarmValidatePin() here causes a 5-minute system lockout DDoS vulnerability.
     
     char resp[48];
-    snprintf(resp, sizeof(resp), "{\"outputs\":%u}", ioExpanderGetOutputs());
+    snprintf(resp, sizeof(resp), "{\"outputs\":%u}", _io->getOutputs());
     return response->send(200, "application/json", resp);
 }
 
@@ -522,7 +440,7 @@ static esp_err_t handleApiOutput(PsychicRequest* request, PsychicResponse* respo
 
     // Require PIN for output control
     const char* pin = doc["pin"] | "";
-    bool valid = (strlen(pin) > 0 && _ctx->alarmController->validatePin(pin));
+    bool valid = (strlen(pin) > 0 && _alarm->validatePin(pin));
     if (doc["pin"].is<const char*>()) doc["pin"] = "****";
 
     if (!valid) {
@@ -536,7 +454,7 @@ static esp_err_t handleApiOutput(PsychicRequest* request, PsychicResponse* respo
         return response->send(400, "application/json", "{\"ok\":false,\"msg\":\"Invalid channel\"}");
     }
 
-    ioExpanderSetOutput((uint8_t)ch, state);
+    _io->setOutput((uint8_t)ch, state);
 
     char resp[64];
     snprintf(resp, sizeof(resp), "{\"ok\":true,\"msg\":\"Output %d %s\"}", ch + 1, state ? "ON" : "OFF");
@@ -546,9 +464,22 @@ static esp_err_t handleApiOutput(PsychicRequest* request, PsychicResponse* respo
 // ---------------------------------------------------------------------------
 // Public: webServerInit()
 // ---------------------------------------------------------------------------
-void webServerInit(SystemContext* ctx)
+void webServerInit(AlarmController* alarm, ZoneManager* zones, IoService* io,
+                  NotificationManager* nm, MqttService* mqtt, OnvifService* onvif,
+                  PhoneAuthenticator* auth, SmsCommandProcessor* smsProc,
+                  WhatsappService* whatsapp, TelegramService* telegram)
 {
-    _ctx = ctx;
+    _alarm = alarm;
+    _zones = zones;
+    _io = io;
+    _nm = nm;
+    _mqtt = mqtt;
+    _onvif = onvif;
+    _auth = auth;
+    _smsProc = smsProc;
+    _whatsapp = whatsapp;
+    _telegram = telegram;
+
     if (!LittleFS.begin(true)) {
         LOG_ERROR(TAG, "LittleFS Mount Failed");
     }

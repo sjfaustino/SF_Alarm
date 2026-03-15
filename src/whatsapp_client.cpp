@@ -2,14 +2,13 @@
 #include <HTTPClient.h>
 #include "logging.h"
 #include "network.h"
-#include "system_context.h"
 #include "notification_manager.h"
 
 static const char* TAG = "WA";
 
 WhatsappService* WhatsappService::_instance = nullptr;
 
-WhatsappService::WhatsappService() : _ctx(nullptr), _mutex(NULL) {
+WhatsappService::WhatsappService() : _nm(nullptr), _mutex(NULL) {
     _instance = this;
     memset(_phone, 0, sizeof(_phone));
     memset(_apiKey, 0, sizeof(_apiKey));
@@ -37,12 +36,12 @@ size_t WhatsappService::urlEncodeTo(const char* src, char* dest, size_t destSize
     return d;
 }
 
-void WhatsappService::init(SystemContext* ctx) {
-    _ctx = ctx;
+void WhatsappService::init(NotificationManager* nm) {
+    _nm = nm;
     if (_mutex == NULL) {
         _mutex = xSemaphoreCreateMutex();
     }
-    _ctx->notificationManager->registerProvider(CH_WA, "WhatsApp", WhatsappService::staticSendWrapper);
+    _nm->registerProvider(CH_WA, this);
     LOG_INFO(TAG, "WhatsApp Service initialized");
 }
 
@@ -60,17 +59,16 @@ void WhatsappService::setConfig(const char* phone, const char* apiKey) {
     }
 }
 
-bool WhatsappService::staticSendWrapper(const char* message) {
-    if (_instance) return _instance->send(message);
-    return false;
-}
-
-bool WhatsappService::send(const char* message) {
+bool WhatsappService::send(const char* target, const char* message) {
     char phone[32];
     char apiKey[32];
     
     if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        strncpy(phone, _phone, sizeof(phone)-1);
+        if (target && strlen(target) > 0) {
+            strncpy(phone, target, sizeof(phone)-1);
+        } else {
+            strncpy(phone, _phone, sizeof(phone)-1);
+        }
         phone[sizeof(phone)-1] = '\0';
         strncpy(apiKey, _apiKey, sizeof(apiKey)-1);
         apiKey[sizeof(apiKey)-1] = '\0';
@@ -80,6 +78,10 @@ bool WhatsappService::send(const char* message) {
     }
 
     return internalSend(phone, apiKey, message);
+}
+
+bool WhatsappService::send(const char* message) {
+    return send(nullptr, message);
 }
 
 bool WhatsappService::internalSend(const char* phone, const char* apiKey, const char* message) {

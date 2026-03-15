@@ -1,20 +1,19 @@
 #include "alarm_controller.h"
-#include "io_expander.h"
+#include "io_service.h"
+#include "zone_manager.h"
 #include "config.h"
 #include <Arduino.h>
 #include "logging.h"
 #include <string.h>
 #include "config_manager.h"
-#include "alarm_zones.h"
-#include "system_context.h"
 #include "notification_manager.h"
 #include "network.h"
 
 static const char* TAG = "ALM";
-static AlarmController* g_instance = nullptr;
 
 AlarmController::AlarmController()
-    : _ctx(nullptr), _exitDelaySec(DEFAULT_EXIT_DELAY_S), _entryDelaySec(DEFAULT_ENTRY_DELAY_S),
+    : _zones(nullptr), _notificationManager(nullptr), _io(nullptr),
+      _exitDelaySec(DEFAULT_EXIT_DELAY_S), _entryDelaySec(DEFAULT_ENTRY_DELAY_S),
       _sirenDurationSec(DEFAULT_SIREN_DURATION_S), _sirenOutputChannel(0),
       _currentState(ALARM_DISARMED), _returnState(ALARM_DISARMED), _stateMutex(NULL),
       _eventCallback(nullptr), _sirenActive(false), _sirenMuted(false),
@@ -32,18 +31,21 @@ AlarmController::~AlarmController() {
     }
 }
 
-void AlarmController::init(SystemContext* ctx) {
-    _ctx = ctx;
-    g_instance = this;
+void AlarmController::init(ZoneManager* zones, NotificationManager* nm, IoService* io) {
+    _zones = zones;
+    _notificationManager = nm;
+    _io = io;
+
     if (_stateMutex == NULL) {
         _stateMutex = xSemaphoreCreateRecursiveMutex();
     }
     
-    // Wire up zone events
-    zonesSetCallback([](uint8_t zone, ZoneState state) {
-        if (g_instance) g_instance->update(); 
-        // The actual logic is in the zone task, but we can hook if needed
-    });
+    // Wire up zone events via direct registration (Observer Pattern)
+    if (_zones) {
+        _zones->setCallback([this](uint8_t zone, ZoneState state) {
+            this->onZoneEvent(zone, state);
+        });
+    }
 }
 
 void AlarmController::setCallback(AlarmEventCallback cb) {
@@ -56,11 +58,52 @@ void AlarmController::fireEvent(AlarmEvent event, int8_t zoneId, const char* det
         _eventCallback(info);
     }
     
-    // Auto-dispatch to notification manager if context exists
-    if (_ctx && _ctx->notificationManager) {
+    // Auto-dispatch to notification manager if it exists
+    if (_notificationManager) {
         AlarmEventInfo info = {event, zoneId, details};
-        _ctx->notificationManager->dispatch(info, _ctx);
+        _notificationManager->dispatch(info);
     }
+}
+
+void AlarmController::onZoneEvent(uint8_t zoneId, ZoneState state) {
+    if (xSemaphoreTakeRecursive((QueueHandle_t)_stateMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    
+    uint32_t now = millis();
+    ZoneConfig* config = (_zones) ? _zones->getConfig(zoneId) : nullptr;
+    if (!config) { xSemaphoreGiveRecursive((QueueHandle_t)_stateMutex); return; }
+
+    if (state == ZONE_TAMPER) {
+        fireEvent(EVT_TAMPER, zoneId, config->name);
+        if (_currentState != ALARM_DISARMED) {
+            _currentState = ALARM_TRIGGERED;
+            sirenOn(zoneId, config->name);
+        }
+    } else if (state == ZONE_TRIGGERED) {
+        fireEvent(EVT_ZONE_TRIGGERED, zoneId, config->name);
+        
+        if (_currentState == ALARM_ARMED_AWAY || _currentState == ALARM_ARMED_HOME) {
+            if (config->type == ZONE_DELAYED) {
+                _currentState = ALARM_ENTRY_DELAY;
+                _delayStartMs = now;
+                _triggeringZone = zoneId;
+                fireEvent(EVT_ENTRY_DELAY, zoneId, config->name);
+            } else if (config->type == ZONE_INSTANT || config->type == ZONE_24H) {
+                _currentState = ALARM_TRIGGERED;
+                _triggeringZone = zoneId;
+                sirenOn(zoneId, config->name);
+                fireEvent(EVT_ALARM_TRIGGERED, zoneId, config->name);
+            }
+        } else if (_currentState == ALARM_DISARMED && config->type == ZONE_24H) {
+             _currentState = ALARM_TRIGGERED;
+             _triggeringZone = zoneId;
+             sirenOn(zoneId, config->name);
+             fireEvent(EVT_ALARM_TRIGGERED, zoneId, config->name);
+        }
+    } else if (state == ZONE_NORMAL) {
+        fireEvent(EVT_ZONE_RESTORED, zoneId, config->name);
+    }
+
+    xSemaphoreGiveRecursive((QueueHandle_t)_stateMutex);
 }
 
 bool AlarmController::pinEquals(const char* a, const char* b) {
@@ -85,7 +128,9 @@ void AlarmController::sirenOn(int8_t zoneId, const char* name) {
         _sirenMuted = false;
         _lastSirenUpdateMs = millis();
         _sirenStartMs = millis();
-        ioExpanderSetOutput(_sirenOutputChannel, true);
+        if (_io) {
+            _io->setOutput(_sirenOutputChannel, true);
+        }
         LOG_WARN(TAG, "Siren: ON (Zone %d: %s)", zoneId + 1, name);
         fireEvent(EVT_SIREN_ON, zoneId, details);
     }
@@ -94,7 +139,9 @@ void AlarmController::sirenOn(int8_t zoneId, const char* name) {
 void AlarmController::sirenOff() {
     if (_sirenActive) {
         _sirenActive = false;
-        ioExpanderSetOutput(_sirenOutputChannel, false);
+        if (_io) {
+            _io->setOutput(_sirenOutputChannel, false);
+        }
         LOG_INFO(TAG, "Siren: OFF");
         fireEvent(EVT_SIREN_OFF, -1, "Manual or Timeout");
     }
@@ -227,10 +274,12 @@ bool AlarmController::armHomeInternal() {
 
 bool AlarmController::muteSiren(const char* pin) {
     if (!validatePin(pin)) return false;
-    if (xSemaphoreTakeRecursive((QueueHandle_t)_stateMutex, portMAX_DELAY) == pdTRUE) {
+    if (xSemaphoreTakeRecursive((QueueHandle_t)_stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         if (_sirenActive) {
             _sirenMuted = true;
-            ioExpanderSetOutput(_sirenOutputChannel, false);
+            if (_io) {
+                _io->setOutput(_sirenOutputChannel, false);
+            }
             LOG_INFO(TAG, "Siren: MUTED (Manual)");
         }
         xSemaphoreGiveRecursive((QueueHandle_t)_stateMutex);
@@ -254,8 +303,8 @@ uint16_t AlarmController::getDelayRemaining() {
 }
 
 void AlarmController::broadcast(const char* message) {
-    if (_ctx && _ctx->notificationManager) {
-        _ctx->notificationManager->broadcast(message);
+    if (_notificationManager) {
+        _notificationManager->broadcast(message);
     }
 }
 

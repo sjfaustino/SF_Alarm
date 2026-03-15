@@ -64,6 +64,9 @@
 #define MQTT_SYNC_INTERVAL_MS       30000
 #define NET_WORKER_YIELD_MS         100
 #define I2C_POLL_INTERVAL_MS        20
+#define GSM_BAUD_RATE               115200
+#define DEFAULT_GSM_TX_PIN          26
+#define DEFAULT_GSM_RX_PIN          27
 
 // State recovery
 #define DEFAULT_REPORT_INTERVAL_MIN 0    // 0 = disabled
@@ -105,5 +108,14 @@
 #define FW_VERSION_MINOR    1
 #define FW_VERSION_PATCH    0
 #define FW_VERSION_STR      "0.1.0"
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+enum SmsProvider {
+    SMS_LUCI = 0,    // Cudy/LuCI Router Gateway (current)
+    SMS_GSM_A6 = 1   // AI-Thinker A6 GSM Module (future/planned)
+};
 
 #endif // SF_ALARM_CONFIG_H
